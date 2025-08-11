@@ -1,12 +1,8 @@
-store a lot of columnar data in a linear way
+- add Entry structur types
+- add Page structure types
+- init a page and add some entry to it
+- fetch a page
 
 
-what the fuck about rows, fuck the rows, 
+the page metadata would be aware of the row ranges of entries in it btw
 
-dont do plain idiotic key value stuff
-
-each column could  be a different file but FD shit
-
-can do in one file too but would be too slow and prediction woudl be hard, need to still store the metadata somewhere
-
-how to quickly figure out 'quickly get that columns in this row'
