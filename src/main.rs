@@ -1,7 +1,41 @@
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 
-fn do_shit_to_file(data: &[u8], fd: &mut File) -> io::Result<()> {
+struct Entry {
+    prefix_meta: String,
+    data: String,
+    suffix_meta: String,
+}
+
+impl Entry {
+    fn new() -> Self {
+        Self {
+            prefix_meta: "".to_string(),
+            data: "dummy".to_string(),
+            suffix_meta: "".to_string(),
+        }
+    }
+}
+
+struct Page {
+    page_metadata: String,
+    entries: Vec<Entry>,
+}
+
+impl Page {
+    fn new() -> Self {
+        Self {
+            page_metadata: "".to_string(),
+            entries: vec![],
+        }
+    }
+
+    fn add_entry() {
+        // hmm, what now
+    }
+}
+
+fn do_shit_to_file(data: &[u8], fd: &mut File) -> io::Result<String> {
     // append data to that file dumbly
     
     // seek to the bottom of the file
@@ -9,7 +43,7 @@ fn do_shit_to_file(data: &[u8], fd: &mut File) -> io::Result<()> {
     fd.write_all(data)?;
 
     // append data to it
-    Ok(())
+    Ok("UwU".to_string())
 
 }
 
@@ -19,7 +53,7 @@ fn main() -> io::Result<()> {
     let mut fd = File::options().read(true).write(true).open("./innocent_file.txt")?;
     let data = b"hii";
 
-    do_shit_to_file(data,&mut fd)?;
+    print!("{}", do_shit_to_file(data,&mut fd)?);
 
     Ok(())
 }
