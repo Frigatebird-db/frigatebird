@@ -1,0 +1,12 @@
+keep this in a separate file for now
+
+what structure to store the table metadata in:
+
+the columns:
+
+col0 -> (page_x -> page_y -> page_z...)
+...
+...
+...
+
+map<String,Vector<u64>>
