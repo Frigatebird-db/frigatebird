@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{self, Seek, SeekFrom, Write};
-
+mod entry_keeper;
 struct TableMetaStore {
     data: HashMap<String,Vec<u64>>
 }
@@ -20,25 +20,9 @@ impl TableMetaStore {
     }
 }
 
-struct Entry {
-    prefix_meta: String,
-    data: String,
-    suffix_meta: String,
-}
-
-impl Entry {
-    fn new() -> Self {
-        Self {
-            prefix_meta: "".to_string(),
-            data: "dummy".to_string(),
-            suffix_meta: "".to_string(),
-        }
-    }
-}
-
 struct Page {
     page_metadata: String,
-    entries: Vec<Entry>,
+    entries: Vec<entry_keeper::Entry>,
 }
 
 impl Page {
@@ -49,7 +33,7 @@ impl Page {
         }
     }
 
-    fn add_entry(&mut self, entry: Entry) {
+    fn add_entry(&mut self, entry: entry_keeper::Entry) {
         // what does it means to add an entry in a page
         self.entries.push(entry);
 
