@@ -61,6 +61,8 @@ impl EntryKeeper{
     // adds a new link to the chain
     fn add_link(&mut self, entry: Entry) {
         self.store.push_back(Link::new(entry));
+
+        // we need update the latest state of this stuff without blocking any reads for it there
     }
 
     /*
@@ -68,6 +70,8 @@ impl EntryKeeper{
     - there is another link right after it
     - when the time has passed so you can be certain with the fact that none of the upcoming queries would be considering it
     - the link isnt locked by any running query
+    
+    note that links are always sorted by created_at
     */
 
     // tries to remove the first link
