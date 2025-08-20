@@ -1,6 +1,9 @@
 Entry:
 
 {[prefix meta] -- [actual data] -- [suffix meta]}
+ps: seriously dont remember why we need suffix meta btw, 
+was it for reverse iteration ? its skipped in the implementation
+for now
 
 
 add something to a column ->

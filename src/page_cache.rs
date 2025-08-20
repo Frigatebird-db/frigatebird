@@ -16,6 +16,8 @@ Set((used_time,id),()...)
 
 create when adding, remove when removing
 */
+const LRUsize:u8 = 10;
+
 struct PageCacheEntry {
     page: Page,
     used_time: u64
@@ -44,6 +46,10 @@ impl PageCache {
         let entry = PageCacheEntry{page: page,used_time: current_epoch_millis()};
         self.store[id].set(entry);
         self.lru_queue.insert((entry.used_time,id));
+        if self.lru_queue.len > LRUsize {
+            // todo: evict from store
+            // todo: remove from lru_queue
+        }
     }
     
 }

@@ -3,6 +3,8 @@ use std::fs::File;
 use std::hash::Hash;
 use std::io::{self, Seek, SeekFrom, Write};
 mod entry_keeper;
+mod page_io;
+
 struct TableMetaStore {
     data: HashMap<String,Vec<u64>>
 }
