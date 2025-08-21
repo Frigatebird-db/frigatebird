@@ -4,23 +4,7 @@ use std::hash::Hash;
 use std::io::{self, Seek, SeekFrom, Write};
 mod entry_keeper;
 mod page_io;
-
-struct TableMetaStore {
-    data: HashMap<String,Vec<u64>>
-}
-
-impl TableMetaStore {
-    fn new() -> Self {
-        Self {
-            data: HashMap::new()
-        }
-    }
-
-    fn get_current_page(&self, column: &str) -> Option<u64> {
-        self.data.get(column)?.last().copied()
-
-    }
-}
+mod table_metadata_store;
 
 struct Page {
     page_metadata: String,
@@ -52,19 +36,6 @@ fn make_new_page_at_EOF() -> io::Result<(u64)>{
     Ok((69))
 }
 
-fn append_to_column(tableMetaStore: TableMetaStore, column: &str, data: &str) -> io::Result<()> {
-    // find out the current page from table meta store
-    let pageOffset = tableMetaStore.get_current_page(column);
-    
-    // create entry
-
-
-    // check if that page has enough space to accomodate the entry
-
-    // if not, create a new page
-
-    Ok(())
-}
 
 fn do_shit_to_file(data: &[u8], fd: &mut File) -> io::Result<String> {
     // append data to that file dumbly
