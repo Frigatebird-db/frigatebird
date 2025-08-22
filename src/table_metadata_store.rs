@@ -16,7 +16,12 @@ okay, so what should the metadata store structure look like, it needs to:
 */
 use std::collections::HashMap;
 
+use crate::page::Page;
+use crate::context::Context;
+use crate::page_cache::CombinedCache;
+
 struct PageMetadata {
+    id: String, // this is page id btw
     locked_by: u8,
     commit_time: u64, // when it came
     disk_path: String,
@@ -57,18 +62,23 @@ impl TableMetaStore {
     }
 }
 
-fn append_to_column(tableMetaStore: TableMetaStore, column: &str, data: &str) -> Option<()>{
+// how the hell do I get the PageCache context here lmao
+fn append_to_column(context: Context, tableMetaStore: TableMetaStore, column: &str, data: &str) -> Option<()>{
     // find out the current page from table meta store
-    let pageOffset = tableMetaStore.get_latest_page_meta(column);
-    
-    // create entry
+    let latest_page_meta = tableMetaStore.get_latest_page_meta(column).unwrap().page_metas.last().unwrap();
 
-
-    // check if that page has enough space to accomodate the entry
-
-    // if not, create a new page
+    // check 
+    if context.page_cache.uncompressed_pages.has(&latest_page_meta.id) {
+        // todo
+    } else if context.page_cache.compressed_pages.has(&latest_page_meta.id){
+        // todo
+    } else {
+        // do IO shit
+    }
 
     if true {
+        let new_page = Page::new();
+
         // creating a new page
         // add an empty entry
     }
