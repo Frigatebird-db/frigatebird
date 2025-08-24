@@ -10,9 +10,7 @@ so on disk, our Entries are just compressed pages
 an entry is nothing but
 */
 
-// struct IOHandler {
-
-// }
+pub struct IOHandler {}
 
 const PREFIX_META_SIZE: usize = 4096;
 
@@ -40,6 +38,10 @@ const PREFIX_META_SIZE: usize = 4096;
 //         true
 //     }
 // }
+
+/*
+this thing is responsible for flushing and fetching pages from disk
+*/
 
 #[derive(Deserialize)]
 #[derive(Serialize)]
