@@ -37,18 +37,18 @@ use crate::page::Page;
 use crate::context::Context;
 use crate::page_cache::CombinedCache;
 
-struct PageMetadata {
-    id: String, // this is page id btw
-    locked_by: u8,
-    commit_time: u64, // when it came
-    disk_path: String,
-    offset: u64, // where to find the compressed page in that path
+pub struct PageMetadata {
+    pub id: String, // this is page id btw
+    pub locked_by: u8,
+    pub commit_time: u64, // when it came
+    pub disk_path: String,
+    pub offset: u64, // where to find the compressed page in that path
 }
 
-struct TableMetaStoreEntry {
-    start_idx: u64,
-    end_idx: u64,
-    page_metas: Vec<PageMetadata> // todo: change this shit to just Vec<String> as we are storing page metadata separately in meta store now
+pub struct TableMetaStoreEntry {
+    pub start_idx: u64,
+    pub end_idx: u64,
+    pub page_metas: Vec<String> // todo: change this shit to just Vec<String> as we are storing page metadata separately in meta store now
 }
 
 pub struct TableMetaStore {
@@ -81,46 +81,48 @@ impl TableMetaStore {
 
 
     pub fn get_page_path_and_offset(&self, id: &str) -> Option<(String,u64)>{
-        let entry = self.page_data.get(id).unwrap();
+        let entry: &PageMetadata = self.page_data.get(id).unwrap();
         let path = &entry.disk_path;
         let offset = &entry.offset;
         
         Some((path.to_string(),*offset))
     }
 
-    fn get_latest_page_meta(&self, column: &str) -> Option<&TableMetaStoreEntry> {
-        self.col_data.get(column)?.last()
+    pub fn get_latest_page_meta(&self, column: &str) -> Option<&PageMetadata> {
+        let whatever = self.col_data.get(column)?.last().unwrap();
+        let bruh = whatever.page_metas.last().unwrap();
+        self.page_data.get(bruh)
     }
 }
 
-// how the hell do I get the PageCache context here lmao
-fn append_to_column(context: Context, tableMetaStore: TableMetaStore, column: &str, data: &str) -> Option<()>{
-    // find out the current page from table meta store
-    let latest_page_meta = tableMetaStore.get_latest_page_meta(column).unwrap().page_metas.last().unwrap();
+// // how the hell do I get the PageCache context here lmao
+// fn append_to_column(context: Context, tableMetaStore: TableMetaStore, column: &str, data: &str) -> Option<()>{
+//     // find out the current page from table meta store
+//     let latest_page_meta = tableMetaStore.get_latest_page_meta(column).unwrap().page_metas.last().unwrap();
 
 
-    // most probably need to add some abstraction for below stuff
+//     // most probably need to add some abstraction for below stuff
 
-    if context.cache.uncompressed_pages.has(&latest_page_meta.id) {
-        // todo
-        // update
-    } else if context.cache.compressed_pages.has(&latest_page_meta.id){
-        // todo
-        // decompress page
-        // pull into uncompressed pages
-        // update
-    } else {
-        // do IO shit
-        // pull into compressed pages
-        // pull into decompressed pages
-    }
+//     if context.cache.uncompressed_pages.has(&latest_page_meta) {
+//         // todo
+//         // update
+//     } else if context.cache.compressed_pages.has(&latest_page_meta){
+//         // todo
+//         // decompress page
+//         // pull into uncompressed pages
+//         // update
+//     } else {
+//         // do IO shit
+//         // pull into compressed pages
+//         // pull into decompressed pages
+//     }
 
-    if true {
-        let new_page = Page::new();
+//     if true {
+//         let new_page = Page::new();
 
-        // creating a new page
-        // add an empty entry
-    }
+//         // creating a new page
+//         // add an empty entry
+//     }
 
-    None
-}
+//     None
+// }
