@@ -13,6 +13,23 @@ okay, so what should the metadata store structure look like, it needs to:
     - keep track of where the compressed Pages are for a particular column
     - should support keeping track of multiple version of them, if there are a lot of versions of a certain page, we must prioritize that
     after compaction - atleast the latest versions of pages are physically kept close sequentially
+
+
+currently we store stuff as:
+
+# Table metadata store
+
+M[col_name] -> [(),()...]
+                 |
+                 ~->{start_row_idx,end_row_idx,PageMetadata: [(),()...]}
+                                                              | // we store multiple versions of Pages for MVCC stuff
+                                                              ~-> {id,locked_by_cnt,commit_time,disk_path,offset} 
+
+we should also do:
+M[page_id] -> I mean, we should just do this shit like: {id,locked_by_cnt,commit_time,disk_path,offset}
+
+and just keep page_id like a foreign key in M[col_name] shit instead of keeping it all there, would also be faster to just get it in just O(x)
+once than to go through a lot of O(x) + O(x).... nested stuff every single time
 */
 use std::collections::HashMap;
 
@@ -31,7 +48,13 @@ struct PageMetadata {
 struct TableMetaStoreEntry {
     start_idx: u64,
     end_idx: u64,
-    page_metas: Vec<PageMetadata>
+    page_metas: Vec<PageMetadata> // todo: change this shit to just Vec<String> as we are storing page metadata separately in meta store now
+}
+
+pub struct TableMetaStore {
+    // M[col_name] -> [(),()..]
+    col_data: HashMap<String,Vec<TableMetaStoreEntry>>,
+    page_data: HashMap<String,PageMetadata>
 }
 
 impl TableMetaStoreEntry {
@@ -46,19 +69,27 @@ impl TableMetaStoreEntry {
         // TODO
     }
 }
-struct TableMetaStore {
-    data: HashMap<String,Vec<TableMetaStoreEntry>>
-}
+
 
 impl TableMetaStore {
     fn new() -> Self {
         Self {
-            data: HashMap::new()
+            col_data: HashMap::new(),
+            page_data: HashMap::new()
         }
     }
 
+
+    pub fn get_page_path_and_offset(&self, id: &str) -> Option<(String,u64)>{
+        let entry = self.page_data.get(id).unwrap();
+        let path = &entry.disk_path;
+        let offset = &entry.offset;
+        
+        Some((path.to_string(),*offset))
+    }
+
     fn get_latest_page_meta(&self, column: &str) -> Option<&TableMetaStoreEntry> {
-        self.data.get(column)?.last()
+        self.col_data.get(column)?.last()
     }
 }
 
@@ -67,13 +98,21 @@ fn append_to_column(context: Context, tableMetaStore: TableMetaStore, column: &s
     // find out the current page from table meta store
     let latest_page_meta = tableMetaStore.get_latest_page_meta(column).unwrap().page_metas.last().unwrap();
 
-    // check 
-    if context.page_cache.uncompressed_pages.has(&latest_page_meta.id) {
+
+    // most probably need to add some abstraction for below stuff
+
+    if context.cache.uncompressed_pages.has(&latest_page_meta.id) {
         // todo
-    } else if context.page_cache.compressed_pages.has(&latest_page_meta.id){
+        // update
+    } else if context.cache.compressed_pages.has(&latest_page_meta.id){
         // todo
+        // decompress page
+        // pull into uncompressed pages
+        // update
     } else {
         // do IO shit
+        // pull into compressed pages
+        // pull into decompressed pages
     }
 
     if true {

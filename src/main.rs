@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{self, Seek, SeekFrom, Write};
-mod entry_keeper;
+mod entry;
 mod page_io;
-mod table_metadata_store;
+mod metadata_store;
 mod ops_handler;
 mod page_cache;
 mod page;
 mod context;
+mod compressor;
 
 // makes a new page and returns its offset
 fn make_new_page_at_EOF() -> io::Result<(u64)>{

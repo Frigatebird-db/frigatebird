@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use crate::page;
-use crate::entry_keeper::current_epoch_millis;
+use crate::entry::current_epoch_millis;
 // user space page cache
 
 // a dequeue of Pages(which are nothing but a set of entries)
@@ -20,17 +20,17 @@ create when adding, remove when removing
 */
 const LRUsize:usize = 10;
 
-struct PageCacheEntry<T> {
-    page: T,
-    used_time: u64
+pub struct PageCacheEntry<T> {
+    pub page: T,
+    pub used_time: u64
 }
 
 pub struct PageCacheEntryUncompressed {
-    page: page::Page,
+    pub page: page::Page,
 }
 
 pub struct PageCacheEntryCompressed {
-    page: Vec<u8>, // a bunch of raw bytes that we read from the disk
+    pub page: Vec<u8>, // a bunch of raw bytes that we read from the disk
 }
 
 

@@ -3,6 +3,7 @@ It only matters for the start of the query/txn to the end of it
 */
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
+use serde::{Serialize, Deserialize};
 
 pub fn current_epoch_millis() -> u64 {
    SystemTime::now()
@@ -10,6 +11,8 @@ pub fn current_epoch_millis() -> u64 {
        .expect("Time went backwards")
        .as_millis() as u64
 }
+
+#[derive(Serialize, Deserialize)]
 pub struct Entry {
     prefix_meta: String,
     data: String,

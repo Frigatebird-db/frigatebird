@@ -1,8 +1,10 @@
-use crate::entry_keeper;
+use crate::entry;
+use serde::{Serialize, Deserialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Page {
     page_metadata: String,
-    entries: Vec<entry_keeper::Entry>,
+    entries: Vec<entry::Entry>,
 }
 
 impl Page {
@@ -13,7 +15,7 @@ impl Page {
         }
     }
 
-    pub fn add_entry(&mut self, entry: entry_keeper::Entry) {
+    pub fn add_entry(&mut self, entry: entry::Entry) {
         // what does it means to add an entry in a page
         self.entries.push(entry);
 
