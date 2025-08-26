@@ -20,10 +20,10 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn new() -> Self {
+    pub fn new(data: &str) -> Self {
         Entry {
             prefix_meta: "".to_string(),
-            data: "dummy".to_string(),
+            data: data.to_string(),
             suffix_meta: "".to_string(),
         }
     }
