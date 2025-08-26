@@ -73,9 +73,12 @@ impl<T> PageCache<T> {
     }
 
     // so this returns a reference to the entry
-    pub fn get(&self, id: &str) -> Option<&PageCacheEntry<T>> {
+    pub fn get(&mut self, id: &str) -> Option<&mut PageCacheEntry<T>> {
         // this is more complex btw
-        self.store.get(id)
+
+        // we need to send a mutable reference here btw
+
+        self.store.get_mut(id)
     }
 
     pub fn evict(&mut self, id: &str) {
