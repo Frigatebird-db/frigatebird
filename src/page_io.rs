@@ -7,7 +7,10 @@ use serde::Serialize;
 /*
 so on disk, our Entries are just compressed pages
 
-an entry is nothing but
+
+we use atmax 1mb compressed pages
+
+we never get kernel optmizations involved for IO, we have our own user space page cache
 */
 
 pub struct IOHandler {}

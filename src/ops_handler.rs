@@ -3,6 +3,8 @@ use crate::metadata_store::TableMetaStore;
 use crate::page_cache::CombinedCache;
 use crate::compressor::Compressor;
 
+
+// TODO: we also have to update the (l,r) ranges whenever we upsert something into it
 fn upsert_data_into_column(entry: Entry, compressor: Compressor, meta_store: TableMetaStore, mut cache: CombinedCache, col: &str,data: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let latest_page_meta = meta_store.get_latest_page_meta(col).unwrap();
     let page_id = latest_page_meta.id.clone();
