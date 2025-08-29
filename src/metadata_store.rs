@@ -32,15 +32,15 @@ and just keep page_id like a foreign key in M[col_name] shit instead of keeping 
 once than to go through a lot of O(x) + O(x).... nested stuff every single time
 */
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::page::Page;
 use crate::context::Context;
 use crate::page_cache::CombinedCache;
 
+
 pub struct PageMetadata {
     pub id: String, // this is page id btw
-    pub locked_by: u8,
-    pub commit_time: u64, // when it came
     pub disk_path: String,
     pub offset: u64, // where to find the compressed page in that path
 }
@@ -51,11 +51,43 @@ pub struct TableMetaStoreEntry {
     pub page_metas: Vec<String> // todo: change this shit to just Vec<String> as we are storing page metadata separately in meta store now
 }
 
+pub struct MVCCKeeperEntry {
+    pub id: String,
+    pub locked_by: u8, // this needs to be atomic counter btw, todo I guess
+    pub commit_time: u64,
+    pub entry: Arc<PageMetadata>
+}
+
 pub struct TableMetaStore {
     // M[col_name] -> [(),()..]
-    col_data: HashMap<String,Vec<TableMetaStoreEntry>>,
-    page_data: HashMap<String,PageMetadata>
+    col_data: HashMap<String,Vec<String>>, // this just keeps the page_id
+    page_data: HashMap<String,Arc<PageMetadata>> // this keeps the actual page metadata, and owns the ARCs
 }
+
+impl PageMetadata {
+    // also returns an id maybe ??
+    fn new(disk_path: String,offset: u64) -> Self {
+        Self {
+            id: "1111111".to_string(), // todo: use a real rand id gen here good ser
+            disk_path: disk_path,
+            offset: offset,
+        }
+    }
+}
+
+impl Drop for PageMetadata {
+    fn drop(&mut self) {
+        // so we do a bunch of stuff here
+
+        let me = self;
+
+        // so if a page meta is being dropped, we don't want to:
+        // - have it on disk
+        // - have it in any cache(both compressed and uncompressed)
+        // so yeah, todo I guess AHAHAHHAH
+    }
+}
+
 
 impl TableMetaStoreEntry {
     fn new(start_idx: u64, end_idx: u64) -> Self {
@@ -88,10 +120,16 @@ impl TableMetaStore {
         Some((path.to_string(),*offset))
     }
 
-    pub fn get_latest_page_meta(&self, column: &str) -> Option<&PageMetadata> {
+    pub fn get_latest_page_meta(&self, column: &str) -> Option<&Arc<PageMetadata>> {
         let whatever = self.col_data.get(column)?.last().unwrap();
-        let bruh = whatever.page_metas.last().unwrap();
-        self.page_data.get(bruh)
+        self.page_data.get(whatever)
+    }
+
+    fn add_new_page_meta(&mut self,disk_path: String, offset: u64) {
+        // first, we need to get the actual meta object
+        let meta_object = PageMetadata::new(disk_path,offset);
+        self.page_data.insert((meta_object.id).clone(),Arc::new(meta_object));
+        // now meta object is stored in clouds meta store AHAHAH, no ownership bullos from here, will be freed whenever it gets freed
     }
 }
 
