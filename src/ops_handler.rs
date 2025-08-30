@@ -99,7 +99,21 @@ fn range_scan_column_entry(col: String, l_row: u64,r_row: u64) {
     so.. just figure out how to get those (l,r) bounds in one shot and call it a day
 
     also note that you cant just lock stuff as that would involve "waiting" into the game which we dont want
+
+
+    okay, so for now we just take a read lock and get an immutable snapshot of the data, can we do that ??
+
+    umm... just get a read lock, run a fast binary search, get the index bounds of stuff you need and just grab the latest page metas of them, that's fucking it
+
+    I mean, we can kinda just.... clone after taking a read lock and never have to do a call after that ever again for this request
+
+    okay, so we kinda need a very very fast way to get the latest page metas for a contigious group of (l,r) bounds
+
+    okay, whateer, lets keep it simple, make all that internal stuff be done my metadata store, and it would return us with just relevant page_ids
+
+    and after that we would be done with it and just deal with page cache store to actually get the stuffs
     */
+    
 
 }
 
