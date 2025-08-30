@@ -4,7 +4,7 @@ use crate::page_cache::CombinedCache;
 use crate::compressor::Compressor;
 
 
-// TODO: we also have to update the (l,r) ranges whenever we upsert something into it
+// TODO: we also have to update the (l,r) ranges whenever we upsert something into it and there certainly has to be a better way to do it along with updating metadata in one shot
 fn upsert_data_into_column(entry: Entry, compressor: Compressor, meta_store: TableMetaStore, mut cache: CombinedCache, col: &str,data: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let latest_page_meta = meta_store.get_latest_page_meta(col).unwrap();
     let page_id = latest_page_meta.id.clone();
@@ -70,6 +70,36 @@ fn update_column_entry(entry: Entry, compressor: Compressor, meta_store: TableMe
 
     Ok((ok))
 
+
+}
+
+fn read_single_column_entry(col: String, row: u64) {
+
+}
+
+fn range_scan_column_entry(col: String, l_row: u64,r_row: u64) {
+    /*
+    quickly find the internal (l,r) groupings and the latest pages needed for it and put an lock on them so they dont perish
+    
+
+    query them parallely fast 
+
+    holy fuck, we need some sort of lock thingy per column lol
+
+    yep, something... like, the thing is , our (l,r) keeper thingy isnt really MVCCing and I dont really want it to be that way
+
+    once we know that "nothing will change in between me figuring out the bounds", we can figure things out with one binary search
+
+    soo... figure out the bounds, and get their latest page IDs 
+
+    okay, so thinking about it, our Pages are kinda versioned nicely because yesterday's nubskr was kind to us
+
+    so we don't need to worry about that... 
+
+    so.. just figure out how to get those (l,r) bounds in one shot and call it a day
+
+    also note that you cant just lock stuff as that would involve "waiting" into the game which we dont want
+    */
 
 }
 
