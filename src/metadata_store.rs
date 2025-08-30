@@ -59,6 +59,10 @@ pub struct TableMetaStoreEntry {
     pub page_metas: Vec<MVCCKeeperEntry>
 }
 
+pub struct RangeScanMetaResponse{
+    page_metas: Vec<PageMetadata>
+}
+
 pub struct TableMetaStore {
     /* 
 
@@ -68,8 +72,11 @@ pub struct TableMetaStore {
                                         | 
                         (l0,r0) -> [Page_id_at_x < Page_id_at_y < Page_id_at_z....],
                         (l1,r1) -> ...
-                        ...
-                      ] 
+                        (l2,r2)
+                        (l3,r3)
+                        ..
+                        ..
+                    ] 
     
     */
     col_data: HashMap<String,Arc<RwLock<Vec<TableMetaStoreEntry>>>>, // this just keeps the page_id
@@ -181,6 +188,10 @@ impl TableMetaStore {
             last_entry.end_idx += 1;
             last_entry.page_metas.push(MVCCKeeperEntry::new(page_id));
         }
+    }
+
+    fn get_ranged_pages_meta(col: String, l: u8,r: u8) {
+        
     }
     
 }
