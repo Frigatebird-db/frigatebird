@@ -32,35 +32,47 @@ and just keep page_id like a foreign key in M[col_name] shit instead of keeping 
 once than to go through a lot of O(x) + O(x).... nested stuff every single time
 */
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc,RwLock};
 
-use crate::page::Page;
+use crate::entry::{current_epoch_millis, Entry};
+use crate::page::{self, Page};
 use crate::context::Context;
 use crate::page_cache::CombinedCache;
 
 
+// this will be immutable throughout its lifetime btw
 pub struct PageMetadata {
     pub id: String, // this is page id btw
     pub disk_path: String,
     pub offset: u64, // where to find the compressed page in that path
 }
 
+pub struct MVCCKeeperEntry {
+    pub page_id: String,
+    pub locked_by: u8, // this needs to be atomic counter btw, todo I guess
+    pub commit_time: u64,
+}
+
 pub struct TableMetaStoreEntry {
     pub start_idx: u64,
     pub end_idx: u64,
-    pub page_metas: Vec<String> // todo: change this shit to just Vec<String> as we are storing page metadata separately in meta store now
-}
-
-pub struct MVCCKeeperEntry {
-    pub id: String,
-    pub locked_by: u8, // this needs to be atomic counter btw, todo I guess
-    pub commit_time: u64,
-    pub entry: Arc<PageMetadata>
+    pub page_metas: Vec<MVCCKeeperEntry>
 }
 
 pub struct TableMetaStore {
-    // M[col_name] -> [(),()..]
-    col_data: HashMap<String,Vec<String>>, // this just keeps the page_id
+    /* 
+
+    M[page_id]  ->                      |~~>(disk_path,offset)
+                                        |
+    M[col_name] -> [                    |
+                                        | 
+                        (l0,r0) -> [Page_id_at_x < Page_id_at_y < Page_id_at_z....],
+                        (l1,r1) -> ...
+                        ...
+                      ] 
+    
+    */
+    col_data: HashMap<String,Arc<RwLock<Vec<TableMetaStoreEntry>>>>, // this just keeps the page_id
     page_data: HashMap<String,Arc<PageMetadata>> // this keeps the actual page metadata, and owns the ARCs
 }
 
@@ -71,6 +83,16 @@ impl PageMetadata {
             id: "1111111".to_string(), // todo: use a real rand id gen here good ser
             disk_path: disk_path,
             offset: offset,
+        }
+    }
+}
+
+impl MVCCKeeperEntry {
+    fn new(id: String) -> Self {
+        Self {
+            page_id: id,
+            commit_time: current_epoch_millis(),
+            locked_by: 0,
         }
     }
 }
@@ -111,7 +133,6 @@ impl TableMetaStore {
         }
     }
 
-
     pub fn get_page_path_and_offset(&self, id: &str) -> Option<(String,u64)>{
         let entry: &PageMetadata = self.page_data.get(id).unwrap();
         let path = &entry.disk_path;
@@ -121,16 +142,47 @@ impl TableMetaStore {
     }
 
     pub fn get_latest_page_meta(&self, column: &str) -> Option<&Arc<PageMetadata>> {
-        let whatever = self.col_data.get(column)?.last().unwrap();
-        self.page_data.get(whatever)
+        self.col_data
+            .get(column)?
+            .read()
+            .ok()?
+            .last()?
+            .page_metas
+            .last()
+            .and_then(|mvcc_entry| self.page_data.get(&mvcc_entry.page_id))
     }
 
-    fn add_new_page_meta(&mut self,disk_path: String, offset: u64) {
-        // first, we need to get the actual meta object
+    // returns the new generated page id
+    fn add_new_page_meta(&mut self,disk_path: String, offset: u64) -> String {
         let meta_object = PageMetadata::new(disk_path,offset);
-        self.page_data.insert((meta_object.id).clone(),Arc::new(meta_object));
-        // now meta object is stored in clouds meta store AHAHAH, no ownership bullos from here, will be freed whenever it gets freed
+        let id = meta_object.id.clone();
+        self.page_data.insert(id.clone(),Arc::new(meta_object));
+        // now meta object is stored in clouds meta store AHAHAH, no ownership bullos from here, will be freed whenever it gets freed by the laws of physics and inevitability of flowing time
+        id
     }
+
+    fn add_new_page_to_col(&mut self, col: String, disk_path: String, offset: u64) {
+        let page_id = self.add_new_page_meta(disk_path, offset);
+        
+        if !self.col_data.contains_key(&col) {
+            self.col_data.insert(col.clone(), Arc::new(RwLock::new(Vec::new())));
+        }
+        
+        let mut col_guard = self.col_data.get(&col).unwrap().write().unwrap();
+        
+        if col_guard.is_empty() {
+            col_guard.push(TableMetaStoreEntry {
+                start_idx: 0,
+                end_idx: 1,
+                page_metas: vec![MVCCKeeperEntry::new(page_id)],
+            });
+        } else {
+            let last_entry = col_guard.last_mut().unwrap();
+            last_entry.end_idx += 1;
+            last_entry.page_metas.push(MVCCKeeperEntry::new(page_id));
+        }
+    }
+    
 }
 
 // // how the hell do I get the PageCache context here lmao

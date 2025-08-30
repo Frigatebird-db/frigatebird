@@ -15,7 +15,7 @@ we never get kernel optmizations involved for IO, we have our own user space pag
 
 pub struct IOHandler {}
 
-const PREFIX_META_SIZE: usize = 4096;
+const PREFIX_META_SIZE: usize = 2048;
 
 // impl IOHandler {
 //     fn new() -> Self {
@@ -60,6 +60,8 @@ fn deserialize_metadata(buffer: Vec<u8>) -> Metadata {
 
 pub fn read_from_path(path: String, offset: u64) -> Vec<u8> {
     // Read data from the specified path and offset and returns raw bytes
+
+    // we are opening new FDs here btw, try to keep an FD pool and stuff...
     let mut fd = File::open(path).unwrap();
     fd.seek(SeekFrom::Start(offset)).unwrap();
 
