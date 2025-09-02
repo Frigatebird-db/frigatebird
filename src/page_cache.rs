@@ -2,6 +2,10 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use crate::page;
 use crate::entry::current_epoch_millis;
+use crate::page::Page;
+use std::sync::{Arc,RwLock};
+
+
 // user space page cache
 
 // a dequeue of Pages(which are nothing but a set of entries)
@@ -33,6 +37,22 @@ pub struct PageCacheEntryCompressed {
     pub page: Vec<u8>, // a bunch of raw bytes that we read from the disk
 }
 
+
+impl Drop for PageCacheEntryUncompressed {
+    fn drop(&mut self) {
+        // okay, so we need to compress it and insert into Compressed page cache ? 
+
+        // how ? ownership and stuff ? 
+
+        // how to get Compressed page cache context over here ??
+    }
+}
+
+impl Drop for PageCacheEntryCompressed {
+    fn drop(&mut self) {
+        // when this goes out of scope, we just flush it to disk with direct IO
+    }
+}
 
 pub struct PageCache<T>{
     pub store: HashMap<String,PageCacheEntry<T>>,
@@ -89,13 +109,25 @@ impl<T> PageCache<T> {
 
 }
 
-pub struct CombinedCache {
-    pub compressed_pages: PageCache<PageCacheEntryCompressed>,
-    pub uncompressed_pages: PageCache<PageCacheEntryUncompressed>,
+pub struct PageCacheWrapper<T> {
+    pub page_cache: Arc<RwLock<PageCache<T>>>,
 }
 
-impl CombinedCache {
+impl<T> PageCacheWrapper<T> {
     pub fn new() -> Self {
-        Self {compressed_pages: PageCache::new() , uncompressed_pages: PageCache::new()}
+        Self { page_cache: Arc::new(RwLock::new(PageCache::new())) }
     }
 }
+
+// pub struct CombinedCache {
+//     pub compressed_pages: PageCache<PageCacheEntryCompressed>,
+//     pub uncompressed_pages: PageCache<PageCacheEntryUncompressed>,
+// }
+
+// // should I remove combined one ?? would make a hell lot of sense to have separate locks for both caches tbh
+
+// impl CombinedCache {
+//     pub fn new() -> Self {
+//         Self {compressed_pages: PageCache::new() , uncompressed_pages: PageCache::new()}
+//     }
+// }
