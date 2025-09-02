@@ -1,9 +1,9 @@
-use crate::{page_cache::CombinedCache, page_io::{read_from_path,write_to_path}};
-use crate::metadata_store;
+use crate::page_io::{read_from_path,write_to_path};
+use crate::metadata_store::TableMetaStoreWrapper;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use bincode;
 use crate::page::Page;
-use crate::page_cache::{PageCacheEntryUncompressed,PageCacheEntryCompressed};
+use crate::page_cache::{PageCacheEntryUncompressed,PageCacheEntryCompressed, PageCacheWrapper};
 
 /*
 reads and writes stuff via page_io
@@ -18,32 +18,36 @@ impl Compressor {
 
     // this compresses some page from cache and flushes it btw
     // jsyk there are multiple race conditions with this shit btw
-    pub fn compress(&self, tablemeta: metadata_store::TableMetaStore,mut cache: CombinedCache, id: &str) -> Option<bool>{
+    pub fn compress(&self, tablemeta: &TableMetaStoreWrapper, uncompressed_cache: &PageCacheWrapper<PageCacheEntryUncompressed>, id: &str) -> Option<bool>{
         // reads something from un-compressed page cache , compresses and write to disk 
         // also invalidates the compressed page cache
-        let page = &cache.uncompressed_pages.get(id).unwrap().page.page;
+        let mut uc_guard = uncompressed_cache.page_cache.write().unwrap();
+        let page = &uc_guard.get(id).unwrap().page.page;
         let raw = bincode::serialize(page).expect("serialize Page failed");
         let compressed = compress_prepend_size(&raw);
 
-        let (path,offset) = tablemeta.get_page_path_and_offset(id).unwrap();
+        let tm_guard = tablemeta.table_meta_store.read().unwrap();
+        let (path,offset) = tm_guard.get_page_path_and_offset(id).unwrap();
         let _ = write_to_path(path, offset, compressed);
         Some(true)
     }
 
-    pub fn decompress(&self, tablemeta: &metadata_store::TableMetaStore ,mut cache: CombinedCache,id: &str) -> CombinedCache{
-        let (path,offset) = tablemeta.get_page_path_and_offset(id).unwrap();
+    pub fn decompress(&self, tablemeta: &TableMetaStoreWrapper, compressed_cache: &PageCacheWrapper<PageCacheEntryCompressed>, id: &str) {
+        let tm_guard = tablemeta.table_meta_store.read().unwrap();
+        let (path,offset) = tm_guard.get_page_path_and_offset(id).unwrap();
         let compressed_data = read_from_path(path, offset);
-        let decompressed_data = decompress_size_prepended(&compressed_data).expect("decompress failed");
-        cache.compressed_pages.add(id,PageCacheEntryCompressed {page: decompressed_data});
-        cache
+        let mut cc_guard = compressed_cache.page_cache.write().unwrap();
+        cc_guard.add(id,PageCacheEntryCompressed {page: compressed_data});
     }
 
-    pub fn decompress_from_cache(&self, tablemeta: &metadata_store::TableMetaStore ,mut cache: CombinedCache,id: &str) -> CombinedCache{
-        let compressed_data = &cache.compressed_pages.get(id).unwrap().page.page;
+    pub fn decompress_from_cache(&self, _tablemeta: &TableMetaStoreWrapper, compressed_cache: &PageCacheWrapper<PageCacheEntryCompressed>, uncompressed_cache: &PageCacheWrapper<PageCacheEntryUncompressed>, id: &str) {
+        let mut cc_guard = compressed_cache.page_cache.write().unwrap();
+        let compressed_data = &cc_guard.get(id).unwrap().page.page;
         let decompressed_data_raw = decompress_size_prepended(compressed_data).expect("decompress failed");
         let decompressed_data: Page = bincode::deserialize(&decompressed_data_raw).expect("deserialize failed");
-        cache.uncompressed_pages.add(id, PageCacheEntryUncompressed {page: decompressed_data});
-        cache
+        drop(cc_guard);
+        let mut uc_guard = uncompressed_cache.page_cache.write().unwrap();
+        uc_guard.add(id, PageCacheEntryUncompressed {page: decompressed_data});
     }
 
     

@@ -36,8 +36,6 @@ use std::sync::{Arc,RwLock};
 
 use crate::entry::{current_epoch_millis, Entry};
 use crate::page::{self, Page};
-use crate::context::Context;
-use crate::page_cache::CombinedCache;
 
 
 // this will be immutable throughout its lifetime btw
@@ -63,24 +61,36 @@ pub struct RangeScanMetaResponse{
     page_metas: Vec<PageMetadata>
 }
 
-pub struct TableMetaStore {
-    /* 
+/* 
 
-    M[page_id]  ->                      |~~>(disk_path,offset)
-                                        |
-    M[col_name] -> [                    |
-                                        | 
-                        (l0,r0) -> [Page_id_at_x < Page_id_at_y < Page_id_at_z....],
-                        (l1,r1) -> ...
-                        (l2,r2)
-                        (l3,r3)
-                        ..
-                        ..
-                    ] 
-    
-    */
-    col_data: HashMap<String,Arc<RwLock<Vec<TableMetaStoreEntry>>>>, // this just keeps the page_id
+M[page_id]  ->      [  () , ()... , |~~>(disk_path,offset) , () , ()...  ]
+                                    |
+M[col_name] -> [                    |
+                                    | 
+                    (l0,r0) -> [Page_id_at_x < Page_id_at_y < Page_id_at_z....],
+                    (l1,r1) -> ...
+                    (l2,r2)
+                    (l3,r3)
+                    ...
+                    ...
+                ] 
+
+*/
+pub struct TableMetaStore {
+    col_data: HashMap<String,Arc<RwLock<Vec<TableMetaStoreEntry>>>>, // this just keeps absolute minimal page meta references
     page_data: HashMap<String,Arc<PageMetadata>> // this keeps the actual page metadata, and owns the ARCs
+}
+
+pub struct TableMetaStoreWrapper {
+    pub table_meta_store: Arc<RwLock<TableMetaStore>>,
+}
+
+impl TableMetaStoreWrapper {
+    pub fn new() -> Self {
+        Self {
+            table_meta_store: Arc::new(RwLock::new(TableMetaStore::new())),
+        }
+    }
 }
 
 impl PageMetadata {

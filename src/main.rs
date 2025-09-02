@@ -2,11 +2,14 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{self, Seek, SeekFrom, Write};
+use crate::metadata_store::TableMetaStoreWrapper;
+use crate::page_cache::{PageCacheEntryCompressed,PageCacheEntryUncompressed};
 mod entry;
 mod page_io;
 mod metadata_store;
 mod ops_handler;
 mod page_cache;
+use page_cache::PageCacheWrapper;
 mod page;
 mod context;
 mod compressor;
@@ -33,13 +36,11 @@ fn do_shit_to_file(data: &[u8], fd: &mut File) -> io::Result<String> {
 }
 
 fn main() -> io::Result<()> {
-    println!("Hello, world!");
+    let compressed_page_cache = PageCacheWrapper::<PageCacheEntryCompressed>::new();
+    let uncompressed_page_cache = PageCacheWrapper::<PageCacheEntryUncompressed>::new();
+    let metadata_store: TableMetaStoreWrapper = TableMetaStoreWrapper::new();
 
-    let mut fd = File::options().read(true).write(true).open("./innocent_file.txt")?;
-    let data = b"hii";
-
-    print!("{}", do_shit_to_file(data,&mut fd)?);
-
+    // so the above stuffs are our contexts, and we'll use dependency injection to pass them around
     Ok(())
 }
 
