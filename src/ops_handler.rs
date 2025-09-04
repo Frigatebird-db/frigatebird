@@ -1,7 +1,7 @@
 use crate::entry::Entry;
-use crate::metadata_store::TableMetaStoreWrapper;
 use crate::page_cache::{PageCacheWrapper, PageCacheEntryCompressed, PageCacheEntryUncompressed};
 use crate::compressor::Compressor;
+use crate::entry::current_epoch_millis;
 
 
 // TODO: we also have to update the (l,r) ranges whenever we upsert something into it and there certainly has to be a better way to do it along with updating metadata in one shot
@@ -92,7 +92,7 @@ fn read_single_column_entry(col: String, row: u64) {
 
 }
 
-fn range_scan_column_entry(col: String, l_row: u64,r_row: u64) {
+fn range_scan_column_entry(meta_store: &TableMetaStoreWrapper, col: String, l_row: u64,r_row: u64) {
     /*
     quickly find the internal (l,r) groupings and the latest pages needed for it and put an lock on them so they dont perish
     
@@ -139,13 +139,19 @@ fn range_scan_column_entry(col: String, l_row: u64,r_row: u64) {
      */
 
     // so we use get_ranged_pages_meta for all the metas, then pass it along to page_cache to fetch us stuff
-    
+    let query_start_time = current_epoch_millis();
+    let relevant_page_metas = &meta_store.table_meta_store.read().unwrap().get_ranged_pages_meta(&col, l_row, r_row, query_start_time).unwrap();
+
+
+    // now we gotta fetch these pages from page_cache, btw our page cache is pretty dumb and wont fetch stuff from disk itself
+
+
 
 
 }
 
 // this does the whole darn query for multiple columns, note that we need syncronization here
 fn range_scan_columns_entries() {
-    // can we just parallelize the above function by just calling it for multiple columns as they are independent ??
-    
+    // can we just parallelize the above function by just calling it for multiple columns as they are independent ?? AHAHAHAHAHAHAH idk how, threads are sparse
+    // we need a thread pool scheduling thingy good ser
 }
