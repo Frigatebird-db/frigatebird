@@ -91,18 +91,6 @@ pub struct TableMetaStore {
     page_data: HashMap<String,Arc<PageMetadata>> // this keeps the actual page metadata, and owns the ARCs
 }
 
-pub struct TableMetaStoreWrapper {
-    pub table_meta_store: Arc<RwLock<TableMetaStore>>,
-}
-
-impl TableMetaStoreWrapper {
-    pub fn new() -> Self {
-        Self {
-            table_meta_store: Arc::new(RwLock::new(TableMetaStore::new())),
-        }
-    }
-}
-
 impl PageMetadata {
     // also returns an id maybe ??
     fn new(disk_path: String,offset: u64) -> Self {
@@ -152,7 +140,7 @@ impl TableMetaStoreEntry {
 
 // just returns ARCS, nothing else concerns it, try not to take locks in there
 impl TableMetaStore {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             col_data: HashMap::new(),
             page_data: HashMap::new()

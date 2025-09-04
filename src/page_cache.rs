@@ -109,16 +109,6 @@ impl<T> PageCache<T> {
 
 }
 
-pub struct PageCacheWrapper<T> {
-    pub page_cache: Arc<RwLock<PageCache<T>>>,
-}
-
-impl<T> PageCacheWrapper<T> {
-    pub fn new() -> Self {
-        Self { page_cache: Arc::new(RwLock::new(PageCache::new())) }
-    }
-}
-
 // pub struct CombinedCache {
 //     pub compressed_pages: PageCache<PageCacheEntryCompressed>,
 //     pub uncompressed_pages: PageCache<PageCacheEntryUncompressed>,
