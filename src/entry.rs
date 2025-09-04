@@ -12,7 +12,7 @@ pub fn current_epoch_millis() -> u64 {
        .as_millis() as u64
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Entry {
     prefix_meta: String,
     data: String,

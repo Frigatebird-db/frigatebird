@@ -1,9 +1,12 @@
+// this is just a helper for now
+
 use std::io;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use serde::Deserialize;
 use serde::Serialize;
-
+use crate::page_cache::PageCacheEntryCompressed;
 /*
 so on disk, our Entries are just compressed pages
 
@@ -61,11 +64,21 @@ fn deserialize_metadata(buffer: Vec<u8>) -> Metadata {
 }
 
 impl PageIO {
-    pub fn read_from_path(&self, path: &str, offset: u64) -> Vec<u8> {
+    pub fn read_from_path(&self, path: &str, offset: u64) -> PageCacheEntryCompressed {
         // Read data from the specified path and offset and returns raw bytes
 
         // we are opening new FDs here btw, try to keep an FD pool and stuff...
         let mut fd = File::open(path).unwrap();
+
+        // Try to disable kernel caching on macOS
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let raw = fd.as_raw_fd();
+            // Disable read-ahead
+            let _ = libc::fcntl(raw, libc::F_RDAHEAD, 0);
+            // Disable caching
+            let _ = libc::fcntl(raw, libc::F_NOCACHE, 1);
+        }
         fd.seek(SeekFrom::Start(offset)).unwrap();
 
         // read the prefix meta from the offset, get the exact size to read from the offset, then read that whole thing and return
@@ -80,13 +93,20 @@ impl PageIO {
         let mut ret_buffer = vec![0; actual_entry_size as usize];
         fd.read_exact(&mut ret_buffer).unwrap();
 
-        ret_buffer
+        PageCacheEntryCompressed {page: ret_buffer}
         // now, that buffer is just the raw bytes containing the serialized metadata for the entry
         // we need to deserialize it and read it, for now, let's just keep it human readable json
     }
 
     pub fn write_to_path(&self, path: &str, offset: u64, data: Vec<u8>) -> Result<(), io::Error> {
         let mut fd = File::create(path)?;
+        // Try to disable kernel caching on macOS
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let raw = fd.as_raw_fd();
+            let _ = libc::fcntl(raw, libc::F_RDAHEAD, 0);
+            let _ = libc::fcntl(raw, libc::F_NOCACHE, 1);
+        }
         fd.seek(SeekFrom::Start(offset))?;
         
         // Create metadata
@@ -106,6 +126,8 @@ impl PageIO {
         
         // ONE write syscall for everything
         fd.write_all(&combined)?;
+        // Flush to disk to avoid kernel buffering where possible
+        fd.sync_all()?;
         
         Ok(())
     }
