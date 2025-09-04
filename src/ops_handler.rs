@@ -130,5 +130,22 @@ fn range_scan_column_entry(col: String, l_row: u64,r_row: u64) {
     */
     
 
+    /*
+    okay, modern day nubskr here, the above one was my peanut brained counterpart;
+    we:
+    - take a read lock on meta store, clone stuff maybe and remove lock afap, idk, how big can... oh wait, its just a columnar stuff huh.. interesting, might be feasible
+    - quick binary search to find (l,r) grouping bounds
+    - then quickly grab the latest page meta for each of those and RELEASE THE FUCKING RLOCK, cloning and immediately releasing seems more appropriate tbh, writes would go brrrr and we would have natural in-memory MVCC, like when one meta for some column is cloned for some read, a lot of those reads can be done in parallel, and there would be minimal contention for writes, we can also ensure that the whole query only sees a "consistent" state of the whole thing during its lifetime, oh wait, we would need to.. kinda syncronize this across columns, like, we can parallize this, hmm, its a Map<col_name,Arc<RWLock<outShit>>> bro, ughhh, wait arent we using a wrapper over it anyway ??? yeah ig, yeah, so that does it then ig, hmm
+     */
+
+    // so we use get_ranged_pages_meta for all the metas, then pass it along to page_cache to fetch us stuff
+    
+
+
 }
 
+// this does the whole darn query for multiple columns, note that we need syncronization here
+fn range_scan_columns_entries() {
+    // can we just parallelize the above function by just calling it for multiple columns as they are independent ??
+    
+}

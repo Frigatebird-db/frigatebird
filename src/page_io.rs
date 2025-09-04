@@ -58,7 +58,7 @@ fn deserialize_metadata(buffer: Vec<u8>) -> Metadata {
     serde_json::from_str(&json).unwrap()
 }
 
-pub fn read_from_path(path: String, offset: u64) -> Vec<u8> {
+pub fn read_from_path(path: &str, offset: u64) -> Vec<u8> {
     // Read data from the specified path and offset and returns raw bytes
 
     // we are opening new FDs here btw, try to keep an FD pool and stuff...
@@ -82,7 +82,7 @@ pub fn read_from_path(path: String, offset: u64) -> Vec<u8> {
     // we need to deserialize it and read it, for now, let's just keep it human readable json
 }
 
-pub fn write_to_path(path: String, offset: u64, data: Vec<u8>) -> Result<(), io::Error> {
+pub fn write_to_path(path: &str, offset: u64, data: Vec<u8>) -> Result<(), io::Error> {
     let mut fd = File::create(path)?;
     fd.seek(SeekFrom::Start(offset))?;
     
