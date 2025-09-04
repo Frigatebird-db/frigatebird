@@ -16,6 +16,7 @@ name = "idk_uwu_ig"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "libc",
  "lz4_flex",
  "serde",
  "serde_json",
@@ -26,6 +27,12 @@ name = "itoa"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
+
+[[package]]
+name = "libc"
+version = "0.2.175"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a82ae493e598baaea5209805c49bbf2ea7de956d50d7da0da1164f9c6d28543"
 
 [[package]]
 name = "lz4_flex"

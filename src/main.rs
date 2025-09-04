@@ -6,6 +6,7 @@ use crate::page_cache::{PageCache,PageCacheEntryCompressed,PageCacheEntryUncompr
 use crate::page_handler::PageHandler;
 mod entry;
 mod page_io;
+use page_io::PageIO;
 mod metadata_store;
 mod ops_handler;
 mod page_cache;
@@ -15,19 +16,23 @@ mod page;
 mod compressor;
 use metadata_store::TableMetaStore;
 use std::sync::{Arc,RwLock};
-
-fn main() -> io::Result<()> {
+use compressor::Compressor;
+fn main() {
     let compressed_page_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryCompressed>::new()));
     let uncompressed_page_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
+    let page_io = Arc::new(PageIO{});
     let metadata_store = Arc::new(RwLock::new(TableMetaStore::new())) ;
+    let compressor = Arc::new(Compressor::new());
+    let page_handler = PageHandler{page_io: Arc::clone(&page_io),uncompressed_page_cache: Arc::clone(&uncompressed_page_cache),compressed_page_cache: Arc::clone(&compressed_page_cache), compressor: Arc::clone(&compressor)};
 
-    let page_handler = PageHandler{uncompressed_page_cache: Arc::clone(&uncompressed_page_cache),compressed_page_cache: Arc::clone(&compressed_page_cache) };
-    
+
+
+
     // cleanup
     drop(uncompressed_page_cache);
     drop(compressed_page_cache);
-
-    Ok(())
+    drop(page_io);
+    drop(compressor);
 }
 
 

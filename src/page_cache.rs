@@ -14,6 +14,8 @@ use std::sync::{Arc,RwLock};
 
 /*
 
+wait a second, do we need to flush a page to disk that we know is an old version ?? 
+
 set with (used_id,id)
 ---
 
@@ -24,15 +26,19 @@ create when adding, remove when removing
 */
 const LRUsize:usize = 10;
 
+
+#[derive(Clone)]
 pub struct PageCacheEntry<T> {
-    pub page: T,
+    pub page: Arc<T>,
     pub used_time: u64
 }
 
+#[derive(Clone)]
 pub struct PageCacheEntryUncompressed {
-    pub page: page::Page,
+    pub page: Page,
 }
 
+#[derive(Clone)]
 pub struct PageCacheEntryCompressed {
     pub page: Vec<u8>, // a bunch of raw bytes that we read from the disk
 }
@@ -77,7 +83,7 @@ impl<T> PageCache<T> {
         // make an new entry
         let used_time = current_epoch_millis();
         
-        let entry = PageCacheEntry{page: page,used_time: used_time};
+        let entry = PageCacheEntry{page: Arc::new(page),used_time: used_time};
 
         self.store.insert(id.to_string(),entry);
 
@@ -93,13 +99,19 @@ impl<T> PageCache<T> {
     }
 
     // so this returns a reference to the entry
-    pub fn get(&mut self, id: &str) -> Option<&mut PageCacheEntry<T>> {
-        // this is more complex btw
+    // pub fn get(&mut self, id: &str) -> Option<&mut PageCacheEntry<T>> {
+    //     // this is more complex btw
 
-        // we need to send a mutable reference here btw
+    //     // we need to send a mutable reference here btw
 
-        self.store.get_mut(id)
+    //     self.store.get_mut(id)
+    // }
+
+    pub fn get(&self, id: &str) -> Option<Arc<T>> {
+        // just send an cloned reference
+        Some(Arc::clone(&self.store.get(id).unwrap().page))
     }
+
 
     pub fn evict(&mut self, id: &str) {
         // remove from lru_queue

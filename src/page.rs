@@ -1,7 +1,7 @@
 use crate::entry;
 use serde::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Page {
     pub page_metadata: String,
     pub entries: Vec<entry::Entry>,
