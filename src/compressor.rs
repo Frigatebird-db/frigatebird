@@ -27,15 +27,15 @@ impl Compressor {
         let compressed = compress_prepend_size(&raw);
 
         let tm_guard = tablemeta.table_meta_store.read().unwrap();
-        let (path,offset) = tm_guard.get_page_path_and_offset(id).unwrap();
-        let _ = write_to_path(path, offset, compressed);
+        let smth = tm_guard.get_page_path_and_offset(id).unwrap();
+        let _ = write_to_path(&smth.disk_path, smth.offset, compressed);
         Some(true)
     }
 
     pub fn decompress(&self, tablemeta: &TableMetaStoreWrapper, compressed_cache: &PageCacheWrapper<PageCacheEntryCompressed>, id: &str) {
         let tm_guard = tablemeta.table_meta_store.read().unwrap();
-        let (path,offset) = tm_guard.get_page_path_and_offset(id).unwrap();
-        let compressed_data = read_from_path(path, offset);
+        let smth = tm_guard.get_page_path_and_offset(id).unwrap();
+        let compressed_data = read_from_path(&smth.disk_path, smth.offset);
         let mut cc_guard = compressed_cache.page_cache.write().unwrap();
         cc_guard.add(id,PageCacheEntryCompressed {page: compressed_data});
     }

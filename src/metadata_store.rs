@@ -34,8 +34,7 @@ once than to go through a lot of O(x) + O(x).... nested stuff every single time
 use std::collections::HashMap;
 use std::sync::{Arc,RwLock};
 
-use crate::entry::{current_epoch_millis, Entry};
-use crate::page::{self, Page};
+use crate::entry::current_epoch_millis;
 
 
 // this will be immutable throughout its lifetime btw
@@ -58,7 +57,7 @@ pub struct TableMetaStoreEntry {
 }
 
 pub struct RangeScanMetaResponse{
-    page_metas: Vec<PageMetadata>
+    pub page_metas: Vec<Arc<PageMetadata>>
 }
 
 /* 
@@ -76,6 +75,17 @@ M[col_name] -> [                    |
                 ] 
 
 */
+
+// a lot can read multiple column metas and page metas at once with RLock on wrapper
+
+/*
+with Rlock we want something like:
+- Rlock the TableMetaStoreWrapper, get the column/page meta you wish from Map, clone it and RELEASE LOCK ASAP
+
+okay, so what exactly are we cloning here ? also note that TableMetaStore is a wrapper in itself, just a gateway, just grab a clone and get out, check later if you can do something with it
+*/
+
+// we query this thing to grab page and column metas, THATS IT
 pub struct TableMetaStore {
     col_data: HashMap<String,Arc<RwLock<Vec<TableMetaStoreEntry>>>>, // this just keeps absolute minimal page meta references
     page_data: HashMap<String,Arc<PageMetadata>> // this keeps the actual page metadata, and owns the ARCs
@@ -118,8 +128,6 @@ impl Drop for PageMetadata {
     fn drop(&mut self) {
         // so we do a bunch of stuff here
 
-        let me = self;
-
         // so if a page meta is being dropped, we don't want to:
         // - have it on disk
         // - have it in any cache(both compressed and uncompressed)
@@ -142,6 +150,7 @@ impl TableMetaStoreEntry {
 }
 
 
+// just returns ARCS, nothing else concerns it, try not to take locks in there
 impl TableMetaStore {
     fn new() -> Self {
         Self {
@@ -150,14 +159,15 @@ impl TableMetaStore {
         }
     }
 
-    pub fn get_page_path_and_offset(&self, id: &str) -> Option<(String,u64)>{
-        let entry: &PageMetadata = self.page_data.get(id).unwrap();
-        let path = &entry.disk_path;
-        let offset = &entry.offset;
-        
-        Some((path.to_string(),*offset))
+    pub fn get_page_path_and_offset(&self, id: &str) -> Option<Arc<PageMetadata>>{
+        let entry_arc = Arc::clone(&self.page_data.get(id).unwrap());
+        // let path = &entry.disk_path;
+        // let offset = &entry.offset;
+        // just make a clone and return huh
+        Some(entry_arc)
     }
 
+    // its here, but try to use it btw
     pub fn get_latest_page_meta(&self, column: &str) -> Option<&Arc<PageMetadata>> {
         self.col_data
             .get(column)?
@@ -200,8 +210,69 @@ impl TableMetaStore {
         }
     }
 
-    fn get_ranged_pages_meta(col: String, l: u8,r: u8) {
-        
+    pub fn get_ranged_pages_meta(&self, col: &str, l_bound: u64, r_bound: u64, commit_time_upper_bound: u64) -> Option<RangeScanMetaResponse> {
+        // okay, so we gotta either binary search or just get it linearly if not too many elements ? oh wait, do we need locks ? we dont ig
+        if l_bound > r_bound {
+            return Some(RangeScanMetaResponse { page_metas: Vec::new() });
+        }
+
+        // Acquire read lock for the column entries, binary search for overlap window, copy page_ids, and drop the lock ASAP
+        // this is the longest place where we are holding column meta read guard btw
+        let col_guard = self.col_data.get(col)?.read().ok()?;
+
+        let entries = &*col_guard;
+        let len = entries.len();
+        let mut page_ids: Vec<String> = Vec::new();
+
+        if len > 0 {
+            let mut lo: usize = 0;
+            let mut hi: usize = len;
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                if entries[mid].end_idx <= l_bound {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            let mut i = lo;
+
+            // Linear scan forward until start_idx >= r_bound
+            while i < len {
+                let entry = &entries[i];
+                if entry.start_idx >= r_bound { break; }
+                // pick MVCC version with commit_time just before/at the upper bound
+                if !entry.page_metas.is_empty() {
+                    let versions = &entry.page_metas;
+                    // binary search for first commit_time > commit_time_upper_bound
+                    let mut vlo: usize = 0;
+                    let mut vhi: usize = versions.len();
+                    while vlo < vhi {
+                        let vmid = (vlo + vhi) / 2;
+                        if versions[vmid].commit_time <= commit_time_upper_bound {
+                            vlo = vmid + 1;
+                        } else {
+                            vhi = vmid;
+                        }
+                    }
+                    if vlo > 0 { // there exists a version with commit_time <= commit_time_upper_bound
+                        let chosen = &versions[vlo - 1];
+                        page_ids.push(chosen.page_id.clone());
+                    }
+                }
+                i += 1;
+            }
+        }
+        drop(col_guard);
+
+        let mut metas: Vec<Arc<PageMetadata>> = Vec::new();
+        for page_id in page_ids {
+            if let Some(meta_arc) = self.page_data.get(&page_id) {
+                metas.push(Arc::clone(meta_arc));
+            }
+        }
+
+        Some(RangeScanMetaResponse { page_metas: metas })
     }
     
 }
