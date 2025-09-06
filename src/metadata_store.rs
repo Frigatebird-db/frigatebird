@@ -38,6 +38,7 @@ use crate::entry::current_epoch_millis;
 
 
 // this will be immutable throughout its lifetime btw
+#[derive(Clone)]
 pub struct PageMetadata {
     pub id: String, // this is page id btw
     pub disk_path: String,
