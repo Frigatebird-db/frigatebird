@@ -3,6 +3,11 @@
 // use crate::compressor::Compressor;
 // use crate::entry::current_epoch_millis;
 
+use std::sync::{Arc, RwLock};
+use crate::entry::Entry;
+use crate::page_handler::PageHandler;
+use crate::metadata_store::{TableMetaStore, PageMetadata};
+
 
 // // TODO: we also have to update the (l,r) ranges whenever we upsert something into it and there certainly has to be a better way to do it along with updating metadata in one shot
 // fn upsert_data_into_column(_entry: Entry, compressor: Compressor, meta_store: &TableMetaStoreWrapper, compressed_cache: &PageCacheWrapper<PageCacheEntryCompressed>, uncompressed_cache: &PageCacheWrapper<PageCacheEntryUncompressed>, col: &str, data: &str) -> Result<bool, Box<dyn std::error::Error>> {
@@ -46,6 +51,26 @@
 
 // }
 
+// TODO: we also have to update the (l,r) ranges whenever we upsert something into it
+pub fn upsert_data_into_column(meta_store: &Arc<RwLock<TableMetaStore>>, handler: &PageHandler, col: &str, data: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    // get latest page meta for the column
+    let page_meta: PageMetadata = {
+        let guard = meta_store.read().unwrap();
+        guard.get_latest_page_meta(col).unwrap().as_ref().clone()
+    };
+
+    // ensure page is present in UPC (fetches/decompresses as needed) and mutate
+    let page_arc = handler.get_page(page_meta.clone()).unwrap();
+
+    let mut updated = (*page_arc).clone();
+    updated.page.add_entry(Entry::new(data));
+
+    let mut upc_write = handler.uncompressed_page_cache.write().unwrap();
+    upc_write.add(&page_meta.id, updated);
+
+    Ok(true)
+}
+
 // // I hope the below stuff is correct, im fried rn
 // fn update_column_entry(_entry: Entry, compressor: Compressor, meta_store: &TableMetaStoreWrapper, compressed_cache: &PageCacheWrapper<PageCacheEntryCompressed>, uncompressed_cache: &PageCacheWrapper<PageCacheEntryUncompressed>, col: &str, data: &str, row: u64) -> Result<bool, Box<dyn std::error::Error>> {
 //     let page_id = {
@@ -88,11 +113,30 @@
 
 // }
 
+pub fn update_column_entry(meta_store: &Arc<RwLock<TableMetaStore>>, handler: &PageHandler, col: &str, data: &str, row: u64) -> Result<bool, Box<dyn std::error::Error>> {
+    // get latest page meta for the column
+    let page_meta: PageMetadata = {
+        let guard = meta_store.read().unwrap();
+        guard.get_latest_page_meta(col).unwrap().as_ref().clone()
+    };
+
+    let page_arc = handler.get_page(page_meta.clone()).unwrap();
+
+    let mut updated = (*page_arc).clone();
+    if (row as usize) >= updated.page.entries.len() { return Ok(false); }
+    updated.page.entries[row as usize] = Entry::new(data);
+
+    let mut upc_write = handler.uncompressed_page_cache.write().unwrap();
+    upc_write.add(&page_meta.id, updated);
+
+    Ok(true)
+}
+
 // fn read_single_column_entry(col: String, row: u64) {
 
 // }
 
-// fn range_scan_column_entry(meta_store: &TableMetaStoreWrapper, col: String, l_row: u64,r_row: u64) {
+pub fn range_scan_column_entry(meta_store: &Arc<RwLock<TableMetaStore>>, handler: &PageHandler, col: &str, l_row: u64, r_row: u64, commit_time_upper_bound: u64) -> Vec<Entry> {
 //     /*
 //     quickly find the internal (l,r) groupings and the latest pages needed for it and put an lock on them so they dont perish
     
@@ -138,9 +182,23 @@
 //     - then quickly grab the latest page meta for each of those and RELEASE THE FUCKING RLOCK, cloning and immediately releasing seems more appropriate tbh, writes would go brrrr and we would have natural in-memory MVCC, like when one meta for some column is cloned for some read, a lot of those reads can be done in parallel, and there would be minimal contention for writes, we can also ensure that the whole query only sees a "consistent" state of the whole thing during its lifetime, oh wait, we would need to.. kinda syncronize this across columns, like, we can parallize this, hmm, its a Map<col_name,Arc<RWLock<outShit>>> bro, ughhh, wait arent we using a wrapper over it anyway ??? yeah ig, yeah, so that does it then ig, hmm
 //      */
 
-//     // so we use get_ranged_pages_meta for all the metas, then pass it along to page_cache to fetch us stuff
-//     let query_start_time = current_epoch_millis();
-//     let relevant_page_metas = &meta_store.table_meta_store.read().unwrap().get_ranged_pages_meta(&col, l_row, r_row, query_start_time).unwrap();
+    // get ranged metas
+    let response = {
+        let guard = meta_store.read().unwrap();
+        guard.get_ranged_pages_meta(col, l_row, r_row, commit_time_upper_bound).unwrap()
+    };
+
+    // fetch pages in batch
+    let pages = handler.get_pages(response.page_metas.iter().map(|m| (**m).clone()).collect());
+
+    // stitch entries and trim edges
+    let mut out: Vec<Entry> = Vec::new();
+    // Without per-page bounds, we return full pages in order for now.
+    for page_arc in pages.into_iter() {
+        out.extend_from_slice(&page_arc.page.entries);
+    }
+
+    out
 
 
 //     // now we gotta fetch these pages from page_cache, btw our page cache is pretty dumb and wont fetch stuff from disk itself
@@ -148,7 +206,7 @@
 
 
 
-// }
+}
 
 // // this does the whole darn query for multiple columns, note that we need syncronization here
 // fn range_scan_columns_entries() {

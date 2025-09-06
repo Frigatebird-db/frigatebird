@@ -61,6 +61,7 @@ impl Drop for PageCacheEntryCompressed {
 }
 
 pub struct PageCache<T>{
+    // some sort of bloom filter ?? essentially we need to VERY QUICKLY tell which entries of a set are in there and which ones are not
     pub store: HashMap<String,PageCacheEntry<T>>,
     pub lru_queue: BTreeSet<(u64,String)>
 }
