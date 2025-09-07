@@ -75,6 +75,11 @@ M[col_name] -> [                    |
                     ...
                 ] 
 
+
+should I introduce another map or... wait, I wanted that huh, we can do that now I think..
+
+its all so fragmented man, ughh
+
 */
 
 // a lot can read multiple column metas and page metas at once with RLock on wrapper

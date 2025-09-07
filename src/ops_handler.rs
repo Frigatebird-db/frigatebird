@@ -1,7 +1,4 @@
-// use crate::entry::Entry;
-// use crate::page_cache::{PageCacheWrapper, PageCacheEntryCompressed, PageCacheEntryUncompressed};
-// use crate::compressor::Compressor;
-// use crate::entry::current_epoch_millis;
+// these are our external API contracts and shouldnt change btw, whatever you change internally, these should just work out of the box
 
 use std::sync::{Arc, RwLock};
 use crate::entry::Entry;
@@ -203,13 +200,10 @@ pub fn range_scan_column_entry(meta_store: &Arc<RwLock<TableMetaStore>>, handler
 
 //     // now we gotta fetch these pages from page_cache, btw our page cache is pretty dumb and wont fetch stuff from disk itself
 
-
-
-
 }
 
 // // this does the whole darn query for multiple columns, note that we need syncronization here
-// fn range_scan_columns_entries() {
-//     // can we just parallelize the above function by just calling it for multiple columns as they are independent ?? AHAHAHAHAHAHAH idk how, threads are sparse
-//     // we need a thread pool scheduling thingy good ser
-// }
+fn range_scan_columns_entries() {
+    // can we just parallelize the above function by just calling it for multiple columns as they are independent ?? AHAHAHAHAHAHAH idk how, threads are sparse
+    // we need a thread pool scheduling thingy good ser
+}
