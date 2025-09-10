@@ -270,35 +270,3 @@ impl TableMetaStore {
     }
     
 }
-
-// // how the hell do I get the PageCache context here lmao
-// fn append_to_column(context: Context, tableMetaStore: TableMetaStore, column: &str, data: &str) -> Option<()>{
-//     // find out the current page from table meta store
-//     let latest_page_meta = tableMetaStore.get_latest_page_meta(column).unwrap().page_metas.last().unwrap();
-
-
-//     // most probably need to add some abstraction for below stuff
-
-//     if context.cache.uncompressed_pages.has(&latest_page_meta) {
-//         // todo
-//         // update
-//     } else if context.cache.compressed_pages.has(&latest_page_meta){
-//         // todo
-//         // decompress page
-//         // pull into uncompressed pages
-//         // update
-//     } else {
-//         // do IO shit
-//         // pull into compressed pages
-//         // pull into decompressed pages
-//     }
-
-//     if true {
-//         let new_page = Page::new();
-
-//         // creating a new page
-//         // add an empty entry
-//     }
-
-//     None
-// }

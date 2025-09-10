@@ -8,7 +8,4 @@ this is essentially just the latest state for each column and would be the first
 
 we essentially need to have that 
 
-what the fuck man, cant really think
-
-fuck thsi shit man, living this life is suffocating 
 */
