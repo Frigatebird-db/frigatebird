@@ -61,7 +61,6 @@ impl Drop for PageCacheEntryCompressed {
 }
 
 pub struct PageCache<T>{
-    // some sort of bloom filter ?? essentially we need to VERY QUICKLY tell which entries of a set are in there and which ones are not
     pub store: HashMap<String,PageCacheEntry<T>>,
     pub lru_queue: BTreeSet<(u64,String)>
 }
@@ -71,17 +70,12 @@ impl<T> PageCache<T> {
         PageCache{ store: HashMap::new() , lru_queue: BTreeSet::new()}
     }
 
-    // adds a certain Page to mem
     pub fn add(&mut self,id: &str, page: T) {
-        // check if an entry already exists
         if self.store.contains_key(id) {
-            // remove it from set
             let entry = self.store.get(id);
-            // let wut = entry.unwrap().used_time;
             self.lru_queue.remove(&((entry.unwrap()).used_time,String::from(id)));
         }
 
-        // make an new entry
         let used_time = current_epoch_millis();
         
         let entry = PageCacheEntry{page: Arc::new(page),used_time: used_time};
@@ -99,38 +93,14 @@ impl<T> PageCache<T> {
         self.store.contains_key(id)
     }
 
-    // so this returns a reference to the entry
-    // pub fn get(&mut self, id: &str) -> Option<&mut PageCacheEntry<T>> {
-    //     // this is more complex btw
-
-    //     // we need to send a mutable reference here btw
-
-    //     self.store.get_mut(id)
-    // }
-
     pub fn get(&self, id: &str) -> Option<Arc<T>> {
-        // just send an cloned reference
         Some(Arc::clone(&self.store.get(id).unwrap().page))
     }
 
 
     pub fn evict(&mut self, id: &str) {
-        // remove from lru_queue
         self.lru_queue.remove(&(self.store.get(id).unwrap().used_time, id.to_string()));
         self.store.remove(id);
     }
 
 }
-
-// pub struct CombinedCache {
-//     pub compressed_pages: PageCache<PageCacheEntryCompressed>,
-//     pub uncompressed_pages: PageCache<PageCacheEntryUncompressed>,
-// }
-
-// // should I remove combined one ?? would make a hell lot of sense to have separate locks for both caches tbh
-
-// impl CombinedCache {
-//     pub fn new() -> Self {
-//         Self {compressed_pages: PageCache::new() , uncompressed_pages: PageCache::new()}
-//     }
-// }
