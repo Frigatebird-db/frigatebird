@@ -31,6 +31,11 @@ M[page_id] -> I mean, we should just do this shit like: {id,locked_by_cnt,commit
 and just keep page_id like a foreign key in M[col_name] shit instead of keeping it all there, would also be faster to just get it in just O(x)
 once than to go through a lot of O(x) + O(x).... nested stuff every single time
 */
+
+/*
+in the case of a lot of concurrent read request
+*/
+
 use std::collections::HashMap;
 use std::sync::{Arc,RwLock};
 
@@ -90,6 +95,8 @@ with Rlock we want something like:
 
 okay, so what exactly are we cloning here ? also note that TableMetaStore is a wrapper in itself, just a gateway, just grab a clone and get out, check later if you can do something with it
 */
+
+
 
 // we query this thing to grab page and column metas, THATS IT
 pub struct TableMetaStore {
