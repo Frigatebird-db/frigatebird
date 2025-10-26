@@ -1,5 +1,6 @@
-use idk_uwu_ig::pipeline::build_pipeline;
+use idk_uwu_ig::pipeline::{build_pipeline, PipelineBatch};
 use idk_uwu_ig::sql::plan_sql;
+use std::sync::atomic::Ordering;
 
 #[test]
 fn builds_empty_pipeline_for_no_filters() {
@@ -103,4 +104,42 @@ fn builds_pipeline_for_update_with_filter() {
         .collect();
     assert!(columns.contains(&"id"));
     assert!(columns.contains(&"status"));
+}
+
+#[test]
+fn wires_channel_chain_between_steps() {
+    let plan =
+        plan_sql("SELECT id FROM users WHERE age > 18 AND name = 'John'").expect("valid plan");
+    let pipelines = build_pipeline(&plan);
+
+    assert_eq!(pipelines.len(), 1);
+    let pipeline = &pipelines[0];
+    assert!(pipeline.steps.len() >= 2);
+    assert_eq!(pipeline.next_free_slot.load(Ordering::Relaxed), 0);
+    assert!(!pipeline.id.is_empty());
+
+    let batch: PipelineBatch = vec![1, 2, 3];
+    pipeline
+        .entry_producer
+        .send(batch.clone())
+        .expect("entry producer should accept batches");
+
+    let first_step = &pipeline.steps[0];
+    let received_first = first_step
+        .previous_receiver
+        .try_recv()
+        .expect("first step should receive entry batch");
+    assert_eq!(received_first, batch);
+
+    first_step
+        .current_producer
+        .send(received_first.clone())
+        .expect("first step should forward batch");
+
+    let second_step = &pipeline.steps[1];
+    let received_second = second_step
+        .previous_receiver
+        .try_recv()
+        .expect("second step should receive forwarded batch");
+    assert_eq!(received_second, received_first);
 }
