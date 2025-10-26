@@ -1,6 +1,6 @@
 use crate::sql::models::{FilterExpr, QueryPlan};
 use crossbeam::channel::{self, Receiver, Sender};
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{Rng, distributions::Alphanumeric};
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
@@ -39,7 +39,7 @@ impl PipelineStep {
 
 /// Represents the execution pipeline for a query.
 #[derive(Debug)]
-pub struct Pipeline {
+pub struct Job {
     /// The table name this pipeline operates on
     pub table_name: String,
     /// Sequential steps to execute filters, each on a specific column
@@ -52,13 +52,13 @@ pub struct Pipeline {
     pub entry_producer: Sender<PipelineBatch>,
 }
 
-impl Pipeline {
+impl Job {
     pub fn new(
         table_name: String,
         steps: Vec<PipelineStep>,
         entry_producer: Sender<PipelineBatch>,
     ) -> Self {
-        Pipeline {
+        Job {
             table_name,
             steps,
             next_free_slot: AtomicUsize::new(0),
@@ -70,8 +70,8 @@ impl Pipeline {
 
 /// Build a pipeline from a query plan.
 /// For now, this randomly orders the filter steps with no optimization.
-pub fn build_pipeline(plan: &QueryPlan) -> Vec<Pipeline> {
-    let mut pipelines = Vec::with_capacity(plan.tables.len());
+pub fn build_pipeline(plan: &QueryPlan) -> Vec<Job> {
+    let mut jobs = Vec::with_capacity(plan.tables.len());
 
     for table in &plan.tables {
         if let Some(filter) = &table.filters {
@@ -85,15 +85,11 @@ pub fn build_pipeline(plan: &QueryPlan) -> Vec<Pipeline> {
             let grouped_steps: Vec<(String, Vec<FilterExpr>)> = grouped.into_iter().collect();
             let (entry_producer, steps) = attach_channels(grouped_steps);
 
-            pipelines.push(Pipeline::new(
-                table.table_name.clone(),
-                steps,
-                entry_producer,
-            ));
+            jobs.push(Job::new(table.table_name.clone(), steps, entry_producer));
         } else {
             // No filters, empty pipeline
             let (entry_producer, _) = channel::unbounded::<PipelineBatch>();
-            pipelines.push(Pipeline::new(
+            jobs.push(Job::new(
                 table.table_name.clone(),
                 Vec::new(),
                 entry_producer,
@@ -101,7 +97,7 @@ pub fn build_pipeline(plan: &QueryPlan) -> Vec<Pipeline> {
         }
     }
 
-    pipelines
+    jobs
 }
 
 /// Extracts all leaf filter expressions from the filter tree.
