@@ -28,10 +28,9 @@ this is a pretty fair scheduler which treats every single
 
 use crossbeam::channel;
 use std::thread;
-use std::time::Instant;
 
 // Minimal thread pool
-struct ThreadPool {
+pub struct ThreadPool {
     workers: Vec<Worker>,
     sender: Option<channel::Sender<Job>>,
 }
@@ -43,7 +42,7 @@ struct Worker {
 }
 
 impl ThreadPool {
-    fn new(size: usize) -> Self {
+    pub fn new(size: usize) -> Self {
         let (sender, receiver) = channel::unbounded::<Job>();
 
         let mut workers = Vec::with_capacity(size);
@@ -71,7 +70,7 @@ impl ThreadPool {
         }
     }
 
-    fn execute<F>(&self, f: F)
+    pub fn execute<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {

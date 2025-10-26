@@ -12,4 +12,5 @@ libc = "0.2"
 rkyv = { version = "0.7", features = ["validation", "strict"] }
 sqlparser = "0.44"
 crossbeam = "0.8.4"
+crossbeam-skiplist = "0.1"
 rand = "0.8"
