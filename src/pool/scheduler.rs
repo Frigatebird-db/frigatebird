@@ -23,9 +23,10 @@ so I think in our case, it would be way faster.. idk man, idk if it would be fas
 
 the thing is, if we use a single thread for WAL, I dont think we can kinda eat the overhead of MPSC
 
+this is a pretty fair scheduler which treats every single
 */
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Instant;
 
@@ -51,11 +52,13 @@ impl ThreadPool {
         for _ in 0..size {
             let receiver = Arc::clone(&receiver);
 
-            let thread = thread::spawn(move || loop {
-                let job = receiver.lock().unwrap().recv();
-                match job {
-                    Ok(job) => job(),
-                    Err(_) => break, // channel closed, exit loop
+            let thread = thread::spawn(move || {
+                loop {
+                    let job = receiver.lock().unwrap().recv();
+                    match job {
+                        Ok(job) => job(),
+                        Err(_) => break, // channel closed, exit loop
+                    }
                 }
             });
 
@@ -92,26 +95,26 @@ impl Drop for ThreadPool {
     }
 }
 
-fn main() {
-    println!("=== Thread pool with {} threads ===", 4);
-    let pool = ThreadPool::new(4);
-    let (tx, rx) = mpsc::channel();
+// fn main() {
+//     println!("=== Thread pool with {} threads ===", 4);
+//     let pool = ThreadPool::new(4);
+//     let (tx, rx) = mpsc::channel();
 
-    let start = Instant::now();
-    for _ in 0..1000 {
-        let tx = tx.clone();
-        pool.execute(move || {
-            // Simulate same tiny work
-            let _ = 1 + 1;
-            tx.send(()).unwrap();
-        });
-    }
+//     let start = Instant::now();
+//     for _ in 0..1000 {
+//         let tx = tx.clone();
+//         pool.execute(move || {
+//             // Simulate same tiny work
+//             let _ = 1 + 1;
+//             tx.send(()).unwrap();
+//         });
+//     }
 
-    // Wait for all tasks to complete
-    for _ in 0..1000 {
-        rx.recv().unwrap();
-    }
-    let pool_duration = start.elapsed();
-    println!("1000 tasks via thread pool: {:?}", pool_duration);
-    println!("Average per task: {:?}\n", pool_duration / 1000);
-}
+//     // Wait for all tasks to complete
+//     for _ in 0..1000 {
+//         rx.recv().unwrap();
+//     }
+//     let pool_duration = start.elapsed();
+//     println!("1000 tasks via thread pool: {:?}", pool_duration);
+//     println!("Average per task: {:?}\n", pool_duration / 1000);
+// }
