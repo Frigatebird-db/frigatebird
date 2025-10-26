@@ -1,6 +1,7 @@
 use idk_uwu_ig::pipeline::{PipelineBatch, build_pipeline};
 use idk_uwu_ig::sql::plan_sql;
-use std::sync::atomic::Ordering;
+use std::cmp::Ordering as CmpOrdering;
+use std::sync::atomic::Ordering as AtomicOrdering;
 
 #[test]
 fn builds_empty_pipeline_for_no_filters() {
@@ -10,6 +11,7 @@ fn builds_empty_pipeline_for_no_filters() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].table_name, "users");
     assert_eq!(jobs[0].steps.len(), 0);
+    assert_eq!(jobs[0].cost, 0);
 }
 
 #[test]
@@ -22,6 +24,7 @@ fn builds_single_step_for_single_column_filter() {
     assert_eq!(jobs[0].steps.len(), 1);
     assert_eq!(jobs[0].steps[0].column, "age");
     assert_eq!(jobs[0].steps[0].filters.len(), 1);
+    assert_eq!(jobs[0].cost, 1);
 }
 
 #[test]
@@ -37,6 +40,7 @@ fn builds_multiple_steps_for_multiple_column_filters() {
     let columns: Vec<&str> = jobs[0].steps.iter().map(|s| s.column.as_str()).collect();
     assert!(columns.contains(&"age"));
     assert!(columns.contains(&"name"));
+    assert_eq!(jobs[0].cost, jobs[0].steps.len());
 }
 
 #[test]
@@ -48,6 +52,7 @@ fn groups_multiple_filters_on_same_column() {
     assert_eq!(jobs[0].steps.len(), 1);
     assert_eq!(jobs[0].steps[0].column, "age");
     assert_eq!(jobs[0].steps[0].filters.len(), 2); // Two filters on same column
+    assert_eq!(jobs[0].cost, 1);
 }
 
 #[test]
@@ -66,6 +71,7 @@ fn builds_pipeline_for_complex_query() {
     assert!(columns.contains(&"status"));
     assert!(columns.contains(&"region"));
     assert!(columns.contains(&"balance"));
+    assert_eq!(jobs[0].cost, jobs[0].steps.len());
 }
 
 #[test]
@@ -77,6 +83,7 @@ fn builds_pipeline_for_delete_with_filter() {
     assert_eq!(jobs[0].table_name, "sessions");
     assert_eq!(jobs[0].steps.len(), 1);
     assert_eq!(jobs[0].steps[0].column, "expires_at");
+    assert_eq!(jobs[0].cost, 1);
 }
 
 #[test]
@@ -92,6 +99,25 @@ fn builds_pipeline_for_update_with_filter() {
     let columns: Vec<&str> = jobs[0].steps.iter().map(|s| s.column.as_str()).collect();
     assert!(columns.contains(&"id"));
     assert!(columns.contains(&"status"));
+    assert_eq!(jobs[0].cost, jobs[0].steps.len());
+}
+
+#[test]
+fn compares_jobs_by_cost() {
+    let mut single_step = build_pipeline(
+        &plan_sql("SELECT id FROM users WHERE age > 18").expect("valid single-step plan"),
+    );
+    let job_small = single_step.remove(0);
+
+    let mut multi_step = build_pipeline(
+        &plan_sql("SELECT id FROM users WHERE age > 18 AND name = 'John'")
+            .expect("valid multi-step plan"),
+    );
+    let job_large = multi_step.remove(0);
+
+    assert!(job_small < job_large);
+    assert!(job_large > job_small);
+    assert_eq!(job_small.partial_cmp(&job_large), Some(CmpOrdering::Less));
 }
 
 #[test]
@@ -103,8 +129,9 @@ fn wires_channel_chain_between_steps() {
     assert_eq!(jobs.len(), 1);
     let job = &jobs[0];
     assert!(job.steps.len() >= 2);
-    assert_eq!(job.next_free_slot.load(Ordering::Relaxed), 0);
+    assert_eq!(job.next_free_slot.load(AtomicOrdering::Relaxed), 0);
     assert!(!job.id.is_empty());
+    assert_eq!(job.cost, job.steps.len());
 
     let batch: PipelineBatch = vec![1, 2, 3];
     job.entry_producer

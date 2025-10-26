@@ -2,6 +2,7 @@ use crate::sql::models::{FilterExpr, QueryPlan};
 use crossbeam::channel::{self, Receiver, Sender};
 use rand::{Rng, distributions::Alphanumeric};
 use sqlparser::ast::Expr;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 
@@ -35,6 +36,11 @@ impl PipelineStep {
             filters,
         }
     }
+
+    /// Placeholder execution loop for step-level runtime.
+    pub fn execute(&self) -> ! {
+        loop {}
+    }
 }
 
 /// Represents the execution pipeline for a query.
@@ -44,6 +50,8 @@ pub struct Job {
     pub table_name: String,
     /// Sequential steps to execute filters, each on a specific column
     pub steps: Vec<PipelineStep>,
+    /// Total number of steps, used for quick scheduling heuristics
+    pub cost: usize,
     /// Tracks the next slot available for downstream execution bookkeeping
     pub next_free_slot: AtomicUsize,
     /// Identifier for tracing/logging purposes
@@ -58,13 +66,34 @@ impl Job {
         steps: Vec<PipelineStep>,
         entry_producer: Sender<PipelineBatch>,
     ) -> Self {
+        let cost = steps.len();
         Job {
             table_name,
             steps,
+            cost,
             next_free_slot: AtomicUsize::new(0),
             id: generate_pipeline_id(),
             entry_producer,
         }
+    }
+
+    /// Placeholder iterator for future pipeline runtime.
+    pub fn get_next(&self) -> ! {
+        loop {}
+    }
+}
+
+impl PartialEq for Job {
+    fn eq(&self, other: &Self) -> bool {
+        self.cost == other.cost
+    }
+}
+
+impl Eq for Job {}
+
+impl PartialOrd for Job {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cost.cmp(&other.cost))
     }
 }
 
