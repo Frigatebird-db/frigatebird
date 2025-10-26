@@ -1,54 +1,65 @@
 // these are our external API contracts and shouldnt change btw, whatever you change internally, these should just work out of the box
 
-use std::sync::{Arc, RwLock};
 use crate::entry::Entry;
 use crate::page_handler::PageHandler;
-use crate::metadata_store::{TableMetaStore, PageMetadata};
 
 // TODO: we also have to update the (l,r) ranges whenever we upsert something into it
-pub fn upsert_data_into_column(meta_store: &Arc<RwLock<TableMetaStore>>, handler: &PageHandler, col: &str, data: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    let page_meta: PageMetadata = {
-        let guard = meta_store.read().unwrap();
-        guard.get_latest_page_meta(col).unwrap().as_ref().clone()
-    };
+pub fn upsert_data_into_column(
+    handler: &PageHandler,
+    col: &str,
+    data: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let page_meta = handler
+        .locate_latest(col)
+        .ok_or_else(|| "missing page metadata for column")?;
 
-    let page_arc = handler.get_page(page_meta.clone()).unwrap();
+    let page_arc = handler
+        .get_page(page_meta.clone())
+        .ok_or_else(|| "unable to load page")?;
 
     let mut updated = (*page_arc).clone();
     updated.page.add_entry(Entry::new(data));
 
-    let mut upc_write = handler.uncompressed_page_cache.write().unwrap();
-    upc_write.add(&page_meta.id, updated);
+    handler.write_back_uncompressed(&page_meta.id, updated);
 
     Ok(true)
 }
 
-pub fn update_column_entry(meta_store: &Arc<RwLock<TableMetaStore>>, handler: &PageHandler, col: &str, data: &str, row: u64) -> Result<bool, Box<dyn std::error::Error>> {
-    let page_meta: PageMetadata = {
-        let guard = meta_store.read().unwrap();
-        guard.get_latest_page_meta(col).unwrap().as_ref().clone()
-    };
+pub fn update_column_entry(
+    handler: &PageHandler,
+    col: &str,
+    data: &str,
+    row: u64,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let page_meta = handler
+        .locate_latest(col)
+        .ok_or_else(|| "missing page metadata for column")?;
 
-    let page_arc = handler.get_page(page_meta.clone()).unwrap();
+    let page_arc = handler
+        .get_page(page_meta.clone())
+        .ok_or_else(|| "unable to load page")?;
 
     let mut updated = (*page_arc).clone();
-    if (row as usize) >= updated.page.entries.len() { return Ok(false); }
+    if (row as usize) >= updated.page.entries.len() {
+        return Ok(false);
+    }
     updated.page.entries[row as usize] = Entry::new(data);
 
-    let mut upc_write = handler.uncompressed_page_cache.write().unwrap();
-    upc_write.add(&page_meta.id, updated);
+    handler.write_back_uncompressed(&page_meta.id, updated);
 
     Ok(true)
 }
 
+pub fn range_scan_column_entry(
+    handler: &PageHandler,
+    col: &str,
+    l_row: u64,
+    r_row: u64,
+    commit_time_upper_bound: u64,
+) -> Vec<Entry> {
+    let page_metas = handler.locate_range(col, l_row, r_row, commit_time_upper_bound);
 
-pub fn range_scan_column_entry(meta_store: &Arc<RwLock<TableMetaStore>>, handler: &PageHandler, col: &str, l_row: u64, r_row: u64, commit_time_upper_bound: u64) -> Vec<Entry> {
-    let response = {
-        let guard = meta_store.read().unwrap();
-        guard.get_ranged_pages_meta(col, l_row, r_row, commit_time_upper_bound).unwrap()
-    };
-
-    let pages = handler.get_pages(response.page_metas.iter().map(|m| (**m).clone()).collect());
+    let pages = handler.get_pages(page_metas);
 
     let mut out: Vec<Entry> = Vec::new();
     // Without per-page bounds, we return full pages in order for now.
