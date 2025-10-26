@@ -1,3 +1,3 @@
 pub mod builder;
 
-pub use builder::{build_pipeline, Pipeline, PipelineBatch, PipelineStep};
+pub use builder::{Job, PipelineBatch, PipelineStep, build_pipeline};
