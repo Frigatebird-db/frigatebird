@@ -1,10 +1,20 @@
 use crate::sql::models::{FilterExpr, QueryPlan};
+use crossbeam::channel::{self, Receiver, Sender};
+use rand::{distributions::Alphanumeric, Rng};
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+
+/// Lightweight batch placeholder flowing between pipeline stages.
+pub type PipelineBatch = Vec<usize>;
 
 /// Represents a single step in the execution pipeline that filters on a specific column.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PipelineStep {
+    /// Produces batches for the downstream step.
+    pub current_producer: Sender<PipelineBatch>,
+    /// Receives batches produced by the previous step.
+    pub previous_receiver: Receiver<PipelineBatch>,
     /// The column this step filters on
     pub column: String,
     /// The filter expressions to apply to this column
@@ -12,23 +22,49 @@ pub struct PipelineStep {
 }
 
 impl PipelineStep {
-    pub fn new(column: String, filters: Vec<FilterExpr>) -> Self {
-        PipelineStep { column, filters }
+    pub fn new(
+        column: String,
+        filters: Vec<FilterExpr>,
+        current_producer: Sender<PipelineBatch>,
+        previous_receiver: Receiver<PipelineBatch>,
+    ) -> Self {
+        PipelineStep {
+            current_producer,
+            previous_receiver,
+            column,
+            filters,
+        }
     }
 }
 
 /// Represents the execution pipeline for a query.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Pipeline {
     /// The table name this pipeline operates on
     pub table_name: String,
     /// Sequential steps to execute filters, each on a specific column
     pub steps: Vec<PipelineStep>,
+    /// Tracks the next slot available for downstream execution bookkeeping
+    pub next_free_slot: AtomicUsize,
+    /// Identifier for tracing/logging purposes
+    pub id: String,
+    /// Entry point producer feeding the first pipeline step
+    pub entry_producer: Sender<PipelineBatch>,
 }
 
 impl Pipeline {
-    pub fn new(table_name: String, steps: Vec<PipelineStep>) -> Self {
-        Pipeline { table_name, steps }
+    pub fn new(
+        table_name: String,
+        steps: Vec<PipelineStep>,
+        entry_producer: Sender<PipelineBatch>,
+    ) -> Self {
+        Pipeline {
+            table_name,
+            steps,
+            next_free_slot: AtomicUsize::new(0),
+            id: generate_pipeline_id(),
+            entry_producer,
+        }
     }
 }
 
@@ -46,15 +82,22 @@ pub fn build_pipeline(plan: &QueryPlan) -> Vec<Pipeline> {
             let grouped = group_filters_by_column(leaf_filters);
 
             // Convert groups into pipeline steps (random order for now)
-            let steps: Vec<PipelineStep> = grouped
-                .into_iter()
-                .map(|(column, filters)| PipelineStep::new(column, filters))
-                .collect();
+            let grouped_steps: Vec<(String, Vec<FilterExpr>)> = grouped.into_iter().collect();
+            let (entry_producer, steps) = attach_channels(grouped_steps);
 
-            pipelines.push(Pipeline::new(table.table_name.clone(), steps));
+            pipelines.push(Pipeline::new(
+                table.table_name.clone(),
+                steps,
+                entry_producer,
+            ));
         } else {
             // No filters, empty pipeline
-            pipelines.push(Pipeline::new(table.table_name.clone(), Vec::new()));
+            let (entry_producer, _) = channel::unbounded::<PipelineBatch>();
+            pipelines.push(Pipeline::new(
+                table.table_name.clone(),
+                Vec::new(),
+                entry_producer,
+            ));
         }
     }
 
@@ -116,6 +159,36 @@ fn extract_primary_column(expr: &Expr) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn attach_channels(
+    grouped_steps: Vec<(String, Vec<FilterExpr>)>,
+) -> (Sender<PipelineBatch>, Vec<PipelineStep>) {
+    let (entry_producer, mut previous_receiver) = channel::unbounded::<PipelineBatch>();
+    let mut steps = Vec::with_capacity(grouped_steps.len());
+
+    for (column, filters) in grouped_steps {
+        let (current_producer, next_receiver) = channel::unbounded::<PipelineBatch>();
+        steps.push(PipelineStep::new(
+            column,
+            filters,
+            current_producer,
+            previous_receiver,
+        ));
+        previous_receiver = next_receiver;
+    }
+
+    (entry_producer, steps)
+}
+
+fn generate_pipeline_id() -> String {
+    let mut rng = rand::thread_rng();
+    let suffix: String = (&mut rng)
+        .sample_iter(&Alphanumeric)
+        .take(16)
+        .map(char::from)
+        .collect();
+    format!("pipe-{suffix}")
 }
 
 #[cfg(test)]
