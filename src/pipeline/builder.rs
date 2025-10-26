@@ -105,14 +105,8 @@ fn extract_primary_column(expr: &Expr) -> Option<String> {
         UnaryOp { expr, .. } | Nested(expr) | Cast { expr, .. } | TryCast { expr, .. } => {
             extract_primary_column(expr)
         }
-        IsFalse(expr)
-        | IsNotFalse(expr)
-        | IsTrue(expr)
-        | IsNotTrue(expr)
-        | IsNull(expr)
-        | IsNotNull(expr)
-        | IsUnknown(expr)
-        | IsNotUnknown(expr) => extract_primary_column(expr),
+        IsFalse(expr) | IsNotFalse(expr) | IsTrue(expr) | IsNotTrue(expr) | IsNull(expr)
+        | IsNotNull(expr) | IsUnknown(expr) | IsNotUnknown(expr) => extract_primary_column(expr),
         InList { expr, .. } | InSubquery { expr, .. } | InUnnest { expr, .. } => {
             extract_primary_column(expr)
         }

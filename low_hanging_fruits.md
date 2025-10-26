@@ -20,3 +20,7 @@ step 2: [from the rows that passed the filters from step 1, apply the filters on
 Repeat step 2 untill all filters have been applied
 
 for now, let's just make it random, like we just randomly make steps from the query plan, no optimizations about which filter should come first as of now
+
+---
+
+okay, now we need the darn Executor, holy shit man 

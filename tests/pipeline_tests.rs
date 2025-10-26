@@ -88,8 +88,8 @@ fn builds_pipeline_for_delete_with_filter() {
 
 #[test]
 fn builds_pipeline_for_update_with_filter() {
-    let plan = plan_sql("UPDATE accounts SET balance = 0 WHERE id = 42 AND status = 'closed'")
-        .unwrap();
+    let plan =
+        plan_sql("UPDATE accounts SET balance = 0 WHERE id = 42 AND status = 'closed'").unwrap();
     let pipelines = build_pipeline(&plan);
 
     assert_eq!(pipelines.len(), 1);
