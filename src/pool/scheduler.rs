@@ -26,14 +26,14 @@ the thing is, if we use a single thread for WAL, I dont think we can kinda eat t
 this is a pretty fair scheduler which treats every single
 */
 
-use std::sync::{Arc, Mutex, mpsc};
+use crossbeam::channel;
 use std::thread;
 use std::time::Instant;
 
 // Minimal thread pool
 struct ThreadPool {
     workers: Vec<Worker>,
-    sender: Option<mpsc::Sender<Job>>,
+    sender: Option<channel::Sender<Job>>,
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -44,18 +44,16 @@ struct Worker {
 
 impl ThreadPool {
     fn new(size: usize) -> Self {
-        let (sender, receiver) = mpsc::channel::<Job>();
-        let receiver = Arc::new(Mutex::new(receiver));
+        let (sender, receiver) = channel::unbounded::<Job>();
 
         let mut workers = Vec::with_capacity(size);
 
         for _ in 0..size {
-            let receiver = Arc::clone(&receiver);
+            let receiver = receiver.clone();
 
             let thread = thread::spawn(move || {
                 loop {
-                    let job = receiver.lock().unwrap().recv();
-                    match job {
+                    match receiver.recv() {
                         Ok(job) => job(),
                         Err(_) => break, // channel closed, exit loop
                     }
