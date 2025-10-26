@@ -1,5 +1,7 @@
 use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
-use crate::page_handler::{page_io::PageIO, PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use crate::page_handler::{
+    PageFetcher, PageHandler, PageLocator, PageMaterializer, page_io::PageIO,
+};
 use std::collections::HashMap;
 use std::fs::File;
 use std::hash::Hash;
