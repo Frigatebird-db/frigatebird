@@ -14,3 +14,6 @@ sqlparser = "0.44"
 crossbeam = "0.8.4"
 crossbeam-skiplist = "0.1"
 rand = "0.8"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"

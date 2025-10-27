@@ -4,7 +4,7 @@ use rand::{Rng, distributions::Alphanumeric};
 use sqlparser::ast::Expr;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 /// Lightweight batch placeholder flowing between pipeline stages.
 pub type PipelineBatch = Vec<usize>;
@@ -20,6 +20,8 @@ pub struct PipelineStep {
     pub column: String,
     /// The filter expressions to apply to this column
     pub filters: Vec<FilterExpr>,
+    /// Indicates whether this is the first step in the job chain
+    pub is_root: bool,
 }
 
 impl PipelineStep {
@@ -28,18 +30,33 @@ impl PipelineStep {
         filters: Vec<FilterExpr>,
         current_producer: Sender<PipelineBatch>,
         previous_receiver: Receiver<PipelineBatch>,
+        is_root: bool,
     ) -> Self {
         PipelineStep {
             current_producer,
             previous_receiver,
             column,
             filters,
+            is_root,
         }
     }
 
     /// Placeholder execution loop for step-level runtime.
-    pub fn execute(&self) -> ! {
-        loop {}
+    pub fn execute(&self) {
+        let batch = if self.is_root {
+            Some(Vec::new())
+        } else {
+            self.previous_receiver.recv().ok()
+        };
+
+        if let Some(mut rows) = batch {
+            self.apply_filters(&mut rows);
+            let _ = self.current_producer.send(rows);
+        }
+    }
+
+    fn apply_filters(&self, _rows: &mut PipelineBatch) {
+        // Filtering logic will be provided later; no-op keeps this path minimal for now.
     }
 }
 
@@ -77,9 +94,34 @@ impl Job {
         }
     }
 
-    /// Placeholder iterator for future pipeline runtime.
-    pub fn get_next(&self) -> ! {
-        loop {}
+    /// Attempts to run the next pipeline step via CAS on `next_free_slot`.
+    pub fn get_next(&self) {
+        let total = self.steps.len();
+        if total == 0 {
+            return;
+        }
+
+        let mut slot = self.next_free_slot.load(AtomicOrdering::Relaxed);
+        loop {
+            if slot >= total {
+                return;
+            }
+
+            match self.next_free_slot.compare_exchange_weak(
+                slot,
+                slot + 1,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.steps[slot].execute();
+                    return;
+                }
+                Err(current) => {
+                    slot = current;
+                }
+            }
+        }
     }
 }
 
@@ -191,6 +233,7 @@ fn attach_channels(
 ) -> (Sender<PipelineBatch>, Vec<PipelineStep>) {
     let (entry_producer, mut previous_receiver) = channel::unbounded::<PipelineBatch>();
     let mut steps = Vec::with_capacity(grouped_steps.len());
+    let mut is_root = true;
 
     for (column, filters) in grouped_steps {
         let (current_producer, next_receiver) = channel::unbounded::<PipelineBatch>();
@@ -199,8 +242,10 @@ fn attach_channels(
             filters,
             current_producer,
             previous_receiver,
+            is_root,
         ));
         previous_receiver = next_receiver;
+        is_root = false;
     }
 
     (entry_producer, steps)
