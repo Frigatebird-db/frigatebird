@@ -1,13 +1,13 @@
 use crate::cache::page_cache::PageCacheEntryCompressed;
 #[cfg(target_os = "linux")]
-use io_uring::{opcode, types, IoUring};
-use rkyv::ser::{serializers::AllocSerializer, Serializer};
-use rkyv::{Archive, Deserialize, Serialize};
+use io_uring::{IoUring, opcode, types};
 #[cfg(target_os = "linux")]
 use libc;
+use rkyv::ser::{Serializer, serializers::AllocSerializer};
+use rkyv::{Archive, Deserialize, Serialize};
+use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
-use std::fs::File;
 use std::io;
 #[cfg(not(target_os = "linux"))]
 use std::io::Read;
@@ -109,7 +109,7 @@ impl PageIO {
             .collect())
     }
 
-#[cfg(not(target_os = "linux"))]
+    #[cfg(not(target_os = "linux"))]
     pub fn read_batch_from_path(
         &self,
         path: &str,
@@ -244,7 +244,7 @@ fn open_direct_writer(path: &str) -> io::Result<File> {
 mod tests {
     use super::{open_direct_reader, open_direct_writer};
     use std::env;
-    use std::fs::{remove_file, File};
+    use std::fs::{File, remove_file};
     use std::os::fd::AsRawFd;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
