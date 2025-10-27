@@ -137,9 +137,18 @@ fn page_cache_eviction_lru_order_stress() {
     cache.add("page10", create_page(5));
 
     // page0 should be evicted (oldest), page1 should remain (recently re-added)
-    assert!(!cache.has("page0"), "page0 should have been evicted as oldest");
-    assert!(cache.has("page1"), "page1 was re-added recently, should remain");
-    assert!(cache.has("page10"), "page10 was just added, should be present");
+    assert!(
+        !cache.has("page0"),
+        "page0 should have been evicted as oldest"
+    );
+    assert!(
+        cache.has("page1"),
+        "page1 was re-added recently, should remain"
+    );
+    assert!(
+        cache.has("page10"),
+        "page10 was just added, should be present"
+    );
 }
 
 #[test]
@@ -213,7 +222,10 @@ fn compressor_single_byte_entries() {
     let decompressed = compressor.decompress(Arc::new(compressed));
 
     assert_eq!(decompressed.page.entries.len(), 100);
-    assert_eq!(uncompressed.page.entries.len(), decompressed.page.entries.len());
+    assert_eq!(
+        uncompressed.page.entries.len(),
+        decompressed.page.entries.len()
+    );
 }
 
 #[test]
@@ -224,7 +236,10 @@ fn entry_max_size_string() {
 
     // Serialize and check size
     let serialized = bincode::serialize(&entry).unwrap();
-    assert!(serialized.len() > 1_000_000, "Large entry should serialize to >1MB");
+    assert!(
+        serialized.len() > 1_000_000,
+        "Large entry should serialize to >1MB"
+    );
 }
 
 #[test]
@@ -314,7 +329,10 @@ fn page_directory_lookup_after_many_versions() {
     // All IDs should be lookupable
     for id in &ids {
         let result = directory.lookup(id);
-        assert!(result.is_some(), "Should be able to lookup any registered ID");
+        assert!(
+            result.is_some(),
+            "Should be able to lookup any registered ID"
+        );
     }
 
     // Query should still work with MVCC max versions (8)
@@ -351,8 +369,10 @@ fn compressor_highly_repetitive_data() {
     let compressed = compressor.compress(Arc::clone(&uncompressed));
 
     // Highly repetitive data should compress very well
-    assert!(compressed.page.len() < original_size / 50,
-        "Highly repetitive data should compress to <2% of original size");
+    assert!(
+        compressed.page.len() < original_size / 50,
+        "Highly repetitive data should compress to <2% of original size"
+    );
 }
 
 #[test]
@@ -374,7 +394,10 @@ fn max_u64_timestamp_query() {
 
     // Query with maximum possible timestamp
     let results = directory.range("col1", 0, 10, u64::MAX);
-    assert!(results.len() > 0, "u64::MAX timestamp should find all versions");
+    assert!(
+        results.len() > 0,
+        "u64::MAX timestamp should find all versions"
+    );
 }
 
 #[test]

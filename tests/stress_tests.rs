@@ -1,13 +1,13 @@
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed, CacheLifecycle};
+use crossbeam::channel;
+use idk_uwu_ig::cache::page_cache::{CacheLifecycle, PageCache, PageCacheEntryUncompressed};
 use idk_uwu_ig::entry::Entry;
+use idk_uwu_ig::executor::PipelineExecutor;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page::Page;
-use idk_uwu_ig::executor::PipelineExecutor;
 use idk_uwu_ig::pipeline::{Job, PipelineStep};
-use crossbeam::channel;
-use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -32,7 +32,11 @@ fn metadata_stress_concurrent_registration_same_column() {
         let dir = Arc::clone(&directory);
         let handle = thread::spawn(move || {
             for j in 0..50 {
-                dir.register_page("hot_column", format!("file{}_{}.db", i, j), (i * 1000 + j) as u64);
+                dir.register_page(
+                    "hot_column",
+                    format!("file{}_{}.db", i, j),
+                    (i * 1000 + j) as u64,
+                );
             }
         });
         handles.push(handle);
@@ -44,7 +48,10 @@ fn metadata_stress_concurrent_registration_same_column() {
 
     // Should be able to query without deadlock or corruption
     let results = directory.range("hot_column", 0, 100, u64::MAX);
-    assert!(results.len() > 0, "Should find pages after concurrent registration");
+    assert!(
+        results.len() > 0,
+        "Should find pages after concurrent registration"
+    );
 }
 
 #[test]
@@ -92,7 +99,11 @@ fn metadata_stress_interleaved_register_and_query() {
         let dir = Arc::clone(&directory);
         let handle = thread::spawn(move || {
             for j in 0..100 {
-                dir.register_page("col1", format!("writer{}_{}.db", i, j), (i * 100 + j) as u64);
+                dir.register_page(
+                    "col1",
+                    format!("writer{}_{}.db", i, j),
+                    (i * 100 + j) as u64,
+                );
                 if j % 10 == 0 {
                     thread::sleep(Duration::from_micros(100));
                 }
@@ -107,7 +118,10 @@ fn metadata_stress_interleaved_register_and_query() {
         let handle = thread::spawn(move || {
             for _ in 0..200 {
                 let results = dir.range("col1", 0, 1000, u64::MAX);
-                assert!(results.len() > 0, "Should always find at least initial pages");
+                assert!(
+                    results.len() > 0,
+                    "Should always find at least initial pages"
+                );
             }
         });
         handles.push(handle);
@@ -227,7 +241,11 @@ fn cache_stress_concurrent_add_and_evict() {
             }
         }
     }
-    assert!(count <= 10, "Cache should maintain capacity limit, found {}", count);
+    assert!(
+        count <= 10,
+        "Cache should maintain capacity limit, found {}",
+        count
+    );
 }
 
 #[test]
@@ -296,7 +314,9 @@ fn cache_stress_lifecycle_callbacks_under_load() {
     }
 
     let mut cache = PageCache::new();
-    cache.set_lifecycle(Some(Arc::new(TestLifecycle { counter: eviction_count_clone })));
+    cache.set_lifecycle(Some(Arc::new(TestLifecycle {
+        counter: eviction_count_clone,
+    })));
 
     // Trigger many evictions
     for i in 0..1000 {
@@ -304,7 +324,11 @@ fn cache_stress_lifecycle_callbacks_under_load() {
     }
 
     let evictions = eviction_count.load(Ordering::SeqCst);
-    assert!(evictions >= 990, "Should have many evictions, got {}", evictions);
+    assert!(
+        evictions >= 990,
+        "Should have many evictions, got {}",
+        evictions
+    );
 }
 
 #[test]
@@ -352,7 +376,10 @@ fn compressor_stress_concurrent_operations() {
                 let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
                 let compressed = comp.compress(Arc::clone(&uncompressed));
                 let decompressed = comp.decompress(Arc::new(compressed));
-                assert_eq!(uncompressed.page.entries.len(), decompressed.page.entries.len());
+                assert_eq!(
+                    uncompressed.page.entries.len(),
+                    decompressed.page.entries.len()
+                );
             }
         });
         handles.push(handle);
@@ -373,7 +400,10 @@ fn compressor_stress_large_pages() {
         let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
         let compressed = compressor.compress(Arc::clone(&uncompressed));
         let decompressed = compressor.decompress(Arc::new(compressed));
-        assert_eq!(uncompressed.page.entries.len(), decompressed.page.entries.len());
+        assert_eq!(
+            uncompressed.page.entries.len(),
+            decompressed.page.entries.len()
+        );
     }
 }
 
@@ -427,7 +457,10 @@ fn compressor_stress_random_size_pages() {
         let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
         let compressed = compressor.compress(Arc::clone(&uncompressed));
         let decompressed = compressor.decompress(Arc::new(compressed));
-        assert_eq!(uncompressed.page.entries.len(), decompressed.page.entries.len());
+        assert_eq!(
+            uncompressed.page.entries.len(),
+            decompressed.page.entries.len()
+        );
     }
 }
 
@@ -497,13 +530,8 @@ fn executor_stress_concurrent_submission() {
                 let (tx, rx) = channel::unbounded();
                 let _ = tx.send(vec![]);
 
-                let step = PipelineStep::new(
-                    format!("t{}j{}c1", thread_id, job_id),
-                    vec![],
-                    tx,
-                    rx,
-                    true,
-                );
+                let step =
+                    PipelineStep::new(format!("t{}j{}c1", thread_id, job_id), vec![], tx, rx, true);
                 let job = Job::new(format!("t{}j{}", thread_id, job_id), vec![step], entry_tx);
                 exec.submit(job);
             }
@@ -526,9 +554,9 @@ fn executor_stress_variable_job_sizes() {
     for i in 0..100 {
         let (entry_tx, _) = channel::unbounded();
         let step_count = match i % 3 {
-            0 => 1,     // Small
-            1 => 10,    // Medium
-            _ => 30,    // Large
+            0 => 1,  // Small
+            1 => 10, // Medium
+            _ => 30, // Large
         };
 
         let mut steps = vec![];
@@ -573,10 +601,10 @@ fn entry_stress_large_data() {
 #[test]
 fn entry_stress_unicode_combinations() {
     let test_strings = vec![
-        "🚀" .repeat(1000),
+        "🚀".repeat(1000),
         "あ".repeat(1000),
         "€".repeat(1000),
-        "👨‍👩‍👧‍👦".repeat(100),  // Family emoji with ZWJ
+        "👨‍👩‍👧‍👦".repeat(100), // Family emoji with ZWJ
         "नमस्ते".repeat(500),
         "Hello\u{0301}".repeat(1000), // Combining characters
     ];
@@ -640,7 +668,11 @@ fn chaos_test_everything_concurrent() {
         let dir = Arc::clone(&directory);
         let handle = thread::spawn(move || {
             for j in 0..100 {
-                dir.register_page(&format!("col{}", i % 5), format!("f{}_{}.db", i, j), j as u64);
+                dir.register_page(
+                    &format!("col{}", i % 5),
+                    format!("f{}_{}.db", i, j),
+                    j as u64,
+                );
             }
         });
         handles.push(handle);

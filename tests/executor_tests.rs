@@ -1,8 +1,8 @@
+use crossbeam::channel;
 use idk_uwu_ig::executor::PipelineExecutor;
 use idk_uwu_ig::pipeline::{Job, PipelineBatch, PipelineStep};
-use crossbeam::channel;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 

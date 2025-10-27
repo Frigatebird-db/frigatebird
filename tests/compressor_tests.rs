@@ -28,7 +28,10 @@ fn compress_then_decompress_empty_page() {
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(uncompressed.page.entries.len(), decompressed.page.entries.len());
+    assert_eq!(
+        uncompressed.page.entries.len(),
+        decompressed.page.entries.len()
+    );
 }
 
 #[test]
@@ -82,7 +85,10 @@ fn compress_large_page() {
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(uncompressed.page.entries.len(), decompressed.page.entries.len());
+    assert_eq!(
+        uncompressed.page.entries.len(),
+        decompressed.page.entries.len()
+    );
 }
 
 #[test]
@@ -102,7 +108,10 @@ fn compress_incompressible_data() {
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(uncompressed.page.entries.len(), decompressed.page.entries.len());
+    assert_eq!(
+        uncompressed.page.entries.len(),
+        decompressed.page.entries.len()
+    );
 }
 
 #[test]

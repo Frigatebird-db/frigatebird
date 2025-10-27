@@ -1,7 +1,9 @@
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use idk_uwu_ig::cache::page_cache::{
+    PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
+};
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, PageDescriptor, TableMetaStore};
+use idk_uwu_ig::metadata_store::{PageDescriptor, PageDirectory, TableMetaStore};
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
@@ -26,8 +28,14 @@ fn setup_page_handler() -> (Arc<PageHandler>, Arc<PageDirectory>) {
     let compressor = Arc::new(Compressor::new());
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
     (handler, directory)
@@ -40,8 +48,12 @@ fn setup_page_handler() -> (Arc<PageHandler>, Arc<PageDirectory>) {
 fn prefetch_k_equals_zero() {
     let (handler, directory) = setup_page_handler();
 
-    let desc1 = directory.register_page("col1", "test.db".to_string(), 0).unwrap();
-    let desc2 = directory.register_page("col1", "test.db".to_string(), 1024).unwrap();
+    let desc1 = directory
+        .register_page("col1", "test.db".to_string(), 0)
+        .unwrap();
+    let desc2 = directory
+        .register_page("col1", "test.db".to_string(), 1024)
+        .unwrap();
 
     let page_ids = vec![desc1.id, desc2.id];
     let results = handler.get_pages_with_prefetch(&page_ids, 0);
@@ -63,7 +75,11 @@ fn prefetch_empty_list() {
 fn prefetch_nonexistent_pages() {
     let (handler, _directory) = setup_page_handler();
 
-    let page_ids = vec!["fake1".to_string(), "fake2".to_string(), "fake3".to_string()];
+    let page_ids = vec![
+        "fake1".to_string(),
+        "fake2".to_string(),
+        "fake3".to_string(),
+    ];
     let results = handler.get_pages_with_prefetch(&page_ids, 2);
 
     // Should handle nonexistent pages gracefully
@@ -92,7 +108,9 @@ fn ensure_pages_cached_nonexistent() {
 fn ensure_pages_cached_already_cached() {
     let (handler, directory) = setup_page_handler();
 
-    let desc = directory.register_page("col1", "test.db".to_string(), 0).unwrap();
+    let desc = directory
+        .register_page("col1", "test.db".to_string(), 0)
+        .unwrap();
     let page = create_test_page(5);
     handler.write_back_uncompressed(&desc.id, PageCacheEntryUncompressed { page });
 
@@ -173,8 +191,10 @@ fn compress_degenerate_case_all_same_char() {
     let compressed = compressor.compress(Arc::clone(&uncompressed));
 
     // Should compress extremely well
-    assert!(compressed.page.len() < original_size / 100,
-        "Degenerate case should compress to <1% of original");
+    assert!(
+        compressed.page.len() < original_size / 100,
+        "Degenerate case should compress to <1% of original"
+    );
 }
 
 // Page cache stress tests
@@ -258,7 +278,10 @@ fn mvcc_version_overflow() {
 
     // Should still be able to query
     let results = directory.range("col1", 0, 10, u64::MAX);
-    assert!(results.len() > 0, "Should find latest version even after overflow");
+    assert!(
+        results.len() > 0,
+        "Should find latest version even after overflow"
+    );
 
     // Old versions should be pruned, verify by checking timestamp
     let old_timestamp = idk_uwu_ig::entry::current_epoch_millis() - 1000;

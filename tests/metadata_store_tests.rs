@@ -38,7 +38,9 @@ fn page_directory_latest_returns_most_recent() {
 
     directory.register_page("col1", "test.db".to_string(), 0);
     std::thread::sleep(std::time::Duration::from_millis(10));
-    let desc2 = directory.register_page("col1", "test.db".to_string(), 1024).unwrap();
+    let desc2 = directory
+        .register_page("col1", "test.db".to_string(), 1024)
+        .unwrap();
 
     let latest = directory.latest("col1");
     assert!(latest.is_some());
@@ -161,7 +163,9 @@ fn page_directory_concurrent_lookup() {
 
     let mut ids = vec![];
     for i in 0..5 {
-        let desc = directory.register_page(&format!("col{}", i), "test.db".to_string(), i * 1024).unwrap();
+        let desc = directory
+            .register_page(&format!("col{}", i), "test.db".to_string(), i * 1024)
+            .unwrap();
         ids.push(desc.id.clone());
     }
 
