@@ -1,0 +1,266 @@
+use idk_uwu_ig::cache::page_cache::{CacheLifecycle, PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use idk_uwu_ig::entry::Entry;
+use idk_uwu_ig::page::Page;
+use std::sync::{Arc, Mutex};
+
+fn create_test_page(id: usize) -> Page {
+    let mut page = Page::new();
+    page.add_entry(Entry::new(&format!("data_{}", id)));
+    page
+}
+
+#[test]
+fn page_cache_new_creates_empty() {
+    let cache: PageCache<Page> = PageCache::new();
+    assert_eq!(cache.store.len(), 0);
+    assert_eq!(cache.lru_queue.len(), 0);
+}
+
+#[test]
+fn page_cache_add_single_page() {
+    let mut cache = PageCache::new();
+    let page = create_test_page(1);
+    cache.add("page1", page);
+
+    assert!(cache.has("page1"));
+    assert_eq!(cache.store.len(), 1);
+    assert_eq!(cache.lru_queue.len(), 1);
+}
+
+#[test]
+fn page_cache_add_multiple_pages() {
+    let mut cache = PageCache::new();
+
+    for i in 0..5 {
+        cache.add(&format!("page{}", i), create_test_page(i));
+    }
+
+    assert_eq!(cache.store.len(), 5);
+    assert_eq!(cache.lru_queue.len(), 5);
+}
+
+#[test]
+fn page_cache_get_existing_page() {
+    let mut cache = PageCache::new();
+    let page = create_test_page(1);
+    cache.add("page1", page);
+
+    let retrieved = cache.get("page1");
+    assert!(retrieved.is_some());
+}
+
+#[test]
+fn page_cache_get_nonexistent_page_panics() {
+    let cache: PageCache<Page> = PageCache::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cache.get("nonexistent");
+    }));
+    assert!(result.is_err());
+}
+
+#[test]
+fn page_cache_has_returns_correct_status() {
+    let mut cache = PageCache::new();
+    assert!(!cache.has("page1"));
+
+    cache.add("page1", create_test_page(1));
+    assert!(cache.has("page1"));
+}
+
+#[test]
+fn page_cache_eviction_at_capacity() {
+    let mut cache = PageCache::new();
+
+    // Add pages up to and beyond capacity (10)
+    for i in 0..12 {
+        cache.add(&format!("page{}", i), create_test_page(i));
+    }
+
+    // Should only have 10 pages
+    assert_eq!(cache.store.len(), 10);
+    assert_eq!(cache.lru_queue.len(), 10);
+
+    // Oldest pages should be evicted
+    assert!(!cache.has("page0"));
+    assert!(!cache.has("page1"));
+    assert!(cache.has("page11"));
+}
+
+#[test]
+fn page_cache_lru_order() {
+    let mut cache = PageCache::new();
+
+    for i in 0..5 {
+        cache.add(&format!("page{}", i), create_test_page(i));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    // Add 6 more to trigger evictions
+    for i in 5..11 {
+        cache.add(&format!("page{}", i), create_test_page(i));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    // First page added should be evicted first
+    assert!(!cache.has("page0"));
+}
+
+#[test]
+fn page_cache_update_existing_page() {
+    let mut cache = PageCache::new();
+    cache.add("page1", create_test_page(1));
+
+    let old_size = cache.lru_queue.len();
+
+    // Update with new page
+    cache.add("page1", create_test_page(2));
+
+    // Should still have same number of entries
+    assert_eq!(cache.lru_queue.len(), old_size);
+    assert!(cache.has("page1"));
+}
+
+#[test]
+fn page_cache_manual_evict() {
+    let mut cache = PageCache::new();
+    cache.add("page1", create_test_page(1));
+
+    assert!(cache.has("page1"));
+    cache.evict("page1");
+
+    assert!(!cache.has("page1"));
+    assert_eq!(cache.store.len(), 0);
+    assert_eq!(cache.lru_queue.len(), 0);
+}
+
+#[test]
+fn page_cache_evict_nonexistent() {
+    let mut cache: PageCache<Page> = PageCache::new();
+    cache.evict("nonexistent"); // Should not panic
+    assert_eq!(cache.store.len(), 0);
+}
+
+struct TestLifecycle {
+    evicted: Arc<Mutex<Vec<String>>>,
+}
+
+impl CacheLifecycle<Page> for TestLifecycle {
+    fn on_evict(&self, id: &str, _data: Arc<Page>) {
+        self.evicted.lock().unwrap().push(id.to_string());
+    }
+}
+
+#[test]
+fn page_cache_lifecycle_called_on_evict() {
+    let evicted = Arc::new(Mutex::new(Vec::new()));
+    let lifecycle = Arc::new(TestLifecycle {
+        evicted: Arc::clone(&evicted),
+    });
+
+    let mut cache = PageCache::with_lifecycle(Some(lifecycle));
+
+    cache.add("page1", create_test_page(1));
+    cache.evict("page1");
+
+    let evicted_ids = evicted.lock().unwrap();
+    assert_eq!(evicted_ids.len(), 1);
+    assert_eq!(evicted_ids[0], "page1");
+}
+
+#[test]
+fn page_cache_lifecycle_called_on_capacity_evict() {
+    let evicted = Arc::new(Mutex::new(Vec::new()));
+    let lifecycle = Arc::new(TestLifecycle {
+        evicted: Arc::clone(&evicted),
+    });
+
+    let mut cache = PageCache::with_lifecycle(Some(lifecycle));
+
+    // Add 11 pages to trigger eviction
+    for i in 0..11 {
+        cache.add(&format!("page{}", i), create_test_page(i));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    let evicted_ids = evicted.lock().unwrap();
+    assert_eq!(evicted_ids.len(), 1);
+    assert_eq!(evicted_ids[0], "page0");
+}
+
+#[test]
+fn page_cache_set_lifecycle_after_creation() {
+    let evicted = Arc::new(Mutex::new(Vec::new()));
+    let lifecycle = Arc::new(TestLifecycle {
+        evicted: Arc::clone(&evicted),
+    });
+
+    let mut cache: PageCache<Page> = PageCache::new();
+    cache.set_lifecycle(Some(lifecycle));
+
+    cache.add("page1", create_test_page(1));
+    cache.evict("page1");
+
+    let evicted_ids = evicted.lock().unwrap();
+    assert_eq!(evicted_ids.len(), 1);
+}
+
+#[test]
+fn page_cache_compressed_entry_creation() {
+    let compressed = PageCacheEntryCompressed {
+        page: vec![1, 2, 3, 4],
+    };
+    assert_eq!(compressed.page.len(), 4);
+}
+
+#[test]
+fn page_cache_uncompressed_entry_creation() {
+    let page = create_test_page(1);
+    let uncompressed = PageCacheEntryUncompressed { page };
+    assert_eq!(uncompressed.page.entries.len(), 1);
+}
+
+#[test]
+fn page_cache_arc_sharing() {
+    let mut cache = PageCache::new();
+    cache.add("page1", create_test_page(1));
+
+    let arc1 = cache.get("page1").unwrap();
+    let arc2 = cache.get("page1").unwrap();
+
+    // Both Arcs should point to same data
+    assert!(Arc::ptr_eq(&arc1, &arc2));
+}
+
+#[test]
+fn page_cache_rapid_adds_and_evicts() {
+    let mut cache = PageCache::new();
+
+    for i in 0..100 {
+        cache.add(&format!("page{}", i), create_test_page(i));
+    }
+
+    // Should maintain capacity
+    assert_eq!(cache.store.len(), 10);
+    assert_eq!(cache.lru_queue.len(), 10);
+
+    // Should have latest pages
+    assert!(cache.has("page99"));
+    assert!(cache.has("page90"));
+}
+
+#[test]
+fn page_cache_clone_entries() {
+    let compressed = PageCacheEntryCompressed {
+        page: vec![1, 2, 3],
+    };
+    let cloned = compressed.clone();
+    assert_eq!(compressed.page, cloned.page);
+
+    let page = create_test_page(1);
+    let uncompressed = PageCacheEntryUncompressed { page };
+    let cloned_unc = uncompressed.clone();
+    assert_eq!(
+        uncompressed.page.entries.len(),
+        cloned_unc.page.entries.len()
+    );
+}

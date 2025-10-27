@@ -4,8 +4,13 @@ use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEnt
 use crate::helpers::compressor::Compressor;
 use crate::metadata_store::{PageDescriptor, PageDirectory};
 use crate::page_handler::page_io::PageIO;
+use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::thread;
+use std::time::Duration;
+
+const PREFETCH_POLL_INTERVAL_MS: u64 = 1;
 
 pub struct PageLocator {
     directory: Arc<PageDirectory>,
@@ -38,7 +43,7 @@ impl PageLocator {
 
 pub struct PageFetcher {
     compressed_page_cache: Arc<RwLock<PageCache<PageCacheEntryCompressed>>>,
-    page_io: Arc<PageIO>,
+    pub(crate) page_io: Arc<PageIO>,
 }
 
 impl PageFetcher {
@@ -86,6 +91,48 @@ impl PageFetcher {
 
         self.get_cached(&meta.id)
             .expect("compressed page inserted but not found")
+    }
+
+    pub fn fetch_and_insert_batch(&self, metas: &[PageDescriptor]) -> Vec<(String, Arc<PageCacheEntryCompressed>)> {
+        if metas.is_empty() {
+            return Vec::new();
+        }
+
+        // Group by disk path for batch reads
+        let mut by_path: HashMap<String, Vec<(usize, &PageDescriptor)>> = HashMap::new();
+        for (idx, meta) in metas.iter().enumerate() {
+            by_path.entry(meta.disk_path.clone())
+                .or_insert_with(Vec::new)
+                .push((idx, meta));
+        }
+
+        let mut results: Vec<Option<(String, PageCacheEntryCompressed)>> = vec![None; metas.len()];
+
+        // Batch read per unique path
+        for (path, items) in by_path.into_iter() {
+            let offsets: Vec<u64> = items.iter().map(|(_, m)| m.offset).collect();
+            let pages = self.page_io.read_batch_from_path(&path, &offsets)
+                .expect("batch read must succeed");
+
+            for ((idx, meta), page) in items.into_iter().zip(pages.into_iter()) {
+                results[idx] = Some((meta.id.clone(), page));
+            }
+        }
+
+        // Single write lock to insert all
+        {
+            let mut cache = self.compressed_page_cache.write().unwrap();
+            for result in results.iter().flatten() {
+                cache.add(&result.0, result.1.clone());
+            }
+        }
+
+        // Collect Arc references
+        results.into_iter()
+            .filter_map(|r| r.and_then(|(id, _)| {
+                self.get_cached(&id).map(|arc| (id, arc))
+            }))
+            .collect()
     }
 }
 
@@ -177,6 +224,8 @@ pub struct PageHandler {
     locator: Arc<PageLocator>,
     fetcher: Arc<PageFetcher>,
     materializer: Arc<PageMaterializer>,
+    prefetch_tx: Sender<Vec<String>>,
+    _prefetch_thread: thread::JoinHandle<()>,
 }
 
 impl PageHandler {
@@ -185,10 +234,22 @@ impl PageHandler {
         fetcher: Arc<PageFetcher>,
         materializer: Arc<PageMaterializer>,
     ) -> Self {
+        let (prefetch_tx, prefetch_rx) = channel::unbounded::<Vec<String>>();
+
+        let locator_clone = Arc::clone(&locator);
+        let fetcher_clone = Arc::clone(&fetcher);
+        let materializer_clone = Arc::clone(&materializer);
+
+        let prefetch_thread = thread::spawn(move || {
+            run_prefetch_loop(prefetch_rx, locator_clone, fetcher_clone, materializer_clone);
+        });
+
         Self {
             locator,
             fetcher,
             materializer,
+            prefetch_tx,
+            _prefetch_thread: prefetch_thread,
         }
     }
 
@@ -259,11 +320,7 @@ impl PageHandler {
 
         if !meta_map.is_empty() {
             let metas: Vec<PageDescriptor> = meta_map.values().cloned().collect();
-            let mut fetched: Vec<(String, Arc<PageCacheEntryCompressed>)> = Vec::new();
-            for meta in metas.iter() {
-                let comp = self.fetcher.fetch_and_insert(meta);
-                fetched.push((meta.id.clone(), comp));
-            }
+            let fetched = self.fetcher.fetch_and_insert_batch(&metas);
             self.materializer.materialize_many(fetched);
         }
 
@@ -278,5 +335,156 @@ impl PageHandler {
 
     pub fn write_back_uncompressed(&self, id: &str, page: PageCacheEntryUncompressed) {
         self.materializer.write_back(id, page);
+    }
+
+    pub fn flush_to_disk(&self, ids: &[String]) -> Result<(), std::io::Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        // Collect compressed pages from CPC
+        let cached = self.fetcher.collect_cached(ids);
+        if cached.is_empty() {
+            return Ok(());
+        }
+
+        // Group by disk path and lookup metadata
+        let mut by_path: HashMap<String, Vec<(u64, Vec<u8>)>> = HashMap::new();
+        for (id, compressed_page) in cached.into_iter() {
+            if let Some(meta) = self.locator.lookup(&id) {
+                by_path
+                    .entry(meta.disk_path)
+                    .or_insert_with(Vec::new)
+                    .push((meta.offset, compressed_page.page.to_vec()));
+            }
+        }
+
+        // Batch write per unique path
+        for (path, writes) in by_path.into_iter() {
+            self.fetcher.page_io.write_batch_to_path(&path, &writes)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn ensure_pages_cached(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+
+        let mut missing = Vec::new();
+        for id in ids {
+            if self.materializer.get_cached(id).is_none() && self.fetcher.get_cached(id).is_none() {
+                missing.push(id.clone());
+            }
+        }
+
+        if missing.is_empty() {
+            return;
+        }
+
+        let descriptors: Vec<PageDescriptor> = missing
+            .iter()
+            .filter_map(|id| self.locator.lookup(id))
+            .collect();
+
+        if !descriptors.is_empty() {
+            let _ = self.get_pages(descriptors);
+        }
+    }
+
+    pub fn get_pages_with_prefetch(
+        &self,
+        page_ids: &[String],
+        k: usize,
+    ) -> Vec<Arc<PageCacheEntryUncompressed>> {
+        if page_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let split = k.min(page_ids.len());
+
+        // Non-blocking prefetch send for remaining pages
+        if split < page_ids.len() {
+            let _ = self.prefetch_tx.send(page_ids[split..].to_vec());
+        }
+
+        // Blocking immediate fetch for first k pages
+        let descriptors: Vec<PageDescriptor> = page_ids[..split]
+            .iter()
+            .filter_map(|id| self.locator.lookup(id))
+            .collect();
+
+        self.get_pages(descriptors)
+    }
+}
+
+fn run_prefetch_loop(
+    rx: Receiver<Vec<String>>,
+    locator: Arc<PageLocator>,
+    fetcher: Arc<PageFetcher>,
+    materializer: Arc<PageMaterializer>,
+) {
+    let poll_interval = Duration::from_millis(PREFETCH_POLL_INTERVAL_MS);
+
+    loop {
+        match rx.recv_timeout(poll_interval) {
+            Ok(batch) => {
+                let mut accumulated = batch;
+
+                // Drain channel immediately to batch pending requests
+                while let Ok(more) = rx.try_recv() {
+                    accumulated.extend(more);
+                }
+
+                process_prefetch_batch(&accumulated, &locator, &fetcher, &materializer);
+            }
+            Err(channel::RecvTimeoutError::Timeout) => continue,
+            Err(channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+fn process_prefetch_batch(
+    ids: &[String],
+    locator: &Arc<PageLocator>,
+    fetcher: &Arc<PageFetcher>,
+    materializer: &Arc<PageMaterializer>,
+) {
+    if ids.is_empty() {
+        return;
+    }
+
+    // Dedupe
+    let unique: HashSet<String> = ids.iter().cloned().collect();
+
+    // Filter already cached (UPC first, then CPC)
+    let mut missing = Vec::new();
+    for id in unique {
+        if materializer.get_cached(&id).is_none() && fetcher.get_cached(&id).is_none() {
+            missing.push(id);
+        }
+    }
+
+    if missing.is_empty() {
+        return;
+    }
+
+    // Lookup metadata
+    let descriptors: Vec<PageDescriptor> = missing
+        .iter()
+        .filter_map(|id| locator.lookup(id))
+        .collect();
+
+    if descriptors.is_empty() {
+        return;
+    }
+
+    // Batch fetch compressed pages
+    let compressed = fetcher.fetch_and_insert_batch(&descriptors);
+
+    // Batch decompress into UPC
+    if !compressed.is_empty() {
+        materializer.materialize_many(compressed);
     }
 }
