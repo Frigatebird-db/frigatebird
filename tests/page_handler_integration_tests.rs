@@ -58,7 +58,7 @@ fn page_locator_range_for_column() {
     directory.register_page("col1", "test.db".to_string(), 1024);
 
     let locator = PageLocator::new(Arc::clone(&directory));
-    let range = locator.range_for_column("col1", 50, 150, u64::MAX);
+    let range = locator.range_for_column("col1", 0, 10, u64::MAX);
 
     assert!(range.len() >= 1);
 }

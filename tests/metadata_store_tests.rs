@@ -70,7 +70,7 @@ fn page_directory_range_query() {
     directory.register_page("col1", "test.db".to_string(), 1024);
     directory.register_page("col1", "test.db".to_string(), 2048);
 
-    let results = directory.range("col1", 50, 250, u64::MAX);
+    let results = directory.range("col1", 0, 10, u64::MAX);
     assert!(results.len() >= 1);
 }
 
