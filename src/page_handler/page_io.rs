@@ -59,7 +59,7 @@ impl PageIO {
         for (idx, offset) in offsets.iter().enumerate() {
             let mut buffer = vec![0u8; PREFIX_META_SIZE];
             let entry = opcode::Read::new(fd, buffer.as_mut_ptr(), PREFIX_META_SIZE as u32)
-                .offset(*offset as i64)
+                .offset(*offset)
                 .build()
                 .user_data(idx as u64);
             submit_entry(&mut ring, entry)?;
@@ -86,7 +86,7 @@ impl PageIO {
             let mut buffer = vec![0u8; *len];
             let data_offset = offsets[idx] + PREFIX_META_SIZE as u64;
             let entry = opcode::Read::new(fd, buffer.as_mut_ptr(), *len as u32)
-                .offset(data_offset as i64)
+                .offset(data_offset)
                 .build()
                 .user_data(idx as u64);
             submit_entry(&mut ring, entry)?;
@@ -182,7 +182,7 @@ fn ensure_result(res: i32) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn submit_entry(ring: &mut IoUring, mut entry: io_uring::squeue::Entry) -> io::Result<()> {
+fn submit_entry(ring: &mut IoUring, entry: io_uring::squeue::Entry) -> io::Result<()> {
     loop {
         match unsafe { ring.submission().push(&entry) } {
             Ok(()) => return Ok(()),
