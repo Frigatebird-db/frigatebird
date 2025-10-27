@@ -50,12 +50,9 @@ fn page_cache_get_existing_page() {
 }
 
 #[test]
-fn page_cache_get_nonexistent_page_panics() {
+fn page_cache_get_nonexistent_page_returns_none() {
     let cache: PageCache<Page> = PageCache::new();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        cache.get("nonexistent");
-    }));
-    assert!(result.is_err());
+    assert!(cache.get("nonexistent").is_none());
 }
 
 #[test]
