@@ -151,6 +151,73 @@ impl PageIO {
 
         Ok(())
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn write_batch_to_path(&self, path: &str, writes: &[(u64, Vec<u8>)]) -> io::Result<()> {
+        if writes.is_empty() {
+            return Ok(());
+        }
+
+        let file = open_direct_writer(path)?;
+        let fd = types::Fd(file.as_raw_fd());
+        let mut ring = IoUring::new(writes.len() as u32)?;
+
+        // Prepare all buffers upfront (io_uring needs stable pointers)
+        let mut buffers = Vec::with_capacity(writes.len());
+        for (_, data) in writes.iter() {
+            let new_meta = Metadata {
+                read_size: data.len(),
+            };
+
+            let mut serializer = AllocSerializer::<256>::default();
+            serializer.serialize_value(&new_meta).unwrap();
+            let meta_bytes = serializer.into_serializer().into_inner();
+
+            let mut meta_buffer = vec![0u8; PREFIX_META_SIZE];
+            meta_buffer[..meta_bytes.len()].copy_from_slice(&meta_bytes);
+
+            let mut combined = Vec::with_capacity(PREFIX_META_SIZE + data.len());
+            combined.extend_from_slice(&meta_buffer);
+            combined.extend_from_slice(data);
+
+            buffers.push(combined);
+        }
+
+        // Submit all writes
+        for (idx, (offset, _)) in writes.iter().enumerate() {
+            let buffer = &buffers[idx];
+            let entry = opcode::Write::new(fd, buffer.as_ptr(), buffer.len() as u32)
+                .offset(*offset)
+                .build()
+                .user_data(idx as u64);
+            submit_entry(&mut ring, entry)?;
+        }
+
+        // Wait for all completions
+        wait_for(&mut ring, writes.len(), |_idx, res| {
+            ensure_result(res)?;
+            Ok(())
+        })?;
+
+        // Single fsync after all writes
+        let sync_entry = opcode::Fsync::new(fd).build().user_data(u64::MAX);
+        submit_entry(&mut ring, sync_entry)?;
+        ring.submit_and_wait(1)?;
+        let mut cq = ring.completion();
+        if let Some(cqe) = cq.next() {
+            ensure_result(cqe.result())?;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn write_batch_to_path(&self, path: &str, writes: &[(u64, Vec<u8>)]) -> io::Result<()> {
+        for (offset, data) in writes.iter() {
+            self.write_to_path(path, *offset, data.clone())?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
