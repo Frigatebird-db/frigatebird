@@ -169,7 +169,13 @@ mod tests {
         let mut steps = Vec::with_capacity(step_count);
         for idx in 0..step_count {
             let (tx, rx) = channel::unbounded::<PipelineBatch>();
-            steps.push(PipelineStep::new(format!("c{idx}"), Vec::new(), tx, rx));
+            steps.push(PipelineStep::new(
+                format!("c{idx}"),
+                Vec::new(),
+                tx,
+                rx,
+                idx == 0,
+            ));
         }
         Job::new("t".into(), steps, entry_tx)
     }

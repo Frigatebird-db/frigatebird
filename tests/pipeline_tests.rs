@@ -103,6 +103,22 @@ fn builds_pipeline_for_update_with_filter() {
 }
 
 #[test]
+fn job_get_next_advances_steps() {
+    let plan =
+        plan_sql("SELECT id FROM users WHERE age > 18 AND name = 'John'").expect("valid plan");
+    let jobs = build_pipeline(&plan);
+    let job = &jobs[0];
+
+    job.get_next();
+    job.get_next();
+
+    assert_eq!(
+        job.next_free_slot.load(AtomicOrdering::Relaxed),
+        job.steps.len()
+    );
+}
+
+#[test]
 fn compares_jobs_by_cost() {
     let mut single_step = build_pipeline(
         &plan_sql("SELECT id FROM users WHERE age > 18").expect("valid single-step plan"),

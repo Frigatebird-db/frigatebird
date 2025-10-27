@@ -60,3 +60,16 @@ so when a main worker consumes a Job, it:
 Reserve worker blocks on that receiver, when it gets the wakeup call from the producer, it:
 1. checks the JobBoard(which is sorted by Job cost) and looks at the most expensive job, and removes it from there and calls get_next() on it
 (reserve workes help the main workers in heavy jobs, its intended)
+
+okay, now the Job.get_next() thingy, when someone calls it, they try to CAS to the Job.next_free_slot thingy, if they get it, they just do +1 and they get access to that index of PipelineStep, then they just call PipelineStep.execute()
+
+what PipelineStep.execute does is:
+- start reading from the previous step receiver, this is just the row numbers which have passed the filters from the previous PipelineStep, we apply the current filter over those rows for the current column filters(keep a dummy here for now, we will update the actual part later), and the ones which pass, it just puts the row numbers in the current producer to be consumed by next PipelineStep
+
+when someone gets the initial PipelineStep, they just consider all the rows as input from the previous non existent producer(just so that implementation is simpler)
+
+get it ? makes sense ? 
+
+---
+
+now, use the io_uring crate to add batch reads to iohandler, throw out the mac part, we are removing support for macos
