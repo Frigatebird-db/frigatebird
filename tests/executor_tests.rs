@@ -213,7 +213,11 @@ fn executor_step_execution_sequence() {
     let (tx1, rx1) = channel::unbounded();
     let (tx2, rx2) = channel::unbounded();
 
-    let step1 = PipelineStep::new("col1".into(), vec![], tx1, rx1.clone(), true);
+    // Send dummy data so steps don't block forever
+    let _ = tx1.send(vec![]);
+    let _ = tx2.send(vec![]);
+
+    let step1 = PipelineStep::new("col1".into(), vec![], tx1, rx1, true);
     let step2 = PipelineStep::new("col2".into(), vec![], tx2, rx2, false);
 
     let job = Job::new("table".into(), vec![step1, step2], entry_tx);
