@@ -1,3 +1,4 @@
+use crossbeam::channel as crossbeam_channel;
 use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
@@ -319,7 +320,7 @@ fn page_handler_get_pages_empty_list() {
     let (handler, _directory) = setup_page_handler();
 
     let empty: Vec<PageDescriptor> = vec![];
-    let results = handler.get_pages(&empty);
+    let results = handler.get_pages(empty);
 
     assert_eq!(results.len(), 0);
 }
@@ -333,7 +334,7 @@ fn page_handler_get_pages_duplicate_descriptors() {
 
     // Request same descriptor multiple times
     let descriptors = vec![desc.clone(), desc.clone(), desc.clone()];
-    let results = handler.get_pages(&descriptors);
+    let results = handler.get_pages(descriptors);
 
     // Should handle duplicates gracefully
     assert_eq!(results.len(), 3);
@@ -348,7 +349,7 @@ fn page_handler_write_back_then_read() {
 
     handler.write_back_uncompressed(&desc.id, PageCacheEntryUncompressed { page: page.clone() });
 
-    let results = handler.get_page(&desc);
+    let results = handler.get_page(desc);
     assert!(results.is_some());
     assert_eq!(results.unwrap().page.entries.len(), 10);
 }
@@ -374,7 +375,7 @@ fn page_handler_concurrent_write_back_same_id() {
     }
 
     // Should have one of the pages
-    let result = handler.get_page(&desc);
+    let result = handler.get_page(desc);
     assert!(result.is_some());
 }
 
