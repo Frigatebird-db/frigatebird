@@ -1,8 +1,10 @@
 use crossbeam::channel as crossbeam_channel;
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use idk_uwu_ig::cache::page_cache::{
+    PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
+};
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, PageDescriptor, TableMetaStore};
+use idk_uwu_ig::metadata_store::{PageDescriptor, PageDirectory, TableMetaStore};
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
@@ -29,8 +31,14 @@ fn setup_page_handler() -> (Arc<PageHandler>, Arc<PageDirectory>) {
     let compressor = Arc::new(Compressor::new());
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
     (handler, directory)
@@ -329,8 +337,15 @@ fn page_handler_get_pages_empty_list() {
 fn page_handler_get_pages_duplicate_descriptors() {
     let (handler, directory) = setup_page_handler();
 
-    let desc = directory.register_page("col1", "test.db".to_string(), 0).unwrap();
-    handler.write_back_uncompressed(&desc.id, PageCacheEntryUncompressed { page: create_test_page(5) });
+    let desc = directory
+        .register_page("col1", "test.db".to_string(), 0)
+        .unwrap();
+    handler.write_back_uncompressed(
+        &desc.id,
+        PageCacheEntryUncompressed {
+            page: create_test_page(5),
+        },
+    );
 
     // Request same descriptor multiple times
     let descriptors = vec![desc.clone(), desc.clone(), desc.clone()];
@@ -344,7 +359,9 @@ fn page_handler_get_pages_duplicate_descriptors() {
 fn page_handler_write_back_then_read() {
     let (handler, directory) = setup_page_handler();
 
-    let desc = directory.register_page("col1", "test.db".to_string(), 0).unwrap();
+    let desc = directory
+        .register_page("col1", "test.db".to_string(), 0)
+        .unwrap();
     let page = create_test_page(10);
 
     handler.write_back_uncompressed(&desc.id, PageCacheEntryUncompressed { page: page.clone() });
@@ -358,14 +375,21 @@ fn page_handler_write_back_then_read() {
 fn page_handler_concurrent_write_back_same_id() {
     let (handler, directory) = setup_page_handler();
 
-    let desc = directory.register_page("col1", "test.db".to_string(), 0).unwrap();
+    let desc = directory
+        .register_page("col1", "test.db".to_string(), 0)
+        .unwrap();
     let mut handles = vec![];
 
     for i in 0..10 {
         let handler_clone = Arc::clone(&handler);
         let id = desc.id.clone();
         let handle = thread::spawn(move || {
-            handler_clone.write_back_uncompressed(&id, PageCacheEntryUncompressed { page: create_test_page(i) });
+            handler_clone.write_back_uncompressed(
+                &id,
+                PageCacheEntryUncompressed {
+                    page: create_test_page(i),
+                },
+            );
         });
         handles.push(handle);
     }
@@ -383,11 +407,25 @@ fn page_handler_concurrent_write_back_same_id() {
 fn prefetch_all_pages_k_equals_total() {
     let (handler, directory) = setup_page_handler();
 
-    let desc1 = directory.register_page("col1", "test.db".to_string(), 0).unwrap();
-    let desc2 = directory.register_page("col1", "test.db".to_string(), 1024).unwrap();
+    let desc1 = directory
+        .register_page("col1", "test.db".to_string(), 0)
+        .unwrap();
+    let desc2 = directory
+        .register_page("col1", "test.db".to_string(), 1024)
+        .unwrap();
 
-    handler.write_back_uncompressed(&desc1.id, PageCacheEntryUncompressed { page: create_test_page(5) });
-    handler.write_back_uncompressed(&desc2.id, PageCacheEntryUncompressed { page: create_test_page(5) });
+    handler.write_back_uncompressed(
+        &desc1.id,
+        PageCacheEntryUncompressed {
+            page: create_test_page(5),
+        },
+    );
+    handler.write_back_uncompressed(
+        &desc2.id,
+        PageCacheEntryUncompressed {
+            page: create_test_page(5),
+        },
+    );
 
     let page_ids = vec![desc1.id, desc2.id];
     let results = handler.get_pages_with_prefetch(&page_ids, 2);
@@ -400,8 +438,15 @@ fn prefetch_all_pages_k_equals_total() {
 fn prefetch_k_greater_than_total() {
     let (handler, directory) = setup_page_handler();
 
-    let desc = directory.register_page("col1", "test.db".to_string(), 0).unwrap();
-    handler.write_back_uncompressed(&desc.id, PageCacheEntryUncompressed { page: create_test_page(5) });
+    let desc = directory
+        .register_page("col1", "test.db".to_string(), 0)
+        .unwrap();
+    handler.write_back_uncompressed(
+        &desc.id,
+        PageCacheEntryUncompressed {
+            page: create_test_page(5),
+        },
+    );
 
     let page_ids = vec![desc.id];
     let results = handler.get_pages_with_prefetch(&page_ids, 100);
@@ -425,7 +470,11 @@ fn job_with_zero_steps() {
 
     // Should handle gracefully
     job.get_next();
-    assert_eq!(job.next_free_slot.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        job.next_free_slot
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 #[test]
@@ -451,7 +500,11 @@ fn job_single_step() {
     };
 
     job.get_next();
-    assert_eq!(job.next_free_slot.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        job.next_free_slot
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 }
 
 #[test]
@@ -473,7 +526,11 @@ fn job_get_next_after_completion() {
     job.get_next();
 
     // Should remain at 0 since no steps
-    assert_eq!(job.next_free_slot.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        job.next_free_slot
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 // PageFetcher corner cases
@@ -496,7 +553,11 @@ fn fetcher_collect_cached_all_miss() {
     let page_io = Arc::new(PageIO {});
     let fetcher = PageFetcher::new(compressed_cache, page_io);
 
-    let ids = vec!["miss1".to_string(), "miss2".to_string(), "miss3".to_string()];
+    let ids = vec![
+        "miss1".to_string(),
+        "miss2".to_string(),
+        "miss3".to_string(),
+    ];
     let results = fetcher.collect_cached(&ids);
 
     assert_eq!(results.len(), 0);
@@ -511,7 +572,12 @@ fn fetcher_collect_cached_partial_hit() {
     // Add one page to cache
     {
         let mut cache = compressed_cache.write().unwrap();
-        cache.add("hit", PageCacheEntryCompressed { page: vec![1, 2, 3] });
+        cache.add(
+            "hit",
+            PageCacheEntryCompressed {
+                page: vec![1, 2, 3],
+            },
+        );
     }
 
     let ids = vec!["miss".to_string(), "hit".to_string(), "miss2".to_string()];

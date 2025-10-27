@@ -123,7 +123,7 @@ fn plan_insert() {
     let result = plan_statement(&statements[0]);
     // INSERT planning might not be fully implemented, check if error is expected
     match result {
-        Ok(_) => {}, // If it works, great
+        Ok(_) => {} // If it works, great
         Err(e) => println!("INSERT planning not fully implemented: {:?}", e),
     }
 }

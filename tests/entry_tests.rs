@@ -1,4 +1,4 @@
-use idk_uwu_ig::entry::{current_epoch_millis, Entry};
+use idk_uwu_ig::entry::{Entry, current_epoch_millis};
 use std::thread;
 use std::time::Duration;
 

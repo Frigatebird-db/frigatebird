@@ -93,7 +93,10 @@ impl PageFetcher {
             .expect("compressed page inserted but not found")
     }
 
-    pub fn fetch_and_insert_batch(&self, metas: &[PageDescriptor]) -> Vec<(String, Arc<PageCacheEntryCompressed>)> {
+    pub fn fetch_and_insert_batch(
+        &self,
+        metas: &[PageDescriptor],
+    ) -> Vec<(String, Arc<PageCacheEntryCompressed>)> {
         if metas.is_empty() {
             return Vec::new();
         }
@@ -101,7 +104,8 @@ impl PageFetcher {
         // Group by disk path for batch reads
         let mut by_path: HashMap<String, Vec<(usize, &PageDescriptor)>> = HashMap::new();
         for (idx, meta) in metas.iter().enumerate() {
-            by_path.entry(meta.disk_path.clone())
+            by_path
+                .entry(meta.disk_path.clone())
                 .or_insert_with(Vec::new)
                 .push((idx, meta));
         }
@@ -111,7 +115,9 @@ impl PageFetcher {
         // Batch read per unique path
         for (path, items) in by_path.into_iter() {
             let offsets: Vec<u64> = items.iter().map(|(_, m)| m.offset).collect();
-            let pages = self.page_io.read_batch_from_path(&path, &offsets)
+            let pages = self
+                .page_io
+                .read_batch_from_path(&path, &offsets)
                 .expect("batch read must succeed");
 
             for ((idx, meta), page) in items.into_iter().zip(pages.into_iter()) {
@@ -128,10 +134,9 @@ impl PageFetcher {
         }
 
         // Collect Arc references
-        results.into_iter()
-            .filter_map(|r| r.and_then(|(id, _)| {
-                self.get_cached(&id).map(|arc| (id, arc))
-            }))
+        results
+            .into_iter()
+            .filter_map(|r| r.and_then(|(id, _)| self.get_cached(&id).map(|arc| (id, arc))))
             .collect()
     }
 }
@@ -241,7 +246,12 @@ impl PageHandler {
         let materializer_clone = Arc::clone(&materializer);
 
         let prefetch_thread = thread::spawn(move || {
-            run_prefetch_loop(prefetch_rx, locator_clone, fetcher_clone, materializer_clone);
+            run_prefetch_loop(
+                prefetch_rx,
+                locator_clone,
+                fetcher_clone,
+                materializer_clone,
+            );
         });
 
         Self {
@@ -471,10 +481,8 @@ fn process_prefetch_batch(
     }
 
     // Lookup metadata
-    let descriptors: Vec<PageDescriptor> = missing
-        .iter()
-        .filter_map(|id| locator.lookup(id))
-        .collect();
+    let descriptors: Vec<PageDescriptor> =
+        missing.iter().filter_map(|id| locator.lookup(id)).collect();
 
     if descriptors.is_empty() {
         return;

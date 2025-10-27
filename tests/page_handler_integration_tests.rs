@@ -1,4 +1,6 @@
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use idk_uwu_ig::cache::page_cache::{
+    PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
+};
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::PageDirectory;
@@ -19,10 +21,14 @@ fn create_test_page(n: usize) -> Page {
 
 #[test]
 fn page_locator_lookup_works() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
 
-    let descriptor = directory.register_page("col1", "test.db".to_string(), 0).unwrap();
+    let descriptor = directory
+        .register_page("col1", "test.db".to_string(), 0)
+        .unwrap();
     let id = descriptor.id.clone();
 
     let locator = PageLocator::new(Arc::clone(&directory));
@@ -34,12 +40,16 @@ fn page_locator_lookup_works() {
 
 #[test]
 fn page_locator_latest_for_column() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
 
     directory.register_page("col1", "test.db".to_string(), 0);
     thread::sleep(Duration::from_millis(10));
-    let desc2 = directory.register_page("col1", "test.db".to_string(), 1024).unwrap();
+    let desc2 = directory
+        .register_page("col1", "test.db".to_string(), 1024)
+        .unwrap();
     let id2 = desc2.id.clone();
 
     let locator = PageLocator::new(Arc::clone(&directory));
@@ -51,7 +61,9 @@ fn page_locator_latest_for_column() {
 
 #[test]
 fn page_locator_range_for_column() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
 
     directory.register_page("col1", "test.db".to_string(), 0);
@@ -181,7 +193,8 @@ fn page_materializer_materialize_one() {
     let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let compressor = Arc::new(Compressor::new());
 
-    let materializer = PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor));
+    let materializer =
+        PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor));
 
     let page = create_test_page(5);
     let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
@@ -200,7 +213,8 @@ fn page_materializer_materialize_many() {
     let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let compressor = Arc::new(Compressor::new());
 
-    let materializer = PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor));
+    let materializer =
+        PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor));
 
     let mut items = vec![];
     for i in 0..5 {
@@ -246,7 +260,9 @@ fn page_materializer_collect_cached() {
 
 #[test]
 fn page_handler_new_creates_components() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -254,8 +270,14 @@ fn page_handler_new_creates_components() {
     let compressor = Arc::new(Compressor::new());
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = PageHandler::new(locator, fetcher, materializer);
 
@@ -264,7 +286,9 @@ fn page_handler_new_creates_components() {
 
 #[test]
 fn page_handler_locate_latest() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
     directory.register_page("col1", "test.db".to_string(), 0);
 
@@ -274,8 +298,14 @@ fn page_handler_locate_latest() {
     let compressor = Arc::new(Compressor::new());
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = PageHandler::new(locator, fetcher, materializer);
 
@@ -285,7 +315,9 @@ fn page_handler_locate_latest() {
 
 #[test]
 fn page_handler_ensure_pages_cached_empty() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -293,8 +325,14 @@ fn page_handler_ensure_pages_cached_empty() {
     let compressor = Arc::new(Compressor::new());
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = PageHandler::new(locator, fetcher, materializer);
 
@@ -303,12 +341,16 @@ fn page_handler_ensure_pages_cached_empty() {
 
 #[test]
 fn page_handler_ensure_pages_cached_already_in_cache() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
 
-    let descriptor = directory.register_page("col1", "test.db".to_string(), 0).unwrap();
+    let descriptor = directory
+        .register_page("col1", "test.db".to_string(), 0)
+        .unwrap();
     let id = descriptor.id.clone();
 
     {
@@ -325,8 +367,14 @@ fn page_handler_ensure_pages_cached_already_in_cache() {
     let compressor = Arc::new(Compressor::new());
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = PageHandler::new(locator, fetcher, materializer);
 
@@ -338,7 +386,9 @@ fn page_handler_ensure_pages_cached_already_in_cache() {
 
 #[test]
 fn page_handler_get_pages_with_prefetch_zero_k() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -346,8 +396,14 @@ fn page_handler_get_pages_with_prefetch_zero_k() {
     let compressor = Arc::new(Compressor::new());
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = PageHandler::new(locator, fetcher, materializer);
 
@@ -359,7 +415,9 @@ fn page_handler_get_pages_with_prefetch_zero_k() {
 
 #[test]
 fn page_handler_get_pages_with_prefetch_empty() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -367,8 +425,14 @@ fn page_handler_get_pages_with_prefetch_empty() {
     let compressor = Arc::new(Compressor::new());
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = PageHandler::new(locator, fetcher, materializer);
 
@@ -378,7 +442,9 @@ fn page_handler_get_pages_with_prefetch_empty() {
 
 #[test]
 fn page_handler_write_back_uncompressed() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -386,8 +452,14 @@ fn page_handler_write_back_uncompressed() {
     let compressor = Arc::new(Compressor::new());
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = PageHandler::new(locator, fetcher, materializer);
 
@@ -400,7 +472,9 @@ fn page_handler_write_back_uncompressed() {
 
 #[test]
 fn page_handler_concurrent_access() {
-    let store = Arc::new(RwLock::new(idk_uwu_ig::metadata_store::TableMetaStore::new()));
+    let store = Arc::new(RwLock::new(
+        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+    ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -412,8 +486,14 @@ fn page_handler_concurrent_access() {
     }
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
-    let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), Arc::clone(&page_io)));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::clone(&compressor),
+    ));
 
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
     let mut handles = vec![];
