@@ -116,7 +116,7 @@ impl<T> PageCache<T> {
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<T>> {
-        Some(Arc::clone(&self.store.get(id).unwrap().page))
+        self.store.get(id).map(|entry| Arc::clone(&entry.page))
     }
 
     pub fn evict(&mut self, id: &str) {
