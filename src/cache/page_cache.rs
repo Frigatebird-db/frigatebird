@@ -1,9 +1,8 @@
 use crate::entry::current_epoch_millis;
-use crate::page;
 use crate::page::Page;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 // user space page cache
 
@@ -23,7 +22,7 @@ Set((used_time,id),()...)
 
 create when adding, remove when removing
 */
-const LRUsize: usize = 10;
+const LRU_SIZE: usize = 10;
 
 pub trait CacheLifecycle<T>: Send + Sync {
     fn on_evict(&self, id: &str, data: Arc<T>);
@@ -105,8 +104,8 @@ impl<T> PageCache<T> {
         self.store.insert(id.to_string(), entry);
 
         self.lru_queue.insert((used_time, id.to_string()));
-        if self.lru_queue.len() > LRUsize {
-            let (oldest_time, oldest_id) = self.lru_queue.iter().next().unwrap().clone();
+        if self.lru_queue.len() > LRU_SIZE {
+            let (_oldest_time, oldest_id) = self.lru_queue.iter().next().unwrap().clone();
             self.evict(&oldest_id);
         }
     }
