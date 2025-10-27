@@ -24,4 +24,8 @@ impl Entry {
             suffix_meta: "".to_string(),
         }
     }
+
+    pub fn get_data(&self) -> &str {
+        &self.data
+    }
 }
