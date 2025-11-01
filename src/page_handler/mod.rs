@@ -2,7 +2,7 @@ pub mod page_io;
 
 use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
 use crate::helpers::compressor::Compressor;
-use crate::metadata_store::{PageDescriptor, PageDirectory};
+use crate::metadata_store::{PageDescriptor, PageDirectory, PageSlice};
 use crate::page_handler::page_io::PageIO;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
@@ -25,6 +25,10 @@ impl PageLocator {
         self.directory.latest(column)
     }
 
+    pub fn pages_for_column(&self, column: &str) -> Vec<PageDescriptor> {
+        self.directory.pages_for_column(column)
+    }
+
     pub fn range_for_column(
         &self,
         column: &str,
@@ -34,6 +38,15 @@ impl PageLocator {
     ) -> Vec<PageDescriptor> {
         self.directory
             .range(column, l_bound, r_bound, commit_time_upper_bound)
+    }
+
+    pub fn range_slices_for_column(
+        &self,
+        column: &str,
+        start_row: u64,
+        end_row: u64,
+    ) -> Vec<PageSlice> {
+        self.directory.locate_range(column, start_row, end_row)
     }
 
     pub fn lookup(&self, id: &str) -> Option<PageDescriptor> {
@@ -267,15 +280,13 @@ impl PageHandler {
         self.locator.latest_for_column(column)
     }
 
-    pub fn locate_range(
-        &self,
-        column: &str,
-        l_bound: u64,
-        r_bound: u64,
-        commit_time_upper_bound: u64,
-    ) -> Vec<PageDescriptor> {
+    pub fn list_pages(&self, column: &str) -> Vec<PageDescriptor> {
+        self.locator.pages_for_column(column)
+    }
+
+    pub fn list_range(&self, column: &str, start_row: u64, end_row: u64) -> Vec<PageSlice> {
         self.locator
-            .range_for_column(column, l_bound, r_bound, commit_time_upper_bound)
+            .range_slices_for_column(column, start_row, end_row)
     }
 
     pub fn get_page(&self, page_meta: PageDescriptor) -> Option<Arc<PageCacheEntryUncompressed>> {

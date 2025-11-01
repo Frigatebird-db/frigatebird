@@ -1,6 +1,7 @@
 // these are our external API contracts and shouldnt change btw, whatever you change internally, these should just work out of the box
 
 use crate::entry::Entry;
+use crate::metadata_store::PageDescriptor;
 use crate::page_handler::PageHandler;
 
 // TODO: we also have to update the (l,r) ranges whenever we upsert something into it
@@ -55,16 +56,26 @@ pub fn range_scan_column_entry(
     col: &str,
     l_row: u64,
     r_row: u64,
-    commit_time_upper_bound: u64,
+    _commit_time_upper_bound: u64,
 ) -> Vec<Entry> {
-    let page_metas = handler.locate_range(col, l_row, r_row, commit_time_upper_bound);
+    let slices = handler.list_range(col, l_row, r_row);
+    if slices.is_empty() {
+        return Vec::new();
+    }
 
-    let pages = handler.get_pages(page_metas);
+    let descriptors: Vec<PageDescriptor> = slices.iter().map(|slice| slice.descriptor.clone()).collect();
+    let pages = handler.get_pages(descriptors);
 
     let mut out: Vec<Entry> = Vec::new();
-    // Without per-page bounds, we return full pages in order for now.
-    for page_arc in pages.into_iter() {
-        out.extend_from_slice(&page_arc.page.entries);
+    for (slice, page_arc) in slices.into_iter().zip(pages.into_iter()) {
+        let entries = &page_arc.page.entries;
+        let start = slice.start_row_offset as usize;
+        let end = slice.end_row_offset as usize;
+        if start >= entries.len() {
+            continue;
+        }
+        let end_clamped = end.min(entries.len());
+        out.extend_from_slice(&entries[start..end_clamped]);
     }
 
     out
