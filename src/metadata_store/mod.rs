@@ -1,322 +1,304 @@
-/*
-this things keeps track of 'where on disk' the compressed pages of a certain table lies
-
-we would also need to keep track of MVCC stuff here
-
-lets kinda accept the fact that: 'contagious pages cant be kept together every single time' , atleast
-not without giving away write performance and worst case massive disk movements
-
-I think the best we can do for the columnar compressed pages updates is to just do the 'best effort' of just storing them durably(wherever we can on the disk at that time) when they come
-and just round them up together(on disk) during compactions
-
-okay, so what should the metadata store structure look like, it needs to:
-    - keep track of where the compressed Pages are for a particular column
-    - should support keeping track of multiple version of them, if there are a lot of versions of a certain page, we must prioritize that
-    after compaction - atleast the latest versions of pages are physically kept close sequentially
-
-
-currently we store stuff as:
-
-# Table metadata store
-
-M[col_name] -> [(),()...]
-                 |
-                 ~->{start_row_idx,end_row_idx,PageMetadata: [(),()...]}
-                                                              | // we store multiple versions of Pages for MVCC stuff
-                                                              ~-> {id,locked_by_cnt,commit_time,disk_path,offset}
-
-we should also do:
-M[page_id] -> I mean, we should just do this shit like: {id,locked_by_cnt,commit_time,disk_path,offset}
-
-and just keep page_id like a foreign key in M[col_name] shit instead of keeping it all there, would also be faster to just get it in just O(x)
-once than to go through a lot of O(x) + O(x).... nested stuff every single time
-*/
-
-/*
-in the case of a lot of concurrent read request
-*/
-
 use std::collections::HashMap;
-use std::sync::{
-    Arc, RwLock,
-    atomic::{AtomicU32, AtomicU64, Ordering},
-};
+use std::sync::{Arc, RwLock};
 
-use crate::entry::current_epoch_millis;
-
-const MAX_VERSIONS_PER_PAGE: usize = 8;
-
-static PAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-// this will be immutable throughout its lifetime btw
-#[derive(Clone)]
-pub struct PageMetadata {
-    pub id: String, // this is page id btw
-    pub disk_path: String,
-    pub offset: u64, // where to find the compressed page in that path
-}
-
-pub struct MVCCKeeperEntry {
-    pub page_id: String,
-    pub locked_by: AtomicU32, // atomic counter helps concurrent users
-    pub commit_time: u64,
-}
-
-pub struct TableMetaStoreEntry {
-    pub start_idx: u64,
-    pub end_idx: u64,
-    pub page_metas: Vec<MVCCKeeperEntry>,
-}
-
-pub struct RangeScanMetaResponse {
-    pub page_metas: Vec<PageDescriptor>,
-}
-
-#[derive(Clone)]
+/// Descriptor for the physical location of a column page.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageDescriptor {
     pub id: String,
     pub disk_path: String,
     pub offset: u64,
+    pub size: u64,
+    pub entry_count: u64,
 }
 
-/*
-
-M[page_id]  ->      [  () , ()... , |~~>(disk_path,offset) , () , ()...  ]
-                                    |
-M[col_name] -> [                    |
-                                    |
-                    (l0,r0) -> [Page_id_at_x < Page_id_at_y < Page_id_at_z....],
-                    (l1,r1) -> ...
-                    (l2,r2)
-                    (l3,r3)
-                    ...
-                    ...
-                ]
-
-
-should I introduce another map or... wait, I wanted that huh, we can do that now I think..
-
-its all so fragmented man, ughh
-
-*/
-
-// a lot can read multiple column metas and page metas at once with RLock on wrapper
-
-/*
-with Rlock we want something like:
-- Rlock the TableMetaStoreWrapper, get the column/page meta you wish from Map, clone it and RELEASE LOCK ASAP
-
-okay, so what exactly are we cloning here ? also note that TableMetaStore is a wrapper in itself, just a gateway, just grab a clone and get out, check later if you can do something with it
-*/
-
-// we query this thing to grab page and column metas, THATS IT
-pub struct TableMetaStore {
-    col_data: HashMap<String, Arc<RwLock<Vec<TableMetaStoreEntry>>>>, // this just keeps absolute minimal page meta references
-    page_data: HashMap<String, Arc<PageMetadata>>, // this keeps the actual page metadata, and owns the ARCs
-}
-
-pub struct PageDirectory {
-    store: Arc<RwLock<TableMetaStore>>,
-}
-
-impl PageMetadata {
-    // also returns an id maybe ??
-    fn new(disk_path: String, offset: u64) -> Self {
-        let id_num = PAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self {
-            id: format!("{:016x}", id_num),
+impl PageDescriptor {
+    fn new(id: String, disk_path: String, offset: u64, size: u64, entry_count: u64) -> Self {
+        PageDescriptor {
+            id,
             disk_path,
             offset,
+            size,
+            entry_count,
         }
     }
 }
 
-impl MVCCKeeperEntry {
-    fn new(id: String) -> Self {
-        Self {
-            page_id: id,
-            commit_time: current_epoch_millis(),
-            locked_by: AtomicU32::new(0),
-        }
-    }
+#[derive(Clone, Debug)]
+struct ColumnChain {
+    pages: Vec<PageDescriptor>,
+    prefix_entries: Vec<u64>,
 }
 
-impl Drop for PageMetadata {
-    fn drop(&mut self) {
-        // so we do a bunch of stuff here
-
-        // so if a page meta is being dropped, we don't want to:
-        // - have it on disk
-        // - have it in any cache(both compressed and uncompressed)
-        // so yeah, todo I guess AHAHAHHAH
-    }
-}
-
-impl TableMetaStoreEntry {
-    fn new(start_idx: u64, end_idx: u64) -> Self {
-        Self {
-            start_idx: start_idx,
-            end_idx: end_idx,
-            page_metas: vec![],
+impl ColumnChain {
+    fn new() -> Self {
+        ColumnChain {
+            pages: Vec::with_capacity(8),
+            prefix_entries: Vec::with_capacity(8),
         }
     }
 
-    fn copied(&self) {
-        // returns a copy ??? hoe ?
-        // TODO
+    fn push(&mut self, descriptor: PageDescriptor) {
+        let prev = self.prefix_entries.last().copied().unwrap_or(0);
+        let next = prev + descriptor.entry_count;
+        self.pages.push(descriptor);
+        self.prefix_entries.push(next);
     }
-}
 
-// just returns ARCS, nothing else concerns it, try not to take locks in there
-impl TableMetaStore {
-    pub fn new() -> Self {
-        Self {
-            col_data: HashMap::new(),
-            page_data: HashMap::new(),
+    fn replace_last(&mut self, descriptor: PageDescriptor) {
+        if self.pages.is_empty() {
+            self.push(descriptor);
+            return;
+        }
+
+        let base = if self.prefix_entries.len() >= 2 {
+            self.prefix_entries[self.prefix_entries.len() - 2]
+        } else {
+            0
+        };
+        let new_total = base + descriptor.entry_count;
+
+        if let Some(last_page) = self.pages.last_mut() {
+            *last_page = descriptor;
+        }
+        if let Some(last_prefix) = self.prefix_entries.last_mut() {
+            *last_prefix = new_total;
         }
     }
 
-    fn get_page_path_and_offset(&self, id: &str) -> Option<PageDescriptor> {
-        self.page_data.get(id).map(|meta| PageDescriptor {
-            id: meta.id.clone(),
-            disk_path: meta.disk_path.clone(),
-            offset: meta.offset,
+    fn total_entries(&self) -> u64 {
+        self.prefix_entries.last().copied().unwrap_or(0)
+    }
+
+    fn find_page_index(&self, row: u64) -> Option<usize> {
+        let total = self.total_entries();
+        if row >= total {
+            return None;
+        }
+        let mut lo = 0;
+        let mut hi = self.prefix_entries.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.prefix_entries[mid] <= row {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Some(lo)
+    }
+
+    fn last(&self) -> Option<PageDescriptor> {
+        self.pages.last().cloned()
+    }
+
+    fn all_pages(&self) -> Vec<PageDescriptor> {
+        self.pages.clone()
+    }
+
+    fn locate_row(&self, row: u64) -> Option<RowLocation> {
+        let page_index = self.find_page_index(row)?;
+        let page = self.pages[page_index].clone();
+        let previous_prefix = if page_index == 0 {
+            0
+        } else {
+            self.prefix_entries[page_index - 1]
+        };
+        let page_row_index = row.saturating_sub(previous_prefix);
+        Some(RowLocation {
+            descriptor: page,
+            page_row_index,
         })
     }
 
-    // its here, but try to use it btw
-    fn get_latest_page_meta(&self, column: &str) -> Option<&Arc<PageMetadata>> {
-        self.col_data
-            .get(column)?
-            .read()
-            .ok()?
-            .last()?
-            .page_metas
-            .last()
-            .and_then(|mvcc_entry| self.page_data.get(&mvcc_entry.page_id))
-    }
+    fn locate_range(&self, start_row: u64, end_row: u64) -> Vec<PageSlice> {
+        if self.pages.is_empty() || start_row > end_row {
+            return Vec::new();
+        }
 
-    fn add_new_page_meta(&mut self, disk_path: String, offset: u64) -> (String, PageDescriptor) {
-        let meta_object = PageMetadata::new(disk_path, offset);
-        let descriptor = PageDescriptor {
-            id: meta_object.id.clone(),
-            disk_path: meta_object.disk_path.clone(),
-            offset: meta_object.offset,
+        let total = self.total_entries();
+        if total == 0 || start_row >= total {
+            return Vec::new();
+        }
+
+        let clamped_end = end_row.min(total.saturating_sub(1));
+        let start_idx = match self.find_page_index(start_row) {
+            Some(idx) => idx,
+            None => return Vec::new(),
         };
-        let id = meta_object.id.clone();
-        self.page_data.insert(id.clone(), Arc::new(meta_object));
-        (id, descriptor)
+        let end_idx = match self.find_page_index(clamped_end) {
+            Some(idx) => idx,
+            None => return Vec::new(),
+        };
+
+        let mut slices = Vec::with_capacity(end_idx - start_idx + 1);
+        for idx in start_idx..=end_idx {
+            let prev = if idx == 0 {
+                0
+            } else {
+                self.prefix_entries[idx - 1]
+            };
+            let page_start = if idx == start_idx {
+                start_row.saturating_sub(prev)
+            } else {
+                0
+            };
+            let page_end_exclusive = if idx == end_idx {
+                (clamped_end.saturating_sub(prev)) + 1
+            } else {
+                self.pages[idx].entry_count
+            };
+            slices.push(PageSlice {
+                descriptor: self.pages[idx].clone(),
+                start_row_offset: page_start,
+                end_row_offset: page_end_exclusive.min(self.pages[idx].entry_count),
+            });
+        }
+
+        slices
+    }
+}
+
+/// Describes where a logical row falls within a page.
+#[derive(Clone, Debug)]
+pub struct RowLocation {
+    pub descriptor: PageDescriptor,
+    pub page_row_index: u64,
+}
+
+/// Represents a trimmed slice of a page participating in a range scan.
+#[derive(Clone, Debug)]
+pub struct PageSlice {
+    pub descriptor: PageDescriptor,
+    pub start_row_offset: u64,
+    pub end_row_offset: u64,
+}
+
+/// Batch append description used to publish new page versions.
+#[derive(Clone, Debug)]
+pub struct PendingPage {
+    pub column: String,
+    pub disk_path: String,
+    pub offset: u64,
+    pub size: u64,
+    pub entry_count: u64,
+    pub replace_last: bool,
+}
+
+/// In-memory catalog mapping columns to their latest page chain.
+pub struct TableMetaStore {
+    columns: HashMap<String, ColumnChain>,
+    page_index: HashMap<String, PageDescriptor>,
+    next_page_id: u64,
+}
+
+impl TableMetaStore {
+    pub fn new() -> Self {
+        TableMetaStore {
+            columns: HashMap::new(),
+            page_index: HashMap::new(),
+            next_page_id: 1,
+        }
     }
 
-    fn add_new_page_to_col(
+    fn allocate_descriptor(
         &mut self,
-        col: String,
         disk_path: String,
         offset: u64,
+        size: u64,
+        entry_count: u64,
     ) -> PageDescriptor {
-        let (page_id, descriptor) = self.add_new_page_meta(disk_path, offset);
+        let id = format!("{:016x}", self.next_page_id);
+        self.next_page_id = self.next_page_id.wrapping_add(1);
+        PageDescriptor::new(id, disk_path, offset, size, entry_count)
+    }
 
-        if !self.col_data.contains_key(&col) {
-            self.col_data
-                .insert(col.clone(), Arc::new(RwLock::new(Vec::new())));
-        }
+    pub fn latest(&self, column: &str) -> Option<PageDescriptor> {
+        self.columns.get(column).and_then(|chain| chain.last())
+    }
 
-        let mut col_guard = self.col_data.get(&col).unwrap().write().unwrap();
+    pub fn pages_for_column(&self, column: &str) -> Vec<PageDescriptor> {
+        self.columns
+            .get(column)
+            .map(|chain| chain.all_pages())
+            .unwrap_or_default()
+    }
 
-        if col_guard.is_empty() {
-            col_guard.push(TableMetaStoreEntry {
-                start_idx: 0,
-                end_idx: 1,
-                page_metas: vec![MVCCKeeperEntry::new(page_id)],
-            });
-        } else {
-            let last_entry = col_guard.last_mut().unwrap();
-            last_entry.end_idx += 1;
-            last_entry.page_metas.push(MVCCKeeperEntry::new(page_id));
-            if last_entry.page_metas.len() > MAX_VERSIONS_PER_PAGE {
-                let overflow = last_entry.page_metas.len() - MAX_VERSIONS_PER_PAGE;
-                last_entry.page_metas.drain(0..overflow);
-            }
-        }
+    pub fn lookup(&self, id: &str) -> Option<PageDescriptor> {
+        self.page_index.get(id).cloned()
+    }
 
+    pub fn locate_row(&self, column: &str, row: u64) -> Option<RowLocation> {
+        self.columns.get(column).and_then(|chain| chain.locate_row(row))
+    }
+
+    pub fn locate_range(
+        &self,
+        column: &str,
+        start_row: u64,
+        end_row: u64,
+    ) -> Vec<PageSlice> {
+        self.columns
+            .get(column)
+            .map(|chain| chain.locate_range(start_row, end_row))
+            .unwrap_or_default()
+    }
+
+    pub fn register_page(
+        &mut self,
+        column: &str,
+        disk_path: String,
+        offset: u64,
+        size: u64,
+        entry_count: u64,
+    ) -> PageDescriptor {
+        let descriptor = self.allocate_descriptor(disk_path, offset, size, entry_count);
+        self.page_index
+            .insert(descriptor.id.clone(), descriptor.clone());
+        self.columns
+            .entry(column.to_string())
+            .or_insert_with(ColumnChain::new)
+            .push(descriptor.clone());
         descriptor
     }
 
-    fn get_ranged_pages_meta(
-        &self,
-        col: &str,
-        l_bound: u64,
-        r_bound: u64,
-        commit_time_upper_bound: u64,
-    ) -> Option<RangeScanMetaResponse> {
-        // okay, so we gotta either binary search or just get it linearly if not too many elements ? oh wait, do we need locks ? we dont ig
-        if l_bound > r_bound {
-            return Some(RangeScanMetaResponse {
-                page_metas: Vec::new(),
-            });
-        }
+    pub fn register_batch(&mut self, pages: &[PendingPage]) -> Vec<PageDescriptor> {
+        let mut registered = Vec::with_capacity(pages.len());
+        for page in pages {
+            let descriptor = self.allocate_descriptor(
+                page.disk_path.clone(),
+                page.offset,
+                page.size,
+                page.entry_count,
+            );
+            self.page_index
+                .insert(descriptor.id.clone(), descriptor.clone());
 
-        // Acquire read lock for the column entries, binary search for overlap window, copy page_ids, and drop the lock ASAP
-        // this is the longest place where we are holding column meta read guard btw
-        let col_guard = self.col_data.get(col)?.read().ok()?;
-
-        let entries = &*col_guard;
-        let len = entries.len();
-        let mut page_ids: Vec<String> = Vec::new();
-
-        if len > 0 {
-            let mut lo: usize = 0;
-            let mut hi: usize = len;
-            while lo < hi {
-                let mid = (lo + hi) / 2;
-                if entries[mid].end_idx <= l_bound {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
+            let chain = self
+                .columns
+                .entry(page.column.clone())
+                .or_insert_with(ColumnChain::new);
+            let has_existing = chain.last().is_some();
+            if page.replace_last && has_existing {
+                chain.replace_last(descriptor.clone());
+            } else {
+                chain.push(descriptor.clone());
             }
-            let mut i = lo;
 
-            // Linear scan forward until start_idx >= r_bound
-            while i < len {
-                let entry = &entries[i];
-                if entry.start_idx >= r_bound {
-                    break;
-                }
-                // pick MVCC version with commit_time just before/at the upper bound
-                if !entry.page_metas.is_empty() {
-                    let versions = &entry.page_metas;
-                    // binary search for first commit_time > commit_time_upper_bound
-                    let mut vlo: usize = 0;
-                    let mut vhi: usize = versions.len();
-                    while vlo < vhi {
-                        let vmid = (vlo + vhi) / 2;
-                        if versions[vmid].commit_time <= commit_time_upper_bound {
-                            vlo = vmid + 1;
-                        } else {
-                            vhi = vmid;
-                        }
-                    }
-                    if vlo > 0 {
-                        // there exists a version with commit_time <= commit_time_upper_bound
-                        let chosen = &versions[vlo - 1];
-                        page_ids.push(chosen.page_id.clone());
-                    }
-                }
-                i += 1;
-            }
+            registered.push(descriptor);
         }
-        drop(col_guard);
-
-        let mut metas: Vec<PageDescriptor> = Vec::new();
-        for page_id in page_ids {
-            if let Some(descriptor) = self.get_page_path_and_offset(&page_id) {
-                metas.push(descriptor);
-            }
-        }
-
-        Some(RangeScanMetaResponse { page_metas: metas })
+        registered
     }
+}
+
+impl Default for TableMetaStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Thread-safe façade for the metadata store.
+pub struct PageDirectory {
+    store: Arc<RwLock<TableMetaStore>>,
 }
 
 impl PageDirectory {
@@ -326,13 +308,38 @@ impl PageDirectory {
 
     pub fn latest(&self, column: &str) -> Option<PageDescriptor> {
         let guard = self.store.read().ok()?;
-        let meta_arc = guard.get_latest_page_meta(column)?;
-        let meta = meta_arc.as_ref();
-        Some(PageDescriptor {
-            id: meta.id.clone(),
-            disk_path: meta.disk_path.clone(),
-            offset: meta.offset,
-        })
+        guard.latest(column)
+    }
+
+    pub fn pages_for_column(&self, column: &str) -> Vec<PageDescriptor> {
+        let guard = match self.store.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard.pages_for_column(column)
+    }
+
+    pub fn lookup(&self, id: &str) -> Option<PageDescriptor> {
+        let guard = self.store.read().ok()?;
+        guard.lookup(id)
+    }
+
+    pub fn locate_row(&self, column: &str, row: u64) -> Option<RowLocation> {
+        let guard = self.store.read().ok()?;
+        guard.locate_row(column, row)
+    }
+
+    pub fn locate_range(
+        &self,
+        column: &str,
+        start_row: u64,
+        end_row: u64,
+    ) -> Vec<PageSlice> {
+        let guard = match self.store.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard.locate_range(column, start_row, end_row)
     }
 
     pub fn range(
@@ -340,21 +347,16 @@ impl PageDirectory {
         column: &str,
         l_bound: u64,
         r_bound: u64,
-        commit_time_upper_bound: u64,
+        _commit_time_upper_bound: u64,
     ) -> Vec<PageDescriptor> {
-        let guard = match self.store.read() {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard
-            .get_ranged_pages_meta(column, l_bound, r_bound, commit_time_upper_bound)
-            .map(|resp| resp.page_metas)
-            .unwrap_or_default()
-    }
-
-    pub fn lookup(&self, id: &str) -> Option<PageDescriptor> {
-        let guard = self.store.read().ok()?;
-        guard.get_page_path_and_offset(id)
+        if r_bound == 0 || l_bound >= r_bound {
+            return Vec::new();
+        }
+        let end = r_bound - 1;
+        self.locate_range(column, l_bound, end)
+            .into_iter()
+            .map(|slice| slice.descriptor)
+            .collect()
     }
 
     pub fn register_page(
@@ -363,7 +365,36 @@ impl PageDirectory {
         disk_path: String,
         offset: u64,
     ) -> Option<PageDescriptor> {
+        self.register_page_with_size_and_entries(column, disk_path, offset, 0, 0)
+    }
+
+    pub fn register_page_with_size(
+        &self,
+        column: &str,
+        disk_path: String,
+        offset: u64,
+        size: u64,
+    ) -> Option<PageDescriptor> {
+        self.register_page_with_size_and_entries(column, disk_path, offset, size, 0)
+    }
+
+    pub fn register_page_with_size_and_entries(
+        &self,
+        column: &str,
+        disk_path: String,
+        offset: u64,
+        size: u64,
+        entry_count: u64,
+    ) -> Option<PageDescriptor> {
         let mut guard = self.store.write().ok()?;
-        Some(guard.add_new_page_to_col(column.to_string(), disk_path, offset))
+        Some(guard.register_page(column, disk_path, offset, size, entry_count))
+    }
+
+    pub fn register_batch(&self, pages: &[PendingPage]) -> Vec<PageDescriptor> {
+        let mut guard = match self.store.write() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard.register_batch(pages)
     }
 }

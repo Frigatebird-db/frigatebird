@@ -1,8 +1,8 @@
 use crate::cache::page_cache::PageCacheEntryUncompressed;
-use crate::metadata_store::PageDescriptor;
+use crate::metadata_store::{PageDescriptor, PageDirectory, PendingPage};
 use crate::page::Page;
 use crate::page_handler::PageHandler;
-use crate::writer::allocator::{PageAllocation, PageAllocator};
+use crate::writer::allocator::PageAllocator;
 use crate::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
 use crossbeam::channel::{self, Receiver, Sender};
 use std::sync::{
@@ -14,7 +14,18 @@ use std::thread::{self, JoinHandle};
 /// Abstraction for publishing new page versions into persistent metadata.
 pub trait MetadataClient: Send + Sync {
     fn latest_descriptor(&self, table: &str, column: &str) -> Option<PageDescriptor>;
-    fn publish_new_version(&self, table: &str, column: &str, allocation: &PageAllocation);
+    fn commit(&self, table: &str, updates: Vec<MetadataUpdate>) -> Vec<PageDescriptor>;
+}
+
+/// Describes a staged update ready to be made visible.
+#[derive(Clone, Debug)]
+pub struct MetadataUpdate {
+    pub column: String,
+    pub disk_path: String,
+    pub offset: u64,
+    pub size: u64,
+    pub entry_count: u64,
+    pub replace_last: bool,
 }
 
 /// Placeholder metadata client used until the real store integration lands.
@@ -25,7 +36,54 @@ impl MetadataClient for NoopMetadataClient {
         None
     }
 
-    fn publish_new_version(&self, _table: &str, _column: &str, _allocation: &PageAllocation) {}
+    fn commit(&self, _table: &str, updates: Vec<MetadataUpdate>) -> Vec<PageDescriptor> {
+        updates
+            .into_iter()
+            .enumerate()
+            .map(|(idx, update)| PageDescriptor {
+                id: format!("noop-{}-{idx}", update.column),
+                disk_path: update.disk_path,
+                offset: update.offset,
+                size: update.size,
+                entry_count: update.entry_count,
+            })
+            .collect()
+    }
+}
+
+/// Metadata client backed by the shared page directory.
+pub struct DirectoryMetadataClient {
+    directory: Arc<PageDirectory>,
+}
+
+impl DirectoryMetadataClient {
+    pub fn new(directory: Arc<PageDirectory>) -> Self {
+        DirectoryMetadataClient { directory }
+    }
+}
+
+impl MetadataClient for DirectoryMetadataClient {
+    fn latest_descriptor(&self, _table: &str, column: &str) -> Option<PageDescriptor> {
+        self.directory.latest(column)
+    }
+
+    fn commit(&self, _table: &str, updates: Vec<MetadataUpdate>) -> Vec<PageDescriptor> {
+        if updates.is_empty() {
+            return Vec::new();
+        }
+        let pending: Vec<PendingPage> = updates
+            .into_iter()
+            .map(|update| PendingPage {
+                column: update.column,
+                disk_path: update.disk_path,
+                offset: update.offset,
+                size: update.size,
+                entry_count: update.entry_count,
+                replace_last: update.replace_last,
+            })
+            .collect();
+        self.directory.register_batch(&pending)
+    }
 }
 
 enum WriterMessage {
@@ -42,12 +100,43 @@ struct WorkerContext {
 
 impl WorkerContext {
     fn handle_job(&self, job: UpdateJob) {
+        let mut staged = Vec::with_capacity(job.columns.len());
         for column in job.columns {
-            self.handle_column(&job.table, column);
+            if let Some(prepared) = self.stage_column(&job.table, column) {
+                staged.push(prepared);
+            }
+        }
+
+        if staged.is_empty() {
+            return;
+        }
+
+        let metadata_updates: Vec<MetadataUpdate> = staged
+            .iter()
+            .map(|prepared| MetadataUpdate {
+                column: prepared.column.clone(),
+                disk_path: prepared.disk_path.clone(),
+                offset: prepared.offset,
+                size: prepared.size,
+                entry_count: prepared.entry_count,
+                replace_last: prepared.replace_last,
+            })
+            .collect();
+
+        let descriptors = self.metadata.commit(&job.table, metadata_updates);
+        if descriptors.len() != staged.len() {
+            return;
+        }
+
+        for (prepared, descriptor) in staged.into_iter().zip(descriptors.into_iter()) {
+            let mut page = prepared.page;
+            page.page.page_metadata = descriptor.id.clone();
+            self.page_handler
+                .write_back_uncompressed(&descriptor.id, page);
         }
     }
 
-    fn handle_column(&self, table: &str, update: ColumnUpdate) {
+    fn stage_column(&self, table: &str, update: ColumnUpdate) -> Option<StagedColumn> {
         let latest = self.metadata.latest_descriptor(table, &update.column);
         let base_page = latest
             .as_ref()
@@ -59,15 +148,29 @@ impl WorkerContext {
 
         apply_operations(&mut prepared, &update.operations);
 
+        let entry_count = prepared.page.entries.len() as u64;
         let allocation = self.allocator.allocate();
-        let mut staged = prepared.clone();
-        staged.page.page_metadata = allocation.page_id.clone();
 
-        self.page_handler
-            .write_back_uncompressed(&allocation.page_id, staged);
-        self.metadata
-            .publish_new_version(table, &update.column, &allocation);
+        Some(StagedColumn {
+            column: update.column,
+            page: prepared,
+            entry_count,
+            disk_path: allocation.disk_path,
+            offset: allocation.offset,
+            size: allocation.buffer.len() as u64,
+            replace_last: latest.is_some(),
+        })
     }
+}
+
+struct StagedColumn {
+    column: String,
+    page: PageCacheEntryUncompressed,
+    entry_count: u64,
+    disk_path: String,
+    offset: u64,
+    size: u64,
+    replace_last: bool,
 }
 
 /// Serial writer that executes update jobs in order.
