@@ -9,3 +9,4 @@ pub mod page_handler;
 pub mod pipeline;
 pub mod pool;
 pub mod sql;
+pub mod writer;
