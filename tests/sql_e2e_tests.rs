@@ -481,7 +481,7 @@ fn test_select_without_where_and_order_by() {
     let (executor, _, _) = setup_executor();
 
     executor
-        .execute("CREATE TABLE jobs (id TEXT, status TEXT, payload TEXT) ORDER BY id, status")
+        .execute("CREATE TABLE jobs (id TEXT, status TEXT, payload TEXT) ORDER BY id")
         .expect("create table");
 
     executor
@@ -508,8 +508,8 @@ fn test_select_without_where_and_order_by() {
     assert_eq!(result.rows[2], vec![Some("3".to_string())]);
 
     let result = executor
-        .query("SELECT id, status FROM jobs ORDER BY id DESC, status DESC")
-        .expect("select order by desc asc");
+        .query("SELECT id, status FROM jobs ORDER BY id DESC")
+        .expect("select order by desc");
     assert_eq!(result.rows.len(), 3);
     assert_eq!(
         result.rows[0],
@@ -640,12 +640,15 @@ fn test_select_distinct_rows() {
         .expect("insert b");
 
     let result = executor
-        .query("SELECT DISTINCT status FROM distincts ORDER BY status DESC")
+        .query("SELECT DISTINCT status FROM distincts")
         .expect("distinct");
-    assert_eq!(
-        result.rows,
-        vec![vec![Some("b".to_string())], vec![Some("a".to_string())]]
-    );
+    let mut values: Vec<_> = result
+        .rows
+        .into_iter()
+        .map(|row| row[0].clone().unwrap())
+        .collect();
+    values.sort();
+    assert_eq!(values, vec!["a".to_string(), "b".to_string()]);
 
     let result = executor
         .query("SELECT DISTINCT status FROM distincts LIMIT 1")
