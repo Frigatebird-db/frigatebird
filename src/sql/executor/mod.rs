@@ -198,7 +198,9 @@ impl SqlExecutor {
             value_table_mode,
         } = select;
 
-        if distinct.is_some()
+        let distinct_flag = distinct.is_some();
+
+        if distinct_flag
             || top.is_some()
             || into.is_some()
             || !lateral_views.is_empty()
@@ -290,6 +292,11 @@ impl SqlExecutor {
         let result_columns: Vec<String>;
 
         if aggregate_query {
+            if distinct_flag {
+                return Err(SqlExecutionError::Unsupported(
+                    "SELECT DISTINCT with aggregates is not supported yet".into(),
+                ));
+            }
             let plan = plan_aggregate_projection(&projection_items, &column_ordinals, &table_name)?;
             required_ordinals = plan.required_ordinals.clone();
             result_columns = plan.headers.clone();
@@ -360,6 +367,14 @@ impl SqlExecutor {
         candidate_rows.sort_unstable();
         candidate_rows.dedup();
 
+        let order_desc = order_by_clauses
+            .first()
+            .map(|clause| clause.asc == Some(false))
+            .unwrap_or(false);
+        if order_desc {
+            candidate_rows.reverse();
+        }
+
         let materialized = materialize_columns(
             &self.page_handler,
             &table_name,
@@ -403,21 +418,10 @@ impl SqlExecutor {
             });
         }
 
-        let offset = parse_offset(offset_expr)?;
-        let limit = parse_limit(limit_expr)?;
-
-        let start = offset.min(matching_rows.len());
-        let end = if let Some(limit) = limit {
-            start.saturating_add(limit).min(matching_rows.len())
-        } else {
-            matching_rows.len()
-        };
-        let window = &matching_rows[start..end];
-
         let projection_ordinals = projection_ordinals_opt.expect("projection ordinals required");
 
-        let mut rows = Vec::with_capacity(window.len());
-        for &row_idx in window {
+        let mut rows = Vec::with_capacity(matching_rows.len());
+        for &row_idx in &matching_rows {
             let mut projected = Vec::with_capacity(projection_ordinals.len());
             for &ordinal in &projection_ordinals {
                 let cached = materialized
@@ -440,9 +444,31 @@ impl SqlExecutor {
             rows.push(projected);
         }
 
+        if distinct_flag {
+            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
+            let mut deduped = Vec::with_capacity(rows.len());
+            for row in rows.into_iter() {
+                if seen.insert(row.clone()) {
+                    deduped.push(row);
+                }
+            }
+            rows = deduped;
+        }
+
+        let offset = parse_offset(offset_expr)?;
+        let limit = parse_limit(limit_expr)?;
+
+        let start = offset.min(rows.len());
+        let end = if let Some(limit) = limit {
+            start.saturating_add(limit).min(rows.len())
+        } else {
+            rows.len()
+        };
+        let final_rows = rows[start..end].to_vec();
+
         Ok(SelectResult {
             columns: result_columns,
-            rows,
+            rows: final_rows,
         })
     }
 
@@ -605,16 +631,24 @@ impl SqlExecutor {
             assignments_vec.push((ordinal, value));
         }
 
-        let selection_expr = selection.ok_or_else(|| {
-            SqlExecutionError::Unsupported("UPDATE requires a WHERE clause".into())
-        })?;
+        let selection_expr = selection.unwrap_or_else(|| Expr::Value(Value::Boolean(true)));
+        let has_selection = !matches!(selection_expr, Expr::Value(Value::Boolean(true)));
 
         let mut required_ordinals: BTreeSet<usize> = sort_indices.iter().copied().collect();
-        let predicate_ordinals =
-            collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
-        required_ordinals.extend(predicate_ordinals);
+        if has_selection {
+            let predicate_ordinals =
+                collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
+            required_ordinals.extend(predicate_ordinals);
+        }
 
-        let sort_key_filters = collect_sort_key_filters(Some(&selection_expr), &sort_columns)?;
+        let sort_key_filters = collect_sort_key_filters(
+            if has_selection {
+                Some(&selection_expr)
+            } else {
+                None
+            },
+            &sort_columns,
+        )?;
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
         let mut candidate_rows = if let Some(filters) = sort_key_filters {
@@ -633,7 +667,11 @@ impl SqlExecutor {
                 &table_name,
                 &columns,
                 &required_ordinals,
-                Some(&selection_expr),
+                if has_selection {
+                    Some(&selection_expr)
+                } else {
+                    None
+                },
                 &column_ordinals,
             )?
         };
@@ -655,7 +693,9 @@ impl SqlExecutor {
 
         let mut matching_rows = Vec::new();
         for &row_idx in &candidate_rows {
-            if evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)? {
+            if !has_selection
+                || evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)?
+            {
                 matching_rows.push(row_idx);
             }
         }
@@ -663,40 +703,38 @@ impl SqlExecutor {
         if matching_rows.is_empty() {
             return Ok(());
         }
-        if matching_rows.len() > 1 {
-            return Err(SqlExecutionError::Unsupported(
-                "UPDATE matched multiple rows; refine WHERE clause".into(),
-            ));
-        }
-        let row_idx = matching_rows[0];
 
-        let current_row = read_row(&self.page_handler, &table_name, row_idx)
-            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
-        let mut new_row = current_row.clone();
-        for (ordinal, value) in &assignments_vec {
-            new_row[*ordinal] = value.clone();
-        }
+        matching_rows.sort_unstable();
 
-        let sort_changed = sort_indices
-            .iter()
-            .any(|&idx| compare_strs(&current_row[idx], &new_row[idx]) != Ordering::Equal);
+        for &row_idx in matching_rows.iter().rev() {
+            let current_row = read_row(&self.page_handler, &table_name, row_idx)
+                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+            let mut new_row = current_row.clone();
+            for (ordinal, value) in &assignments_vec {
+                new_row[*ordinal] = value.clone();
+            }
 
-        if sort_changed {
-            delete_row(&self.page_handler, &table_name, row_idx)
-                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
-            let kv_pairs: Vec<(String, String)> = columns
-                .iter()
-                .map(|col| (col.name.clone(), new_row[col.ordinal].clone()))
-                .collect();
-            let tuple: Vec<(&str, &str)> = kv_pairs
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_str()))
-                .collect();
-            insert_sorted_row(&self.page_handler, &table_name, &tuple)
-                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
-        } else {
-            overwrite_row(&self.page_handler, &table_name, row_idx, &new_row)
-                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+            let sort_changed = sort_indices.iter().any(|&idx| {
+                compare_strs(&current_row[idx], &new_row[idx]) != Ordering::Equal
+            });
+
+            if sort_changed {
+                delete_row(&self.page_handler, &table_name, row_idx)
+                    .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+                let kv_pairs: Vec<(String, String)> = columns
+                    .iter()
+                    .map(|col| (col.name.clone(), new_row[col.ordinal].clone()))
+                    .collect();
+                let tuple: Vec<(&str, &str)> = kv_pairs
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect();
+                insert_sorted_row(&self.page_handler, &table_name, &tuple)
+                    .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+            } else {
+                overwrite_row(&self.page_handler, &table_name, row_idx, &new_row)
+                    .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+            }
         }
 
         Ok(())
@@ -768,16 +806,24 @@ impl SqlExecutor {
             .map(|&idx| columns[idx].clone())
             .collect();
 
-        let selection_expr = selection.ok_or_else(|| {
-            SqlExecutionError::Unsupported("DELETE requires a WHERE clause".into())
-        })?;
+        let selection_expr = selection.unwrap_or_else(|| Expr::Value(Value::Boolean(true)));
+        let has_selection = !matches!(selection_expr, Expr::Value(Value::Boolean(true)));
 
         let mut required_ordinals: BTreeSet<usize> = sort_indices.iter().copied().collect();
-        let predicate_ordinals =
-            collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
-        required_ordinals.extend(predicate_ordinals);
+        if has_selection {
+            let predicate_ordinals =
+                collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
+            required_ordinals.extend(predicate_ordinals);
+        }
 
-        let sort_key_filters = collect_sort_key_filters(Some(&selection_expr), &sort_columns)?;
+        let sort_key_filters = collect_sort_key_filters(
+            if has_selection {
+                Some(&selection_expr)
+            } else {
+                None
+            },
+            &sort_columns,
+        )?;
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
         let mut candidate_rows = if let Some(filters) = sort_key_filters {
@@ -796,7 +842,11 @@ impl SqlExecutor {
                 &table_name,
                 &columns,
                 &required_ordinals,
-                Some(&selection_expr),
+                if has_selection {
+                    Some(&selection_expr)
+                } else {
+                    None
+                },
                 &column_ordinals,
             )?
         };
@@ -818,7 +868,9 @@ impl SqlExecutor {
 
         let mut matching_rows = Vec::new();
         for &row_idx in &candidate_rows {
-            if evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)? {
+            if !has_selection
+                || evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)?
+            {
                 matching_rows.push(row_idx);
             }
         }
@@ -1049,11 +1101,13 @@ fn validate_order_by(
 
     for (idx, clause) in clauses.iter().enumerate() {
         if clause.asc == Some(false) {
-            return Err(SqlExecutionError::Unsupported(
-                "ORDER BY DESC is not supported yet".into(),
-            ));
+            if idx > 0 || clauses.len() > 1 {
+                return Err(SqlExecutionError::Unsupported(
+                    "ORDER BY DESC is only supported on the leading table ORDER BY column".into(),
+                ));
+            }
         }
-        if clause.nulls_first.is_some() || clause.nulls_last.is_some() {
+        if clause.nulls_first.is_some() {
             return Err(SqlExecutionError::Unsupported(
                 "ORDER BY with NULLS FIRST/LAST is not supported yet".into(),
             ));
