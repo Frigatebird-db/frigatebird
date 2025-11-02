@@ -8,6 +8,7 @@ use idk_uwu_ig::ops_handler::{
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use idk_uwu_ig::sql::executor::SqlExecutor;
 use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
 use std::cmp::Ordering;
 use std::sync::{Arc, RwLock};
@@ -16,7 +17,11 @@ fn build_table_with_rows(
     table: &str,
     columns_with_data: &[(&str, Vec<&str>)],
     order_by: Vec<String>,
-) -> (Arc<PageHandler>, Arc<PageDirectory>, Arc<RwLock<TableMetaStore>>) {
+) -> (
+    Arc<PageHandler>,
+    Arc<PageDirectory>,
+    Arc<RwLock<TableMetaStore>>,
+) {
     assert!(
         !columns_with_data.is_empty(),
         "test helper requires at least one column"
@@ -24,11 +29,7 @@ fn build_table_with_rows(
 
     let expected_len = columns_with_data[0].1.len();
     for (name, values) in columns_with_data {
-        assert_eq!(
-            values.len(),
-            expected_len,
-            "column {name} length mismatch"
-        );
+        assert_eq!(values.len(), expected_len, "column {name} length mismatch");
     }
 
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
@@ -81,6 +82,33 @@ fn build_table_with_rows(
     }
 
     (handler, directory, store)
+}
+
+fn build_sql_executor() -> (
+    SqlExecutor,
+    Arc<PageHandler>,
+    Arc<PageDirectory>,
+    Arc<RwLock<TableMetaStore>>,
+) {
+    let store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = Arc::new(PageDirectory::new(Arc::clone(&store)));
+
+    let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
+    let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
+    let page_io = Arc::new(PageIO {});
+    let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::new(Compressor::new()),
+    ));
+    let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
+    let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
+
+    (executor, handler, directory, store)
 }
 
 fn collect_column_values(
@@ -166,13 +194,6 @@ fn assert_metadata_for_columns(
     }
 }
 
-fn compare_strs(left: &str, right: &str) -> Ordering {
-    match (left.parse::<f64>(), right.parse::<f64>()) {
-        (Ok(l), Ok(r)) => l.partial_cmp(&r).unwrap_or(Ordering::Equal),
-        _ => left.cmp(right),
-    }
-}
-
 fn assert_rows_sorted(rows: &[Vec<String>], sort_indices: &[usize]) {
     if rows.len() <= 1 {
         return;
@@ -200,6 +221,38 @@ fn assert_rows_sorted(rows: &[Vec<String>], sort_indices: &[usize]) {
     }
 }
 
+fn compare_strs(left: &str, right: &str) -> Ordering {
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(l), Ok(r)) => l.partial_cmp(&r).unwrap_or(Ordering::Equal),
+        _ => left.cmp(right),
+    }
+}
+
+#[test]
+fn sql_executor_end_to_end_sorted_insert() {
+    let (executor, handler, directory, store) = build_sql_executor();
+
+    executor
+        .execute("CREATE TABLE accounts (id TEXT, score TEXT) ORDER BY score")
+        .expect("create table succeeds");
+
+    executor
+        .execute("INSERT INTO accounts (id, score) VALUES ('u1', '50'), ('u2', '20'), ('u3', '30')")
+        .expect("batched insert succeeds");
+
+    executor
+        .execute("INSERT INTO accounts (id, score) VALUES ('u4', '25')")
+        .expect("single insert succeeds");
+
+    let column_names = ["id", "score"];
+    let rows = collect_table_rows(&handler, &directory, "accounts", &column_names);
+    assert_rows_sorted(&rows, &[1]);
+    assert_metadata_for_columns(&store, "accounts", &column_names, rows.len());
+
+    let scores: Vec<&str> = rows.iter().map(|row| row[1].as_str()).collect();
+    assert_eq!(scores, vec!["20", "25", "30", "50"]);
+}
+
 #[test]
 fn order_by_numeric_random_inserts_preserve_order_and_metadata() {
     let columns = vec![("score", vec!["10", "30"])];
@@ -208,10 +261,12 @@ fn order_by_numeric_random_inserts_preserve_order_and_metadata() {
 
     let inserts = ["25", "5", "40", "30", "-1", "17", "100"];
     for value in inserts {
-        upsert_data_into_table_column(&handler, "numbers", "score", value)
-            .expect("sorted insert");
+        upsert_data_into_table_column(&handler, "numbers", "score", value).expect("sorted insert");
         let values = collect_column_values(&handler, &directory, "numbers", "score");
-        assert_rows_sorted(&values.iter().map(|v| vec![v.clone()]).collect::<Vec<_>>(), &[0]);
+        assert_rows_sorted(
+            &values.iter().map(|v| vec![v.clone()]).collect::<Vec<_>>(),
+            &[0],
+        );
         assert_metadata_for_columns(&store, "numbers", &["score"], values.len());
         let descriptor = directory
             .latest_in_table("numbers", "score")
@@ -223,17 +278,18 @@ fn order_by_numeric_random_inserts_preserve_order_and_metadata() {
 #[test]
 fn order_by_lexicographic_inserts_keep_sorted_strings() {
     let columns = vec![("word", vec!["delta", "omega"])];
-    let (handler, directory, store) =
-        build_table_with_rows("words", &columns, vec!["word".into()]);
+    let (handler, directory, store) = build_table_with_rows("words", &columns, vec!["word".into()]);
 
     let inserts = ["alpha", "gamma", "beta", "epsilon", "eta", "alpha"];
     for value in inserts {
-        upsert_data_into_table_column(&handler, "words", "word", value)
-            .expect("sorted insert");
+        upsert_data_into_table_column(&handler, "words", "word", value).expect("sorted insert");
     }
 
     let values = collect_column_values(&handler, &directory, "words", "word");
-    assert_rows_sorted(&values.iter().map(|v| vec![v.clone()]).collect::<Vec<_>>(), &[0]);
+    assert_rows_sorted(
+        &values.iter().map(|v| vec![v.clone()]).collect::<Vec<_>>(),
+        &[0],
+    );
     assert_metadata_for_columns(&store, "words", &["word"], values.len());
     let descriptor = directory
         .latest_in_table("words", "word")
@@ -247,15 +303,15 @@ fn order_by_numeric_duplicates_update_prefix_counts() {
     let (handler, directory, store) =
         build_table_with_rows("metrics", &columns, vec!["value".into()]);
 
-    let inserts = [
-        "0", "0", "1", "-5", "3", "2", "2", "-5", "4", "3", "3", "1",
-    ];
+    let inserts = ["0", "0", "1", "-5", "3", "2", "2", "-5", "4", "3", "3", "1"];
 
     for (idx, value) in inserts.iter().enumerate() {
-        upsert_data_into_table_column(&handler, "metrics", "value", value)
-            .expect("sorted insert");
+        upsert_data_into_table_column(&handler, "metrics", "value", value).expect("sorted insert");
         let values = collect_column_values(&handler, &directory, "metrics", "value");
-        assert_rows_sorted(&values.iter().map(|v| vec![v.clone()]).collect::<Vec<_>>(), &[0]);
+        assert_rows_sorted(
+            &values.iter().map(|v| vec![v.clone()]).collect::<Vec<_>>(),
+            &[0],
+        );
         assert_metadata_for_columns(&store, "metrics", &["value"], values.len());
         let descriptor = directory
             .latest_in_table("metrics", "value")
@@ -280,10 +336,26 @@ fn composite_order_by_inserts_are_sorted() {
         build_table_with_rows("cities", &columns, vec!["country".into(), "city".into()]);
 
     let inserts = vec![
-        vec![("country", "US"), ("city", "Boston"), ("population", "0.65")],
-        vec![("country", "CA"), ("city", "Calgary"), ("population", "1.2")],
-        vec![("country", "US"), ("city", "Atlanta"), ("population", "0.5")],
-        vec![("country", "CA"), ("city", "Halifax"), ("population", "0.4")],
+        vec![
+            ("country", "US"),
+            ("city", "Boston"),
+            ("population", "0.65"),
+        ],
+        vec![
+            ("country", "CA"),
+            ("city", "Calgary"),
+            ("population", "1.2"),
+        ],
+        vec![
+            ("country", "US"),
+            ("city", "Atlanta"),
+            ("population", "0.5"),
+        ],
+        vec![
+            ("country", "CA"),
+            ("city", "Halifax"),
+            ("population", "0.4"),
+        ],
     ];
 
     for row in inserts {

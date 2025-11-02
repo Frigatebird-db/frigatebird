@@ -91,12 +91,7 @@ impl PageLocator {
         self.directory.table_catalog(table)
     }
 
-    pub fn locate_row_in_table(
-        &self,
-        table: &str,
-        column: &str,
-        row: u64,
-    ) -> Option<RowLocation> {
+    pub fn locate_row_in_table(&self, table: &str, column: &str, row: u64) -> Option<RowLocation> {
         self.directory.locate_row_in_table(table, column, row)
     }
 
@@ -369,21 +364,11 @@ impl PageHandler {
         self.locator.table_catalog(table)
     }
 
-    pub fn locate_row_in_table(
-        &self,
-        table: &str,
-        column: &str,
-        row: u64,
-    ) -> Option<RowLocation> {
+    pub fn locate_row_in_table(&self, table: &str, column: &str, row: u64) -> Option<RowLocation> {
         self.locator.locate_row_in_table(table, column, row)
     }
 
-    pub fn read_entry_at(
-        &self,
-        table: &str,
-        column: &str,
-        row: u64,
-    ) -> Option<entry::Entry> {
+    pub fn read_entry_at(&self, table: &str, column: &str, row: u64) -> Option<entry::Entry> {
         let location = self.locate_row_in_table(table, column, row)?;
         let page = self.get_page(location.descriptor.clone())?;
         page.page

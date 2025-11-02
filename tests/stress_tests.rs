@@ -1,5 +1,7 @@
 use crossbeam::channel;
-use idk_uwu_ig::cache::page_cache::{CacheLifecycle, PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use idk_uwu_ig::cache::page_cache::{
+    CacheLifecycle, PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
+};
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::executor::PipelineExecutor;
 use idk_uwu_ig::helpers::compressor::Compressor;
@@ -495,7 +497,15 @@ fn executor_stress_many_small_jobs() {
         let (tx, rx) = channel::unbounded();
         let _ = tx.send(vec![]);
 
-        let step = PipelineStep::new("col1".to_string(), vec![], tx, rx, true, "table".to_string(), Arc::clone(&page_handler));
+        let step = PipelineStep::new(
+            "col1".to_string(),
+            vec![],
+            tx,
+            rx,
+            true,
+            "table".to_string(),
+            Arc::clone(&page_handler),
+        );
         let job = Job::new("table".into(), vec![step], entry_tx);
         executor.submit(job);
     }
@@ -556,8 +566,15 @@ fn executor_stress_concurrent_submission() {
                 let _ = tx.send(vec![]);
 
                 let table_name = format!("t{}j{}", thread_id, job_id);
-                let step =
-                    PipelineStep::new(format!("t{}j{}c1", thread_id, job_id), vec![], tx, rx, true, table_name.clone(), Arc::clone(&*ph));
+                let step = PipelineStep::new(
+                    format!("t{}j{}c1", thread_id, job_id),
+                    vec![],
+                    tx,
+                    rx,
+                    true,
+                    table_name.clone(),
+                    Arc::clone(&*ph),
+                );
                 let job = Job::new(table_name, vec![step], entry_tx);
                 exec.submit(job);
             }
@@ -772,7 +789,15 @@ fn chaos_test_everything_concurrent() {
                 let (tx, rx) = channel::unbounded();
                 let _ = tx.send(vec![]);
                 let table_name = format!("j{}", i);
-                let step = PipelineStep::new(format!("c{}", i), vec![], tx, rx, true, table_name.clone(), Arc::clone(&*ph));
+                let step = PipelineStep::new(
+                    format!("c{}", i),
+                    vec![],
+                    tx,
+                    rx,
+                    true,
+                    table_name.clone(),
+                    Arc::clone(&*ph),
+                );
                 let job = Job::new(table_name, vec![step], entry_tx);
                 exec.submit(job);
             }
