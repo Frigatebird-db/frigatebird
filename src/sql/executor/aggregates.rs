@@ -349,11 +349,8 @@ fn evaluate_numeric_aggregate(
     let mut mean = 0.0;
     let mut m2 = 0.0;
 
-    println!("dataset rows: {:?}", dataset.rows);
-    println!("materialized snapshot: {:?}", dataset.materialized);
     for &row in dataset.rows {
         let value = evaluate_row_expr(expr, row, dataset)?;
-        println!("aggregate row value: {:?}", value);
         if let Some(num) = value.as_f64() {
             min_value = Some(min_value.map(|m| m.min(num)).unwrap_or(num));
             max_value = Some(max_value.map(|m| m.max(num)).unwrap_or(num));

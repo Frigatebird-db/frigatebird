@@ -83,7 +83,6 @@ pub(super) fn evaluate_scalar_expression(
                         Some(ord) => ord == Ordering::Greater,
                         None => false,
                     };
-                    println!("row compare {:?} > {:?} => {}", lhs, rhs, result);
                     Ok(ScalarValue::Bool(result))
                 }
                 BinaryOperator::GtEq => Ok(ScalarValue::Bool(

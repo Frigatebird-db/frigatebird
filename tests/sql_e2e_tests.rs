@@ -481,7 +481,7 @@ fn test_select_without_where_and_order_by() {
     let (executor, _, _) = setup_executor();
 
     executor
-        .execute("CREATE TABLE jobs (id TEXT, status TEXT, payload TEXT) ORDER BY id")
+        .execute("CREATE TABLE jobs (id TEXT, status TEXT, payload TEXT) ORDER BY id, status")
         .expect("create table");
 
     executor
@@ -506,6 +506,23 @@ fn test_select_without_where_and_order_by() {
     assert_eq!(result.rows[0], vec![Some("1".to_string())]);
     assert_eq!(result.rows[1], vec![Some("2".to_string())]);
     assert_eq!(result.rows[2], vec![Some("3".to_string())]);
+
+    let result = executor
+        .query("SELECT id, status FROM jobs ORDER BY id DESC, status DESC")
+        .expect("select order by desc asc");
+    assert_eq!(result.rows.len(), 3);
+    assert_eq!(
+        result.rows[0],
+        vec![Some("3".to_string()), Some("done".to_string())]
+    );
+    assert_eq!(
+        result.rows[1],
+        vec![Some("2".to_string()), Some("pending".to_string())]
+    );
+    assert_eq!(
+        result.rows[2],
+        vec![Some("1".to_string()), Some("open".to_string())]
+    );
 }
 
 #[test]
@@ -548,4 +565,90 @@ fn test_update_and_delete_with_non_sort_filters() {
         .query("SELECT id FROM tickets")
         .expect("select remaining row");
     assert_eq!(result.rows, vec![vec![Some("2".to_string())]]);
+}
+
+#[test]
+fn test_update_and_delete_without_where() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute("CREATE TABLE bulk (id TEXT, status TEXT) ORDER BY id")
+        .expect("create table");
+
+    for i in 0..5 {
+        executor
+            .execute(&format!(
+                "INSERT INTO bulk (id, status) VALUES ('{}', 'open')",
+                i
+            ))
+            .expect("insert row");
+    }
+
+    executor
+        .execute("UPDATE bulk SET status = 'closed'")
+        .expect("update all rows");
+
+    let result = executor
+        .query("SELECT COUNT(*) FROM bulk WHERE status = 'closed'")
+        .expect("count closed");
+    assert_eq!(result.rows[0], vec![Some("5".to_string())]);
+
+    executor
+        .execute("DELETE FROM bulk")
+        .expect("delete all rows");
+
+    let result = executor
+        .query("SELECT COUNT(*) FROM bulk")
+        .expect("count after delete");
+    assert_eq!(result.rows[0], vec![Some("0".to_string())]);
+}
+
+#[test]
+fn test_insert_default_keyword() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute("CREATE TABLE defaults (id TEXT, status TEXT, payload TEXT) ORDER BY id")
+        .expect("create table");
+
+    executor
+        .execute("INSERT INTO defaults (id, status, payload) VALUES ('1', DEFAULT, 'alpha')")
+        .expect("insert default");
+
+    let result = executor
+        .query("SELECT status FROM defaults WHERE id = '1'")
+        .expect("select status");
+    assert_eq!(result.rows[0], vec![None]);
+}
+
+#[test]
+fn test_select_distinct_rows() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute("CREATE TABLE distincts (id TEXT, status TEXT) ORDER BY id")
+        .expect("create table");
+
+    executor
+        .execute("INSERT INTO distincts (id, status) VALUES ('1', 'a')")
+        .expect("insert a1");
+    executor
+        .execute("INSERT INTO distincts (id, status) VALUES ('2', 'a')")
+        .expect("insert a2");
+    executor
+        .execute("INSERT INTO distincts (id, status) VALUES ('3', 'b')")
+        .expect("insert b");
+
+    let result = executor
+        .query("SELECT DISTINCT status FROM distincts ORDER BY status DESC")
+        .expect("distinct");
+    assert_eq!(
+        result.rows,
+        vec![vec![Some("b".to_string())], vec![Some("a".to_string())]]
+    );
+
+    let result = executor
+        .query("SELECT DISTINCT status FROM distincts LIMIT 1")
+        .expect("distinct limit");
+    assert_eq!(result.rows.len(), 1);
 }
