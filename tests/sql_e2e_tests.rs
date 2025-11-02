@@ -475,3 +475,77 @@ fn test_select_on_non_sort_column_filters() {
         .expect("count combined");
     assert_eq!(result.rows[0], vec![Some("3".to_string())]);
 }
+
+#[test]
+fn test_select_without_where_and_order_by() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute("CREATE TABLE jobs (id TEXT, status TEXT, payload TEXT) ORDER BY id")
+        .expect("create table");
+
+    executor
+        .execute("INSERT INTO jobs (id, status, payload) VALUES ('1', 'open', 'alpha')")
+        .expect("insert 1");
+    executor
+        .execute("INSERT INTO jobs (id, status, payload) VALUES ('2', 'pending', 'beta')")
+        .expect("insert 2");
+    executor
+        .execute("INSERT INTO jobs (id, status, payload) VALUES ('3', 'done', 'gamma')")
+        .expect("insert 3");
+
+    let result = executor
+        .query("SELECT COUNT(*) FROM jobs")
+        .expect("select without where");
+    assert_eq!(result.rows[0], vec![Some("3".to_string())]);
+
+    let result = executor
+        .query("SELECT id FROM jobs ORDER BY id")
+        .expect("select order by sort key");
+    assert_eq!(result.rows.len(), 3);
+    assert_eq!(result.rows[0], vec![Some("1".to_string())]);
+    assert_eq!(result.rows[1], vec![Some("2".to_string())]);
+    assert_eq!(result.rows[2], vec![Some("3".to_string())]);
+}
+
+#[test]
+fn test_update_and_delete_with_non_sort_filters() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute("CREATE TABLE tickets (id TEXT, status TEXT, payload TEXT) ORDER BY id")
+        .expect("create table");
+
+    executor
+        .execute("INSERT INTO tickets (id, status, payload) VALUES ('1', 'open', 'a')")
+        .expect("insert 1");
+    executor
+        .execute("INSERT INTO tickets (id, status, payload) VALUES ('2', 'pending', 'b')")
+        .expect("insert 2");
+    executor
+        .execute("INSERT INTO tickets (id, status, payload) VALUES ('3', 'done', 'c')")
+        .expect("insert 3");
+
+    executor
+        .execute("UPDATE tickets SET payload = 'updated' WHERE status = 'pending'")
+        .expect("update by non-sort predicate");
+
+    let result = executor
+        .query("SELECT payload FROM tickets WHERE id = '2'")
+        .expect("select updated row");
+    assert_eq!(result.rows[0], vec![Some("updated".to_string())]);
+
+    executor
+        .execute("DELETE FROM tickets WHERE status = 'open' OR status = 'done'")
+        .expect("delete via non-sort predicate");
+
+    let result = executor
+        .query("SELECT COUNT(*) FROM tickets")
+        .expect("count remaining");
+    assert_eq!(result.rows[0], vec![Some("1".to_string())]);
+
+    let result = executor
+        .query("SELECT id FROM tickets")
+        .expect("select remaining row");
+    assert_eq!(result.rows, vec![vec![Some("2".to_string())]]);
+}
