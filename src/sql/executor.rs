@@ -2342,6 +2342,10 @@ fn evaluate_row_function(
                     "WIDTH_BUCKET requires four arguments".into(),
                 ));
             }
+            // Return NULL if the value is NULL
+            if args[0].is_null() {
+                return Ok(ScalarValue::Null);
+            }
             let value = args[0].as_f64().ok_or_else(|| {
                 SqlExecutionError::Unsupported("WIDTH_BUCKET requires numeric value".into())
             })?;
@@ -2521,6 +2525,10 @@ fn evaluate_scalar_function(
                 return Err(SqlExecutionError::Unsupported(
                     "WIDTH_BUCKET requires four arguments".into(),
                 ));
+            }
+            // Return NULL if the value is NULL
+            if args[0].is_null() {
+                return Ok(ScalarValue::Null);
             }
             let value = args[0].as_f64().ok_or_else(|| {
                 SqlExecutionError::Unsupported("WIDTH_BUCKET requires numeric value".into())
