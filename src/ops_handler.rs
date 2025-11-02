@@ -1,8 +1,28 @@
-// these are our external API contracts and shouldnt change btw, whatever you change internally, these should just work out of the box
+// these are our external API contracts; callers supply table + column identifiers.
 
 use crate::entry::Entry;
-use crate::metadata_store::PageDescriptor;
+use crate::metadata_store::{
+    CatalogError, ColumnDefinition, DEFAULT_TABLE, PageDescriptor, PageDirectory, TableDefinition,
+};
 use crate::page_handler::PageHandler;
+use crate::sql::CreateTablePlan;
+
+pub fn create_table_from_plan(
+    directory: &PageDirectory,
+    plan: &CreateTablePlan,
+) -> Result<(), CatalogError> {
+    let columns: Vec<ColumnDefinition> = plan
+        .columns
+        .iter()
+        .map(|spec| ColumnDefinition::new(spec.name.clone(), spec.data_type.clone()))
+        .collect();
+    let definition = TableDefinition::new(plan.table_name.clone(), columns, plan.order_by.clone());
+    match directory.register_table(definition) {
+        Ok(_) => Ok(()),
+        Err(CatalogError::TableExists(_)) if plan.if_not_exists => Ok(()),
+        Err(err) => Err(err),
+    }
+}
 
 // TODO: we also have to update the (l,r) ranges whenever we upsert something into it
 pub fn upsert_data_into_column(
@@ -10,8 +30,17 @@ pub fn upsert_data_into_column(
     col: &str,
     data: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    upsert_data_into_table_column(handler, DEFAULT_TABLE, col, data)
+}
+
+pub fn upsert_data_into_table_column(
+    handler: &PageHandler,
+    table: &str,
+    col: &str,
+    data: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let page_meta = handler
-        .locate_latest(col)
+        .locate_latest_in_table(table, col)
         .ok_or_else(|| "missing page metadata for column")?;
 
     let page_arc = handler
@@ -32,8 +61,18 @@ pub fn update_column_entry(
     data: &str,
     row: u64,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    update_column_entry_in_table(handler, DEFAULT_TABLE, col, data, row)
+}
+
+pub fn update_column_entry_in_table(
+    handler: &PageHandler,
+    table: &str,
+    col: &str,
+    data: &str,
+    row: u64,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let page_meta = handler
-        .locate_latest(col)
+        .locate_latest_in_table(table, col)
         .ok_or_else(|| "missing page metadata for column")?;
 
     let page_arc = handler
@@ -56,9 +95,27 @@ pub fn range_scan_column_entry(
     col: &str,
     l_row: u64,
     r_row: u64,
+    commit_time_upper_bound: u64,
+) -> Vec<Entry> {
+    range_scan_table_column_entry(
+        handler,
+        DEFAULT_TABLE,
+        col,
+        l_row,
+        r_row,
+        commit_time_upper_bound,
+    )
+}
+
+pub fn range_scan_table_column_entry(
+    handler: &PageHandler,
+    table: &str,
+    col: &str,
+    l_row: u64,
+    r_row: u64,
     _commit_time_upper_bound: u64,
 ) -> Vec<Entry> {
-    let slices = handler.list_range(col, l_row, r_row);
+    let slices = handler.list_range_in_table(table, col, l_row, r_row);
     if slices.is_empty() {
         return Vec::new();
     }

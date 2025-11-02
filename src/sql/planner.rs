@@ -1,6 +1,8 @@
-use crate::sql::models::{FilterExpr, PlannerError, PlannerResult, QueryPlan, TableAccess};
+use crate::sql::models::{
+    ColumnSpec, CreateTablePlan, FilterExpr, PlannerError, PlannerResult, QueryPlan, TableAccess,
+};
 use sqlparser::ast::{
-    Assignment, BinaryOperator, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
+    Assignment, BinaryOperator, ColumnDef, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
     GroupByExpr, Ident, ObjectName, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement,
     TableFactor, TableWithJoins, WindowType,
 };
@@ -64,6 +66,67 @@ pub fn plan_statement(statement: &Statement) -> PlannerResult<QueryPlan> {
         }
         _ => Err(PlannerError::Unsupported(
             "only SELECT, INSERT, UPDATE, and DELETE statements are supported for now".into(),
+        )),
+    }
+}
+
+pub fn plan_create_table_statement(statement: &Statement) -> PlannerResult<CreateTablePlan> {
+    match statement {
+        Statement::CreateTable {
+            name,
+            columns,
+            constraints,
+            with_options,
+            query,
+            like,
+            order_by,
+            if_not_exists,
+            or_replace,
+            temporary,
+            ..
+        } => {
+            if *or_replace || *temporary {
+                return Err(PlannerError::Unsupported(
+                    "CREATE TABLE with REPLACE or TEMPORARY is not supported yet".into(),
+                ));
+            }
+            if like.is_some() || query.is_some() {
+                return Err(PlannerError::Unsupported(
+                    "CREATE TABLE ... LIKE/AS SELECT is not supported yet".into(),
+                ));
+            }
+            if !constraints.is_empty() || !with_options.is_empty() {
+                return Err(PlannerError::Unsupported(
+                    "CREATE TABLE constraints or WITH options are not supported yet".into(),
+                ));
+            }
+            if columns.is_empty() {
+                return Err(PlannerError::Unsupported(
+                    "CREATE TABLE must specify at least one column".into(),
+                ));
+            }
+
+            let mut specs = Vec::with_capacity(columns.len());
+            for column in columns {
+                specs.push(column_to_spec(column));
+            }
+
+            let mut sort_key = Vec::new();
+            if let Some(items) = order_by {
+                for ident in items {
+                    sort_key.push(ident.value.clone());
+                }
+            }
+
+            Ok(CreateTablePlan::new(
+                object_name_to_string(name),
+                specs,
+                sort_key,
+                *if_not_exists,
+            ))
+        }
+        _ => Err(PlannerError::Unsupported(
+            "only CREATE TABLE statements are supported".into(),
         )),
     }
 }
@@ -619,6 +682,10 @@ fn extract_table_name(table: &TableWithJoins) -> PlannerResult<String> {
             "only direct table references are supported for now".into(),
         )),
     }
+}
+
+fn column_to_spec(column: &ColumnDef) -> ColumnSpec {
+    ColumnSpec::new(column.name.value.clone(), column.data_type.to_string())
 }
 
 fn object_name_to_string(name: &ObjectName) -> String {

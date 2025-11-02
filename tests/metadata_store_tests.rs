@@ -1,4 +1,6 @@
-use idk_uwu_ig::metadata_store::{PageDirectory, PendingPage, TableMetaStore};
+use idk_uwu_ig::metadata_store::{
+    ColumnDefinition, DEFAULT_TABLE, PageDirectory, PendingPage, TableDefinition, TableMetaStore,
+};
 use std::sync::{Arc, RwLock};
 
 #[test]
@@ -138,6 +140,7 @@ fn register_batch_replaces_tail_and_updates_prefix() {
     let mut store = TableMetaStore::new();
 
     let first = vec![PendingPage {
+        table: DEFAULT_TABLE.to_string(),
         column: "users".to_string(),
         disk_path: "file0".to_string(),
         offset: 0,
@@ -149,6 +152,7 @@ fn register_batch_replaces_tail_and_updates_prefix() {
     store.register_batch(&first);
 
     let second = vec![PendingPage {
+        table: DEFAULT_TABLE.to_string(),
         column: "users".to_string(),
         disk_path: "file0".to_string(),
         offset: 256 * 1024,
@@ -160,6 +164,7 @@ fn register_batch_replaces_tail_and_updates_prefix() {
     store.register_batch(&second);
 
     let third = vec![PendingPage {
+        table: DEFAULT_TABLE.to_string(),
         column: "users".to_string(),
         disk_path: "file0".to_string(),
         offset: 512 * 1024,
@@ -170,12 +175,12 @@ fn register_batch_replaces_tail_and_updates_prefix() {
     }];
     store.register_batch(&third);
 
-    let slices = store.locate_range("users", 0, 31);
+    let slices = store.locate_range(DEFAULT_TABLE, "users", 0, 31);
     assert_eq!(slices.len(), 2);
     assert_eq!(slices[0].descriptor.entry_count, 8);
     assert_eq!(slices[1].descriptor.entry_count, 16);
 
-    let location = store.locate_row("users", 20).unwrap();
+    let location = store.locate_row(DEFAULT_TABLE, "users", 20).unwrap();
     assert_eq!(location.descriptor.entry_count, 16);
 }
 
@@ -228,6 +233,74 @@ fn page_directory_concurrent_lookup() {
     for handle in handles {
         handle.join().unwrap();
     }
+}
+
+#[test]
+fn register_table_records_columns_and_ordering() {
+    let mut store = TableMetaStore::new();
+    let definition = TableDefinition::new(
+        "items",
+        vec![
+            ColumnDefinition::new("id", "UUID"),
+            ColumnDefinition::new("name", "String"),
+            ColumnDefinition::new("created_at", "DateTime"),
+        ],
+        vec!["id".into(), "created_at".into()],
+    );
+    store.register_table(definition).expect("register table");
+
+    let catalog = store.table("items").expect("catalog exists");
+    assert_eq!(catalog.columns().len(), 3);
+    assert!(catalog.column("name").is_some());
+    let key: Vec<String> = catalog
+        .sort_key()
+        .iter()
+        .map(|col| col.name.clone())
+        .collect();
+    assert_eq!(key, vec!["id".to_string(), "created_at".to_string()]);
+}
+
+#[test]
+fn add_columns_extends_existing_table() {
+    let mut store = TableMetaStore::new();
+    let definition = TableDefinition::new(
+        "metrics",
+        vec![ColumnDefinition::new("ts", "TIMESTAMP")],
+        vec![],
+    );
+    store
+        .register_table(definition)
+        .expect("register base table");
+
+    store
+        .add_columns(
+            "metrics",
+            vec![
+                ColumnDefinition::new("value", "Float64"),
+                ColumnDefinition::new("tags", "String"),
+            ],
+        )
+        .expect("extend table");
+
+    assert!(store.column_defined("metrics", "ts"));
+    assert!(store.column_defined("metrics", "value"));
+    assert!(store.column_defined("metrics", "tags"));
+}
+
+#[test]
+fn default_table_column_created_on_page_registration() {
+    let mut store = TableMetaStore::new();
+    let descriptor = store.register_page(
+        DEFAULT_TABLE,
+        "ephemeral_column",
+        "ephemeral.db".to_string(),
+        0,
+        0,
+        0,
+        5,
+    );
+    assert!(descriptor.is_some());
+    assert!(store.column_defined(DEFAULT_TABLE, "ephemeral_column"));
 }
 
 #[test]

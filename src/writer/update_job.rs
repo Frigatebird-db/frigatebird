@@ -118,9 +118,24 @@ mod tests {
         let job = UpdateJob::new(
             "products",
             vec![
-                ColumnUpdate::new("id", vec![UpdateOp::Append { entry: Entry::new("1") }]),
-                ColumnUpdate::new("name", vec![UpdateOp::Append { entry: Entry::new("Widget") }]),
-                ColumnUpdate::new("price", vec![UpdateOp::Append { entry: Entry::new("9.99") }]),
+                ColumnUpdate::new(
+                    "id",
+                    vec![UpdateOp::Append {
+                        entry: Entry::new("1"),
+                    }],
+                ),
+                ColumnUpdate::new(
+                    "name",
+                    vec![UpdateOp::Append {
+                        entry: Entry::new("Widget"),
+                    }],
+                ),
+                ColumnUpdate::new(
+                    "price",
+                    vec![UpdateOp::Append {
+                        entry: Entry::new("9.99"),
+                    }],
+                ),
             ],
         );
 
@@ -134,9 +149,16 @@ mod tests {
     #[test]
     fn update_job_mixed_operations() {
         let ops = vec![
-            UpdateOp::Append { entry: Entry::new("new") },
-            UpdateOp::Overwrite { row: 0, entry: Entry::new("updated") },
-            UpdateOp::Append { entry: Entry::new("another") },
+            UpdateOp::Append {
+                entry: Entry::new("new"),
+            },
+            UpdateOp::Overwrite {
+                row: 0,
+                entry: Entry::new("updated"),
+            },
+            UpdateOp::Append {
+                entry: Entry::new("another"),
+            },
         ];
 
         let job = UpdateJob::new("test", vec![ColumnUpdate::new("data", ops)]);

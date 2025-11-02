@@ -3,6 +3,45 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnSpec {
+    pub name: String,
+    pub data_type: String,
+}
+
+impl ColumnSpec {
+    pub fn new(name: impl Into<String>, data_type: impl Into<String>) -> Self {
+        ColumnSpec {
+            name: name.into(),
+            data_type: data_type.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTablePlan {
+    pub table_name: String,
+    pub columns: Vec<ColumnSpec>,
+    pub order_by: Vec<String>,
+    pub if_not_exists: bool,
+}
+
+impl CreateTablePlan {
+    pub fn new(
+        table_name: impl Into<String>,
+        columns: Vec<ColumnSpec>,
+        order_by: Vec<String>,
+        if_not_exists: bool,
+    ) -> Self {
+        CreateTablePlan {
+            table_name: table_name.into(),
+            columns,
+            order_by,
+            if_not_exists,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableAccess {
     pub table_name: String,
     pub read_columns: BTreeSet<String>,

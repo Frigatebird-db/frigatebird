@@ -13,6 +13,7 @@ mod ops_handler;
 mod page;
 mod page_handler;
 mod pool;
+mod sql;
 mod writer;
 use cache::lifecycle::{CompressedToDiskLifecycle, UncompressedToCompressedLifecycle};
 use helpers::compressor::Compressor;
