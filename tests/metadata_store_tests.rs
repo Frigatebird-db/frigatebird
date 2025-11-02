@@ -141,7 +141,8 @@ fn register_batch_replaces_tail_and_updates_prefix() {
         column: "users".to_string(),
         disk_path: "file0".to_string(),
         offset: 0,
-        size: 256 * 1024,
+        alloc_len: 256 * 1024,
+        actual_len: 200 * 8,
         entry_count: 8,
         replace_last: false,
     }];
@@ -151,7 +152,8 @@ fn register_batch_replaces_tail_and_updates_prefix() {
         column: "users".to_string(),
         disk_path: "file0".to_string(),
         offset: 256 * 1024,
-        size: 256 * 1024,
+        alloc_len: 256 * 1024,
+        actual_len: 200 * 4,
         entry_count: 4,
         replace_last: false,
     }];
@@ -161,16 +163,17 @@ fn register_batch_replaces_tail_and_updates_prefix() {
         column: "users".to_string(),
         disk_path: "file0".to_string(),
         offset: 512 * 1024,
-        size: 64 * 1024,
+        alloc_len: 64 * 1024,
+        actual_len: 200 * 16,
         entry_count: 16,
         replace_last: true,
     }];
     store.register_batch(&third);
 
     let slices = store.locate_range("users", 0, 31);
-    assert_eq!(slices.len(), 3);
-    assert_eq!(slices[1].descriptor.entry_count, 4);
-    assert_eq!(slices[2].descriptor.entry_count, 16);
+    assert_eq!(slices.len(), 2);
+    assert_eq!(slices[0].descriptor.entry_count, 8);
+    assert_eq!(slices[1].descriptor.entry_count, 16);
 
     let location = store.locate_row("users", 20).unwrap();
     assert_eq!(location.descriptor.entry_count, 16);

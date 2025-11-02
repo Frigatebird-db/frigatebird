@@ -7,17 +7,26 @@ pub struct PageDescriptor {
     pub id: String,
     pub disk_path: String,
     pub offset: u64,
-    pub size: u64,
+    pub alloc_len: u64,
+    pub actual_len: u64,
     pub entry_count: u64,
 }
 
 impl PageDescriptor {
-    fn new(id: String, disk_path: String, offset: u64, size: u64, entry_count: u64) -> Self {
+    fn new(
+        id: String,
+        disk_path: String,
+        offset: u64,
+        alloc_len: u64,
+        actual_len: u64,
+        entry_count: u64,
+    ) -> Self {
         PageDescriptor {
             id,
             disk_path,
             offset,
-            size,
+            alloc_len,
+            actual_len,
             entry_count,
         }
     }
@@ -188,7 +197,8 @@ pub struct PendingPage {
     pub column: String,
     pub disk_path: String,
     pub offset: u64,
-    pub size: u64,
+    pub alloc_len: u64,
+    pub actual_len: u64,
     pub entry_count: u64,
     pub replace_last: bool,
 }
@@ -213,12 +223,13 @@ impl TableMetaStore {
         &mut self,
         disk_path: String,
         offset: u64,
-        size: u64,
+        alloc_len: u64,
+        actual_len: u64,
         entry_count: u64,
     ) -> PageDescriptor {
         let id = format!("{:016x}", self.next_page_id);
         self.next_page_id = self.next_page_id.wrapping_add(1);
-        PageDescriptor::new(id, disk_path, offset, size, entry_count)
+        PageDescriptor::new(id, disk_path, offset, alloc_len, actual_len, entry_count)
     }
 
     pub fn latest(&self, column: &str) -> Option<PageDescriptor> {
@@ -257,11 +268,12 @@ impl TableMetaStore {
         column: &str,
         disk_path: String,
         offset: u64,
-        size: u64,
+        alloc_len: u64,
+        actual_len: u64,
         entry_count: u64,
     ) -> PageDescriptor {
         let count = if entry_count == 0 { 1 } else { entry_count };
-        let descriptor = self.allocate_descriptor(disk_path, offset, size, count);
+        let descriptor = self.allocate_descriptor(disk_path, offset, alloc_len, actual_len, count);
         self.page_index
             .insert(descriptor.id.clone(), descriptor.clone());
         self.columns
@@ -277,7 +289,8 @@ impl TableMetaStore {
             let descriptor = self.allocate_descriptor(
                 page.disk_path.clone(),
                 page.offset,
-                page.size,
+                page.alloc_len,
+                page.actual_len,
                 page.entry_count,
             );
 
@@ -388,7 +401,7 @@ impl PageDirectory {
         disk_path: String,
         offset: u64,
     ) -> Option<PageDescriptor> {
-        self.register_page_with_size_and_entries(column, disk_path, offset, 0, 1)
+        self.register_page_with_sizes(column, disk_path, offset, 0, 1, 1)
     }
 
     pub fn register_page_with_size(
@@ -396,21 +409,22 @@ impl PageDirectory {
         column: &str,
         disk_path: String,
         offset: u64,
-        size: u64,
+        alloc_len: u64,
     ) -> Option<PageDescriptor> {
-        self.register_page_with_size_and_entries(column, disk_path, offset, size, 1)
+        self.register_page_with_sizes(column, disk_path, offset, alloc_len, alloc_len, 1)
     }
 
-    pub fn register_page_with_size_and_entries(
+    pub fn register_page_with_sizes(
         &self,
         column: &str,
         disk_path: String,
         offset: u64,
-        size: u64,
+        alloc_len: u64,
+        actual_len: u64,
         entry_count: u64,
     ) -> Option<PageDescriptor> {
         let mut guard = self.store.write().ok()?;
-        Some(guard.register_page(column, disk_path, offset, size, entry_count))
+        Some(guard.register_page(column, disk_path, offset, alloc_len, actual_len, entry_count))
     }
 
     pub fn register_batch(&self, pages: &[PendingPage]) -> Vec<PageDescriptor> {
