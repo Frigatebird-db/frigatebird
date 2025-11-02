@@ -1,9 +1,14 @@
-use super::aggregates::{AggregateDataset, evaluate_aggregate_function, is_aggregate_function, MaterializedColumns};
+use super::SqlExecutionError;
+use super::aggregates::{
+    AggregateDataset, MaterializedColumns, evaluate_aggregate_function, is_aggregate_function,
+};
 use super::helpers::{is_null_value, like_match, regex_match};
 use super::row_functions::evaluate_row_function;
 use super::scalar_functions::evaluate_scalar_function;
-use super::values::{CachedValue, ScalarValue, cached_to_scalar, combine_numeric, compare_scalar_values, compare_strs, scalar_from_f64};
-use super::SqlExecutionError;
+use super::values::{
+    CachedValue, ScalarValue, cached_to_scalar, combine_numeric, compare_scalar_values,
+    compare_strs, scalar_from_f64,
+};
 use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value};
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -78,12 +83,7 @@ pub(super) fn evaluate_scalar_expression(
                         Some(ord) => ord == Ordering::Greater,
                         None => false,
                     };
-                    println!(
-                        "row compare {:?} > {:?} => {}",
-                        lhs,
-                        rhs,
-                        result
-                    );
+                    println!("row compare {:?} > {:?} => {}", lhs, rhs, result);
                     Ok(ScalarValue::Bool(result))
                 }
                 BinaryOperator::GtEq => Ok(ScalarValue::Bool(
@@ -532,15 +532,8 @@ fn evaluate_row_case_expr(
                 .map(|ord| ord == Ordering::Equal)
                 .unwrap_or(false)
         } else {
-            if let Some(raw) = dataset.column_value("value", row_idx) {
-                println!("dataset column value at row {}: {:?}", row_idx, raw);
-            }
             let cond = evaluate_row_expr(condition, row_idx, dataset)?;
             let cond_bool = cond.as_bool().unwrap_or(false);
-            println!(
-                "case condition {:?} evaluated to {} (value {:?}) for row {}",
-                condition, cond_bool, cond, row_idx
-            );
             cond_bool
         };
 
@@ -822,14 +815,6 @@ fn column_operand<'a>(
     let ordinal = column_ordinals.get(column_name).copied().ok_or_else(|| {
         SqlExecutionError::Unsupported(format!("unknown column referenced: {column_name}"))
     })?;
-    println!("column operand lookup {} -> ordinal {} for row {}", column_name, ordinal, row_idx);
-    if let Some(map) = materialized.get(&ordinal) {
-        println!(
-            "column map keys for ordinal {}: {:?}",
-            ordinal,
-            map.keys().collect::<Vec<_>>()
-        );
-    }
     let value = materialized
         .get(&ordinal)
         .and_then(|column_map| column_map.get(&row_idx));

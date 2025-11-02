@@ -1,6 +1,8 @@
-use super::values::{compare_strs, is_encoded_null};
 use super::SqlExecutionError;
-use sqlparser::ast::{Expr, ObjectName, Offset, TableFactor, TableWithJoins, Value, WildcardAdditionalOptions};
+use super::values::{compare_strs, is_encoded_null};
+use sqlparser::ast::{
+    Expr, ObjectName, Offset, TableFactor, TableWithJoins, Value, WildcardAdditionalOptions,
+};
 use std::collections::{BTreeSet, HashMap};
 
 pub(super) fn object_name_to_string(name: &ObjectName) -> String {
@@ -11,7 +13,9 @@ pub(super) fn object_name_to_string(name: &ObjectName) -> String {
         .join(".")
 }
 
-pub(super) fn table_with_joins_to_name(table: &TableWithJoins) -> Result<String, SqlExecutionError> {
+pub(super) fn table_with_joins_to_name(
+    table: &TableWithJoins,
+) -> Result<String, SqlExecutionError> {
     if !table.joins.is_empty() {
         return Err(SqlExecutionError::Unsupported(
             "UPDATE with JOINs is not supported".into(),
@@ -74,7 +78,9 @@ pub(super) fn parse_usize_literal(expr: &Expr, context: &str) -> Result<usize, S
     }
 }
 
-pub(super) fn extract_equality_filters(expr: &Expr) -> Result<HashMap<String, String>, SqlExecutionError> {
+pub(super) fn extract_equality_filters(
+    expr: &Expr,
+) -> Result<HashMap<String, String>, SqlExecutionError> {
     let mut filters = HashMap::new();
     gather_filters(expr, &mut filters)?;
     Ok(filters)

@@ -1,7 +1,7 @@
+use super::SqlExecutionError;
 use super::aggregates::AggregateDataset;
 use super::expressions::evaluate_row_expr;
 use super::values::{ScalarValue, scalar_from_f64};
-use super::SqlExecutionError;
 use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr};
 
 pub(super) fn evaluate_row_function(

@@ -131,7 +131,11 @@ pub(super) fn scalar_from_f64(value: f64) -> ScalarValue {
     }
 }
 
-pub(super) fn combine_numeric<F>(left: &ScalarValue, right: &ScalarValue, op: F) -> Option<ScalarValue>
+pub(super) fn combine_numeric<F>(
+    left: &ScalarValue,
+    right: &ScalarValue,
+    op: F,
+) -> Option<ScalarValue>
 where
     F: Fn(f64, f64) -> f64,
 {

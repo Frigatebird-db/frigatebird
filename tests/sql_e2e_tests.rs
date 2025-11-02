@@ -37,7 +37,9 @@ fn test_e2e_create_insert_update_delete_full_lifecycle() {
 
     // Insert initial data
     executor
-        .execute("INSERT INTO products (id, name, price, stock) VALUES ('1', 'Laptop', '999.99', '10')")
+        .execute(
+            "INSERT INTO products (id, name, price, stock) VALUES ('1', 'Laptop', '999.99', '10')",
+        )
         .expect("insert");
 
     // Verify insert
@@ -47,7 +49,11 @@ fn test_e2e_create_insert_update_delete_full_lifecycle() {
     assert_eq!(result.rows.len(), 1);
     assert_eq!(
         result.rows[0],
-        vec![Some("Laptop".to_string()), Some("999.99".to_string()), Some("10".to_string())]
+        vec![
+            Some("Laptop".to_string()),
+            Some("999.99".to_string()),
+            Some("10".to_string())
+        ]
     );
 
     // Update price and stock
@@ -61,7 +67,11 @@ fn test_e2e_create_insert_update_delete_full_lifecycle() {
         .expect("select after update");
     assert_eq!(
         result.rows[0],
-        vec![Some("Laptop".to_string()), Some("899.99".to_string()), Some("15".to_string())]
+        vec![
+            Some("Laptop".to_string()),
+            Some("899.99".to_string()),
+            Some("15".to_string())
+        ]
     );
 
     // Delete the product
@@ -238,7 +248,10 @@ fn test_e2e_null_handling() {
         .execute("INSERT INTO data (id, value) VALUES ('1', '10')")
         .expect("insert 1");
     executor
-        .execute(&format!("INSERT INTO data (id, value) VALUES ('1', '{}')", null_marker))
+        .execute(&format!(
+            "INSERT INTO data (id, value) VALUES ('1', '{}')",
+            null_marker
+        ))
         .expect("insert 2");
     executor
         .execute("INSERT INTO data (id, value) VALUES ('1', '30')")
@@ -365,7 +378,11 @@ fn test_e2e_multiple_inserts_updates_deletes() {
     // Insert 5 items for product id='1'
     for i in 1..=5 {
         executor
-            .execute(&format!("INSERT INTO inventory (id, item, quantity) VALUES ('1', 'Item{}', '{}')", i, i * 10))
+            .execute(&format!(
+                "INSERT INTO inventory (id, item, quantity) VALUES ('1', 'Item{}', '{}')",
+                i,
+                i * 10
+            ))
             .expect("insert");
     }
 
@@ -385,7 +402,11 @@ fn test_e2e_multiple_inserts_updates_deletes() {
     // Update all quantities (double them)
     for i in 1..=5 {
         executor
-            .execute(&format!("UPDATE inventory SET quantity = '{}' WHERE id = '1' AND item = 'Item{}'", i * 20, i))
+            .execute(&format!(
+                "UPDATE inventory SET quantity = '{}' WHERE id = '1' AND item = 'Item{}'",
+                i * 20,
+                i
+            ))
             .expect("update");
     }
 
@@ -399,7 +420,10 @@ fn test_e2e_multiple_inserts_updates_deletes() {
     // Delete half the items
     for i in 1..=2 {
         executor
-            .execute(&format!("DELETE FROM inventory WHERE id = '1' AND item = 'Item{}'", i))
+            .execute(&format!(
+                "DELETE FROM inventory WHERE id = '1' AND item = 'Item{}'",
+                i
+            ))
             .expect("delete");
     }
 
@@ -415,4 +439,39 @@ fn test_e2e_multiple_inserts_updates_deletes() {
         .expect("sum after delete");
     // 60 + 80 + 100 = 240
     assert_eq!(result.rows[0], vec![Some("240".to_string())]);
+}
+
+#[test]
+fn test_select_on_non_sort_column_filters() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute("CREATE TABLE tasks (id TEXT, status TEXT, payload TEXT) ORDER BY id")
+        .expect("create table");
+
+    executor
+        .execute("INSERT INTO tasks (id, status, payload) VALUES ('1', 'done', 'alpha')")
+        .expect("insert done");
+    executor
+        .execute("INSERT INTO tasks (id, status, payload) VALUES ('2', 'pending', 'beta')")
+        .expect("insert pending");
+    executor
+        .execute("INSERT INTO tasks (id, status, payload) VALUES ('3', 'done', 'gamma')")
+        .expect("insert done second");
+
+    let result = executor
+        .query("SELECT COUNT(*) FROM tasks WHERE status = 'done'")
+        .expect("count done");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0], vec![Some("2".to_string())]);
+
+    let result = executor
+        .query("SELECT COUNT(*) FROM tasks WHERE status = 'pending'")
+        .expect("count pending");
+    assert_eq!(result.rows[0], vec![Some("1".to_string())]);
+
+    let result = executor
+        .query("SELECT COUNT(*) FROM tasks WHERE status = 'done' OR status = 'pending'")
+        .expect("count combined");
+    assert_eq!(result.rows[0], vec![Some("3".to_string())]);
 }
