@@ -160,13 +160,35 @@ impl Ord for JobHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+    use crate::helpers::compressor::Compressor;
+    use crate::metadata_store::PageDirectory;
+    use crate::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+    use crate::page_handler::page_io::PageIO;
     use crate::pipeline::{Job, PipelineBatch, PipelineStep};
     use crossbeam::channel;
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
+
+    fn create_mock_page_handler() -> Arc<PageHandler> {
+        let meta_store = Arc::new(RwLock::new(crate::metadata_store::TableMetaStore::new()));
+        let directory = Arc::new(PageDirectory::new(meta_store));
+        let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
+
+        let compressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryCompressed>::new()));
+        let page_io = Arc::new(PageIO {});
+        let fetcher = Arc::new(PageFetcher::new(compressed_cache, page_io));
+
+        let uncompressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
+        let compressor = Arc::new(Compressor::new());
+        let materializer = Arc::new(PageMaterializer::new(uncompressed_cache, compressor));
+
+        Arc::new(PageHandler::new(locator, fetcher, materializer))
+    }
 
     fn dummy_job(step_count: usize) -> Job {
         let (entry_tx, _entry_rx) = channel::unbounded::<PipelineBatch>();
         let mut steps = Vec::with_capacity(step_count);
+        let page_handler = create_mock_page_handler();
         for idx in 0..step_count {
             let (tx, rx) = channel::unbounded::<PipelineBatch>();
             steps.push(PipelineStep::new(
@@ -175,6 +197,8 @@ mod tests {
                 tx,
                 rx,
                 idx == 0,
+                "test_table".to_string(),
+                Arc::clone(&page_handler),
             ));
         }
         Job::new("t".into(), steps, entry_tx)
