@@ -244,13 +244,31 @@ fn sql_executor_end_to_end_sorted_insert() {
         .execute("INSERT INTO accounts (id, score) VALUES ('u4', '25')")
         .expect("single insert succeeds");
 
+    executor
+        .execute("UPDATE accounts SET id = 'u2b' WHERE score = '20'")
+        .expect("update non-sort column succeeds");
+
+    executor
+        .execute("UPDATE accounts SET score = '60' WHERE score = '25'")
+        .expect("update sort column succeeds");
+
+    executor
+        .execute("DELETE FROM accounts WHERE score = '30'")
+        .expect("delete succeeds");
+
     let column_names = ["id", "score"];
     let rows = collect_table_rows(&handler, &directory, "accounts", &column_names);
     assert_rows_sorted(&rows, &[1]);
     assert_metadata_for_columns(&store, "accounts", &column_names, rows.len());
 
-    let scores: Vec<&str> = rows.iter().map(|row| row[1].as_str()).collect();
-    assert_eq!(scores, vec!["20", "25", "30", "50"]);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["u2b".into(), "20".into()],
+            vec!["u1".into(), "50".into()],
+            vec!["u4".into(), "60".into()],
+        ]
+    );
 }
 
 #[test]

@@ -104,6 +104,108 @@ pub fn insert_sorted_row(
     sorted_insert_row(handler, table, row)
 }
 
+pub fn read_row(
+    handler: &PageHandler,
+    table: &str,
+    row_idx: u64,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let catalog = handler
+        .table_catalog(table)
+        .ok_or_else(|| other_error(format!("unknown table: {table}")))?;
+
+    let mut row = Vec::with_capacity(catalog.columns().len());
+    for column in catalog.columns() {
+        let entry = handler
+            .read_entry_at(table, &column.name, row_idx)
+            .ok_or_else(|| {
+                other_error(format!(
+                    "unable to read row {row_idx} for column {table}.{}",
+                    column.name
+                ))
+            })?;
+        row.push(entry.get_data().to_string());
+    }
+
+    Ok(row)
+}
+
+pub fn overwrite_row(
+    handler: &PageHandler,
+    table: &str,
+    row_idx: u64,
+    new_values: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let catalog = handler
+        .table_catalog(table)
+        .ok_or_else(|| other_error(format!("unknown table: {table}")))?;
+
+    if new_values.len() != catalog.columns().len() {
+        return Err(other_error(format!(
+            "expected {} column values, got {}",
+            catalog.columns().len(),
+            new_values.len()
+        )));
+    }
+
+    for column in catalog.columns() {
+        let descriptor = handler
+            .locate_latest_in_table(table, &column.name)
+            .ok_or_else(|| {
+                other_error(format!("missing page metadata for {table}.{}", column.name))
+            })?;
+
+        let page_arc = handler
+            .get_page(descriptor.clone())
+            .ok_or_else(|| other_error("unable to load page"))?;
+
+        let mut updated = (*page_arc).clone();
+        let idx = row_idx as usize;
+        if idx >= updated.page.entries.len() {
+            return Err(other_error(format!("row {row_idx} out of bounds")));
+        }
+        updated.page.entries[idx] = Entry::new(&new_values[column.ordinal]);
+        handler.write_back_uncompressed(&descriptor.id, updated);
+    }
+
+    Ok(())
+}
+
+pub fn delete_row(
+    handler: &PageHandler,
+    table: &str,
+    row_idx: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let catalog = handler
+        .table_catalog(table)
+        .ok_or_else(|| other_error(format!("unknown table: {table}")))?;
+
+    for column in catalog.columns().iter().rev() {
+        let descriptor = handler
+            .locate_latest_in_table(table, &column.name)
+            .ok_or_else(|| {
+                other_error(format!("missing page metadata for {table}.{}", column.name))
+            })?;
+
+        let page_arc = handler
+            .get_page(descriptor.clone())
+            .ok_or_else(|| other_error("unable to load page"))?;
+
+        let mut updated = (*page_arc).clone();
+        let idx = row_idx as usize;
+        if idx >= updated.page.entries.len() {
+            return Err(other_error(format!("row {row_idx} out of bounds")));
+        }
+        updated.page.entries.remove(idx);
+        let new_len = updated.page.entries.len() as u64;
+        handler.write_back_uncompressed(&descriptor.id, updated);
+        handler
+            .update_entry_count_in_table(table, &column.name, new_len)
+            .map_err(|err| other_error(format!("failed to update metadata entry count: {err}")))?;
+    }
+
+    Ok(())
+}
+
 fn sorted_insert_row(
     handler: &PageHandler,
     table: &str,
