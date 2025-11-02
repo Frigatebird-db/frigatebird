@@ -17,6 +17,7 @@ struct BenchmarkConfig {
     batch_size: usize,
     payload_bytes: usize,
     report_every: usize,
+    rows_per_id: usize,
 }
 
 impl BenchmarkConfig {
@@ -26,6 +27,7 @@ impl BenchmarkConfig {
             batch_size: parse_arg("--batch-size").unwrap_or(1_000),
             payload_bytes: parse_arg("--payload-bytes").unwrap_or(1_024),
             report_every: parse_arg("--report-every").unwrap_or(100_000),
+            rows_per_id: parse_arg("--rows-per-id").unwrap_or(1_000),
         })
     }
 }
@@ -94,14 +96,18 @@ fn run_insert_phase(executor: &SqlExecutor, config: &BenchmarkConfig) -> Result<
     let mut batches: usize = 0;
     let mut elapsed_total = Duration::ZERO;
 
+    let rows_per_id = config.rows_per_id.max(1);
+
     while rows_written < config.rows {
         let mut statement = String::from("INSERT INTO bench (id, metric, payload) VALUES ");
         let mut first = true;
         let mut batch_rows = 0usize;
 
         while batch_rows < config.batch_size && rows_written < config.rows {
-            let id = format!("{:020}", rows_written);
-            let metric = format!("{}", rows_written % 10_000);
+            let current_row = rows_written;
+            let id_value = current_row / rows_per_id;
+            let id = format!("{:020}", id_value);
+            let metric = format!("{}", current_row % 10_000);
             if !first {
                 statement.push_str(", ");
             } else {
@@ -157,33 +163,42 @@ fn run_insert_phase(executor: &SqlExecutor, config: &BenchmarkConfig) -> Result<
 fn run_query_phase(executor: &SqlExecutor, config: &BenchmarkConfig) -> Result<(), SqlExecutionError> {
     println!("Running query benchmarks…");
 
-    let queries = [
-        ("avg_full", "SELECT AVG(metric) FROM bench"),
-        ("sum_full", "SELECT SUM(metric) FROM bench"),
-        ("count_full", "SELECT COUNT(*) FROM bench"),
-        ("max_full", "SELECT MAX(metric) FROM bench"),
-    ];
-
-    for (label, sql) in queries {
-        let start = Instant::now();
-        let result = executor.query(sql)?;
-        let elapsed = start.elapsed();
-        println!(
-            "Query `{label}` completed in {elapsed:?} (result: {:?})",
-            result.rows.first().unwrap_or(&Vec::new())
-        );
+    let rows_per_id = config.rows_per_id.max(1);
+    if config.rows == 0 {
+        println!("No rows inserted; skipping query phase.");
+        return Ok(());
     }
 
-    if config.rows > 0 {
-        let sample_id = format!("{:020}", config.rows / 2);
+    let max_bucket = (config.rows.saturating_sub(1)) / rows_per_id;
+    let ids_to_probe = [
+        ("head", 0usize),
+        ("mid", max_bucket / 2),
+        ("tail", max_bucket),
+    ];
+
+    for (label, bucket) in ids_to_probe {
+        let id_literal = format!("{:020}", bucket);
         let sql = format!(
-            "SELECT AVG(metric) FROM bench WHERE id = '{sample_id}'"
+            "SELECT COUNT(*), SUM(metric), AVG(metric) FROM bench WHERE id = '{id_literal}'"
         );
         let start = Instant::now();
         let result = executor.query(&sql)?;
         let elapsed = start.elapsed();
         println!(
-            "Point lookup average on id={sample_id} took {elapsed:?} (result: {:?})",
+            "Query `{label}` on id bucket {bucket} completed in {elapsed:?} (result: {:?})",
+            result.rows.first().unwrap_or(&Vec::new())
+        );
+    }
+
+    if config.rows > 0 {
+        let sample_bucket = (config.rows / rows_per_id) / 3;
+        let sample_id = format!("{:020}", sample_bucket);
+        let sql = format!("SELECT COUNT(*), MAX(metric) FROM bench WHERE id = '{sample_id}'");
+        let start = Instant::now();
+        let result = executor.query(&sql)?;
+        let elapsed = start.elapsed();
+        println!(
+            "Supplementary check on id={sample_id} took {elapsed:?} (result: {:?})",
             result.rows.first().unwrap_or(&Vec::new())
         );
     }
