@@ -168,17 +168,15 @@ fn test_many_duplicates_sort_stability() {
 
     // Update one specific duplicate (UPDATE with multiple matches is unsupported)
     // This is a KNOWN LIMITATION - UPDATE/DELETE only work with unique ORDER BY matches
-    let result = executor.execute("UPDATE dupes SET score = '200' WHERE score = '100'");
+    executor
+        .execute("UPDATE dupes SET score = '200' WHERE score = '100'")
+        .expect("bulk update");
 
-    // This SHOULD fail because multiple rows match
-    assert!(
-        result.is_err(),
-        "UPDATE with multiple ORDER BY matches should fail (current limitation)"
-    );
-
-    // To update, we'd need to provide a unique WHERE clause
-    // But since we only have id and score, and multiple rows have score='100',
-    // we can't uniquely identify a row without additional columns
+    // Confirm all previous 100 entries are now 200
+    for i in 0..20 {
+        let row = read_row(&handler, "dupes", i).expect("read after update");
+        assert_ne!(row[1], "100");
+    }
 
     // Verify all rows still exist and are sorted
     for i in 0..20 {

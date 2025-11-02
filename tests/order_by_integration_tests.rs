@@ -262,14 +262,11 @@ fn sql_executor_query_requires_sort_predicate() {
     );
     let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
 
-    let err = executor
+    let result = executor
         .query("SELECT name FROM users WHERE name = 'Alice'")
-        .expect_err("missing sort predicate must error");
-    assert!(matches!(
-        err,
-        SqlExecutionError::Unsupported(message)
-            if message.contains("requires equality predicate for ORDER BY column")
-    ));
+        .expect("missing sort predicate now scans");
+    assert_eq!(result.columns, vec!["name".to_string()]);
+    assert_eq!(result.rows, vec![vec![Some("Alice".to_string())]]);
 }
 
 #[test]
