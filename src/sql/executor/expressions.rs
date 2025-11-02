@@ -1,8 +1,8 @@
 use super::aggregates::{AggregateDataset, evaluate_aggregate_function, is_aggregate_function, MaterializedColumns};
-use super::helpers::{compare_strs, is_null_value, like_match, regex_match};
+use super::helpers::{is_null_value, like_match, regex_match};
 use super::row_functions::evaluate_row_function;
 use super::scalar_functions::evaluate_scalar_function;
-use super::values::{CachedValue, ScalarValue, cached_to_scalar, combine_numeric, compare_scalar_values, scalar_from_f64};
+use super::values::{CachedValue, ScalarValue, cached_to_scalar, combine_numeric, compare_scalar_values, compare_strs, scalar_from_f64};
 use super::SqlExecutionError;
 use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value};
 use std::borrow::Cow;
