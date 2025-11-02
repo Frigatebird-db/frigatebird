@@ -1,20 +1,25 @@
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{ColumnCatalog, PageDirectory};
-use crate::ops_handler::{create_table_from_plan, insert_sorted_row};
+use crate::ops_handler::{
+    create_table_from_plan, delete_row, insert_sorted_row, overwrite_row, read_row,
+};
 use crate::page::Page;
 use crate::page_handler::PageHandler;
-use crate::sql::models::PlannerError;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
-use sqlparser::ast::{Expr, ObjectName, SetExpr, Statement, Value};
+use sqlparser::ast::{
+    Assignment, BinaryOperator, Expr, FromTable, ObjectName, OrderByExpr, SelectItem, SetExpr,
+    Statement, TableFactor, TableWithJoins, Value,
+};
 use sqlparser::parser::ParserError;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum SqlExecutionError {
     Parse(ParserError),
-    Plan(PlannerError),
+    Plan(crate::sql::models::PlannerError),
     Unsupported(String),
     TableNotFound(String),
     ColumnMismatch { table: String, column: String },
@@ -28,11 +33,9 @@ impl std::fmt::Display for SqlExecutionError {
             SqlExecutionError::Parse(err) => write!(f, "failed to parse SQL: {err}"),
             SqlExecutionError::Plan(err) => write!(f, "{err}"),
             SqlExecutionError::Unsupported(msg) => write!(f, "unsupported SQL: {msg}"),
-            SqlExecutionError::TableNotFound(table) => {
-                write!(f, "unknown table: {table}")
-            }
+            SqlExecutionError::TableNotFound(table) => write!(f, "unknown table: {table}"),
             SqlExecutionError::ColumnMismatch { table, column } => {
-                write!(f, "column {column} is not defined on table {table}",)
+                write!(f, "column {column} is not defined on table {table}")
             }
             SqlExecutionError::ValueMismatch(msg) => write!(f, "{msg}"),
             SqlExecutionError::OperationFailed(msg) => write!(f, "{msg}"),
@@ -48,8 +51,8 @@ impl From<ParserError> for SqlExecutionError {
     }
 }
 
-impl From<PlannerError> for SqlExecutionError {
-    fn from(value: PlannerError) -> Self {
+impl From<crate::sql::models::PlannerError> for SqlExecutionError {
+    fn from(value: crate::sql::models::PlannerError) -> Self {
         SqlExecutionError::Plan(value)
     }
 }
@@ -81,6 +84,24 @@ impl SqlExecutor {
         match statement {
             Statement::CreateTable { .. } => self.execute_create(statement),
             Statement::Insert { .. } => self.execute_insert(statement),
+            Statement::Update {
+                table,
+                assignments,
+                selection,
+                returning,
+                from,
+                ..
+            } => self.execute_update(table, assignments, selection, returning, from),
+            Statement::Delete {
+                tables,
+                from,
+                using,
+                selection,
+                returning,
+                order_by,
+                limit,
+                ..
+            } => self.execute_delete(tables, from, using, selection, returning, order_by, limit),
             other => Err(SqlExecutionError::Unsupported(format!(
                 "{other:?} is not supported yet"
             ))),
@@ -97,7 +118,7 @@ impl SqlExecutor {
     fn execute_insert(&self, statement: Statement) -> Result<(), SqlExecutionError> {
         let Statement::Insert {
             table_name,
-            columns,
+            columns: specified_columns,
             source,
             ..
         } = statement
@@ -120,17 +141,17 @@ impl SqlExecutor {
             .page_directory
             .table_catalog(&table)
             .ok_or_else(|| SqlExecutionError::TableNotFound(table.clone()))?;
-        let table_columns = catalog.columns();
+        let columns: Vec<ColumnCatalog> = catalog.columns().to_vec();
 
         let mut column_ordinals: HashMap<String, usize> = HashMap::new();
-        for column in table_columns {
+        for column in &columns {
             column_ordinals.insert(column.name.clone(), column.ordinal);
         }
 
-        let specified_ordinals: Vec<usize> = if columns.is_empty() {
-            (0..table_columns.len()).collect()
+        let specified_ordinals: Vec<usize> = if specified_columns.is_empty() {
+            (0..columns.len()).collect()
         } else {
-            columns
+            specified_columns
                 .iter()
                 .map(|ident| {
                     let name = ident.value.clone();
@@ -144,13 +165,12 @@ impl SqlExecutor {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        let sort_ordinals: Vec<usize> = catalog.sort_key().iter().map(|col| col.ordinal).collect();
-        if sort_ordinals.is_empty() {
+        let sort_indices: Vec<usize> = catalog.sort_key().iter().map(|col| col.ordinal).collect();
+        if sort_indices.is_empty() {
             return Err(SqlExecutionError::Unsupported(
                 "INSERT currently requires ORDER BY tables".into(),
             ));
         }
-
         for row in &values.rows {
             if row.len() != specified_ordinals.len() {
                 return Err(SqlExecutionError::ValueMismatch(format!(
@@ -160,32 +180,291 @@ impl SqlExecutor {
                 )));
             }
 
-            let mut values_by_ordinal: Vec<String> = vec![String::new(); table_columns.len()];
+            let mut values_by_ordinal: Vec<String> = vec![String::new(); columns.len()];
             for (expr, &ordinal) in row.iter().zip(&specified_ordinals) {
                 let literal = expr_to_string(expr)?;
                 values_by_ordinal[ordinal] = literal;
             }
 
-            let mut kv_pairs: Vec<(String, String)> = Vec::with_capacity(table_columns.len());
-            for column in table_columns {
-                kv_pairs.push((
-                    column.name.clone(),
-                    values_by_ordinal[column.ordinal].clone(),
+            let leading_column = &columns[sort_indices[0]].name;
+            if self.table_is_empty(&table, leading_column)? {
+                self.initialise_table_with_row(&table, &columns, &values_by_ordinal)?;
+            } else {
+                let mut kv_pairs = Vec::with_capacity(columns.len());
+                for column in &columns {
+                    kv_pairs.push((
+                        column.name.clone(),
+                        values_by_ordinal[column.ordinal].clone(),
+                    ));
+                }
+                let tuple: Vec<(&str, &str)> = kv_pairs
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect();
+                insert_sorted_row(&self.page_handler, &table, &tuple)
+                    .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn execute_update(
+        &self,
+        table: TableWithJoins,
+        assignments: Vec<Assignment>,
+        selection: Option<Expr>,
+        returning: Option<Vec<SelectItem>>,
+        from: Option<TableWithJoins>,
+    ) -> Result<(), SqlExecutionError> {
+        if returning.is_some() || from.is_some() {
+            return Err(SqlExecutionError::Unsupported(
+                "UPDATE with RETURNING or FROM is not supported".into(),
+            ));
+        }
+
+        let table_name = table_with_joins_to_name(&table)?;
+        let catalog = self
+            .page_directory
+            .table_catalog(&table_name)
+            .ok_or_else(|| SqlExecutionError::TableNotFound(table_name.clone()))?;
+        let columns: Vec<ColumnCatalog> = catalog.columns().to_vec();
+        let sort_indices: Vec<usize> = catalog.sort_key().iter().map(|col| col.ordinal).collect();
+        if sort_indices.is_empty() {
+            return Err(SqlExecutionError::Unsupported(
+                "UPDATE currently requires ORDER BY tables".into(),
+            ));
+        }
+        let sort_columns: Vec<ColumnCatalog> = sort_indices
+            .iter()
+            .map(|&idx| columns[idx].clone())
+            .collect();
+
+        let mut column_ordinals: HashMap<String, usize> = HashMap::new();
+        for column in &columns {
+            column_ordinals.insert(column.name.clone(), column.ordinal);
+        }
+
+        if assignments.is_empty() {
+            return Ok(());
+        }
+
+        let mut assignments_vec = Vec::with_capacity(assignments.len());
+        for assignment in assignments {
+            if assignment.id.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "assignment missing column".into(),
                 ));
             }
+            let column_name = assignment.id.last().unwrap().value.clone();
+            let ordinal = column_ordinals.get(&column_name).copied().ok_or_else(|| {
+                SqlExecutionError::ColumnMismatch {
+                    table: table_name.clone(),
+                    column: column_name.clone(),
+                }
+            })?;
+            let value = expr_to_string(&assignment.value)?;
+            assignments_vec.push((ordinal, value));
+        }
 
+        let selection = selection.ok_or_else(|| {
+            SqlExecutionError::Unsupported(
+                "UPDATE requires WHERE with equality filters on ORDER BY columns".into(),
+            )
+        })?;
+
+        let filters = extract_equality_filters(&selection)?;
+        for column in filters.keys() {
+            if !column_ordinals.contains_key(column) {
+                return Err(SqlExecutionError::ColumnMismatch {
+                    table: table_name.clone(),
+                    column: column.clone(),
+                });
+            }
+        }
+
+        let mut key_values = Vec::with_capacity(sort_columns.len());
+        for column in &sort_columns {
+            let value = filters.get(&column.name).cloned().ok_or_else(|| {
+                SqlExecutionError::Unsupported(format!(
+                    "UPDATE requires equality predicate for ORDER BY column {}",
+                    column.name
+                ))
+            })?;
+            key_values.push(value);
+        }
+
+        let candidate_rows =
+            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?;
+        if candidate_rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut matching_rows = Vec::new();
+        for row_idx in candidate_rows {
+            if self.row_matches_filters(&table_name, &columns, row_idx, &filters)? {
+                matching_rows.push(row_idx);
+            }
+        }
+
+        if matching_rows.is_empty() {
+            return Ok(());
+        }
+        if matching_rows.len() > 1 {
+            return Err(SqlExecutionError::Unsupported(
+                "UPDATE matched multiple rows; refine WHERE clause".into(),
+            ));
+        }
+        let row_idx = matching_rows[0];
+
+        let mut current_row = read_row(&self.page_handler, &table_name, row_idx)
+            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+        let mut new_row = current_row.clone();
+        for (ordinal, value) in &assignments_vec {
+            new_row[*ordinal] = value.clone();
+        }
+
+        let sort_changed = sort_indices
+            .iter()
+            .any(|&idx| compare_strs(&current_row[idx], &new_row[idx]) != Ordering::Equal);
+
+        if sort_changed {
+            delete_row(&self.page_handler, &table_name, row_idx)
+                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+            let kv_pairs: Vec<(String, String)> = columns
+                .iter()
+                .map(|col| (col.name.clone(), new_row[col.ordinal].clone()))
+                .collect();
             let tuple: Vec<(&str, &str)> = kv_pairs
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_str()))
                 .collect();
+            insert_sorted_row(&self.page_handler, &table_name, &tuple)
+                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+        } else {
+            overwrite_row(&self.page_handler, &table_name, row_idx, &new_row)
+                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+        }
 
-            let leading_column = &table_columns[sort_ordinals[0]].name;
-            if self.table_is_empty(&table, leading_column)? {
-                self.initialise_table_with_row(&table, table_columns, &values_by_ordinal)?;
-            } else {
-                insert_sorted_row(&self.page_handler, &table, &tuple)
-                    .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+        Ok(())
+    }
+
+    fn execute_delete(
+        &self,
+        tables: Vec<ObjectName>,
+        from: FromTable,
+        using: Option<Vec<TableWithJoins>>,
+        selection: Option<Expr>,
+        returning: Option<Vec<SelectItem>>,
+        order_by: Vec<OrderByExpr>,
+        limit: Option<Expr>,
+    ) -> Result<(), SqlExecutionError> {
+        if !tables.is_empty()
+            || using.is_some()
+            || returning.is_some()
+            || !order_by.is_empty()
+            || limit.is_some()
+        {
+            return Err(SqlExecutionError::Unsupported(
+                "DELETE with advanced clauses is not supported".into(),
+            ));
+        }
+
+        let table_with_joins = match &from {
+            FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => {
+                if tables.len() != 1 {
+                    return Err(SqlExecutionError::Unsupported(
+                        "DELETE supports exactly one table".into(),
+                    ));
+                }
+                &tables[0]
             }
+        };
+        if !table_with_joins.joins.is_empty() {
+            return Err(SqlExecutionError::Unsupported(
+                "DELETE with JOINs is not supported".into(),
+            ));
+        }
+        let table_name = match &table_with_joins.relation {
+            TableFactor::Table { name, .. } => object_name_to_string(name),
+            _ => {
+                return Err(SqlExecutionError::Unsupported(
+                    "unsupported DELETE target".into(),
+                ));
+            }
+        };
+
+        let selection = selection.ok_or_else(|| {
+            SqlExecutionError::Unsupported(
+                "DELETE requires WHERE with equality predicates on ORDER BY columns".into(),
+            )
+        })?;
+
+        let filters = extract_equality_filters(&selection)?;
+
+        let catalog = self
+            .page_directory
+            .table_catalog(&table_name)
+            .ok_or_else(|| SqlExecutionError::TableNotFound(table_name.clone()))?;
+        let columns: Vec<ColumnCatalog> = catalog.columns().to_vec();
+        let mut column_ordinals: HashMap<String, usize> = HashMap::new();
+        for column in &columns {
+            column_ordinals.insert(column.name.clone(), column.ordinal);
+        }
+
+        for column in filters.keys() {
+            if !column_ordinals.contains_key(column) {
+                return Err(SqlExecutionError::ColumnMismatch {
+                    table: table_name.clone(),
+                    column: column.clone(),
+                });
+            }
+        }
+
+        let sort_indices: Vec<usize> = catalog.sort_key().iter().map(|col| col.ordinal).collect();
+        if sort_indices.is_empty() {
+            return Err(SqlExecutionError::Unsupported(
+                "DELETE currently requires ORDER BY tables".into(),
+            ));
+        }
+        let sort_columns: Vec<ColumnCatalog> = sort_indices
+            .iter()
+            .map(|&idx| columns[idx].clone())
+            .collect();
+
+        let mut key_values = Vec::with_capacity(sort_columns.len());
+        for column in &sort_columns {
+            let value = filters.get(&column.name).cloned().ok_or_else(|| {
+                SqlExecutionError::Unsupported(format!(
+                    "DELETE requires equality predicate for ORDER BY column {}",
+                    column.name
+                ))
+            })?;
+            key_values.push(value);
+        }
+
+        let candidate_rows =
+            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?;
+        if candidate_rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut matching_rows = Vec::new();
+        for row_idx in candidate_rows {
+            if self.row_matches_filters(&table_name, &columns, row_idx, &filters)? {
+                matching_rows.push(row_idx);
+            }
+        }
+
+        if matching_rows.is_empty() {
+            return Ok(());
+        }
+
+        matching_rows.sort_unstable();
+        matching_rows.dedup();
+        for row_idx in matching_rows.into_iter().rev() {
+            delete_row(&self.page_handler, &table_name, row_idx)
+                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
         }
 
         Ok(())
@@ -215,7 +494,7 @@ impl SqlExecutor {
                     self.page_directory.register_page_in_table_with_sizes(
                         table,
                         &column.name,
-                        format!("mem://{table}_{}_page", column.name),
+                        format!("mem://{table}_{}_page0", column.name),
                         0,
                         0,
                         0,
@@ -240,6 +519,189 @@ impl SqlExecutor {
         }
         Ok(())
     }
+
+    fn locate_rows_by_sort_tuple(
+        &self,
+        table: &str,
+        sort_columns: &[ColumnCatalog],
+        key_values: &[String],
+    ) -> Result<Vec<u64>, SqlExecutionError> {
+        if sort_columns.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut result = Vec::new();
+        let first_column = &sort_columns[0].name;
+        let descriptors = self.page_directory.pages_for_in_table(table, first_column);
+        let target = &key_values[0];
+        let mut base = 0u64;
+        let mut continue_on_equal_tail = false;
+
+        for descriptor in descriptors {
+            let page = self
+                .page_handler
+                .get_page(descriptor.clone())
+                .ok_or_else(|| SqlExecutionError::OperationFailed("unable to load page".into()))?;
+            let entries = &page.page.entries;
+            if entries.is_empty() {
+                continue;
+            }
+
+            let first_cmp = compare_strs(entries.first().unwrap().get_data(), target);
+            let last_cmp = compare_strs(entries.last().unwrap().get_data(), target);
+
+            if first_cmp == Ordering::Greater && !continue_on_equal_tail {
+                break;
+            }
+            if last_cmp == Ordering::Less {
+                base += entries.len() as u64;
+                continue_on_equal_tail = false;
+                continue;
+            }
+
+            if let Ok(pos) =
+                entries.binary_search_by(|entry| compare_strs(entry.get_data(), target))
+            {
+                let mut idx = pos;
+                while idx > 0
+                    && compare_strs(entries[idx - 1].get_data(), target) == Ordering::Equal
+                {
+                    idx -= 1;
+                }
+                while idx < entries.len()
+                    && compare_strs(entries[idx].get_data(), target) == Ordering::Equal
+                {
+                    result.push(base + idx as u64);
+                    idx += 1;
+                }
+            }
+
+            base += entries.len() as u64;
+            continue_on_equal_tail = last_cmp == Ordering::Equal;
+            if last_cmp == Ordering::Greater {
+                break;
+            }
+        }
+
+        if sort_columns.len() == 1 {
+            return Ok(result);
+        }
+
+        let mut refined = Vec::new();
+        'outer: for row_idx in result {
+            for (column, expected) in sort_columns.iter().zip(key_values.iter()) {
+                let entry = self
+                    .page_handler
+                    .read_entry_at(table, &column.name, row_idx)
+                    .ok_or_else(|| {
+                        SqlExecutionError::OperationFailed(format!(
+                            "unable to read row {row_idx} for column {table}.{}",
+                            column.name
+                        ))
+                    })?;
+                if compare_strs(entry.get_data(), expected) != Ordering::Equal {
+                    continue 'outer;
+                }
+            }
+            refined.push(row_idx);
+        }
+
+        Ok(refined)
+    }
+
+    fn row_matches_filters(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        row_idx: u64,
+        filters: &HashMap<String, String>,
+    ) -> Result<bool, SqlExecutionError> {
+        if filters.is_empty() {
+            return Ok(true);
+        }
+        let row = read_row(&self.page_handler, table, row_idx)
+            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+        for column in columns {
+            if let Some(expected) = filters.get(&column.name) {
+                if compare_strs(&row[column.ordinal], expected) != Ordering::Equal {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn extract_equality_filters(expr: &Expr) -> Result<HashMap<String, String>, SqlExecutionError> {
+    let mut filters = HashMap::new();
+    gather_filters(expr, &mut filters)?;
+    Ok(filters)
+}
+
+fn gather_filters(
+    expr: &Expr,
+    filters: &mut HashMap<String, String>,
+) -> Result<(), SqlExecutionError> {
+    match expr {
+        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::And => {
+            gather_filters(left, filters)?;
+            gather_filters(right, filters)
+        }
+        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::Eq => {
+            let column = column_name_from_expr(left).ok_or_else(|| {
+                SqlExecutionError::Unsupported(
+                    "only column = literal predicates are supported".into(),
+                )
+            })?;
+            let value = expr_to_string(right)?;
+            match filters.get(&column) {
+                Some(existing) if compare_strs(existing, &value) != Ordering::Equal => {
+                    return Err(SqlExecutionError::Unsupported(format!(
+                        "conflicting predicates for column {column}"
+                    )));
+                }
+                _ => {
+                    filters.insert(column, value);
+                }
+            }
+            Ok(())
+        }
+        Expr::Nested(inner) => gather_filters(inner, filters),
+        _ => Err(SqlExecutionError::Unsupported(
+            "only ANDed column = literal predicates are supported".into(),
+        )),
+    }
+}
+
+fn column_name_from_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.clone()),
+        Expr::CompoundIdentifier(idents) => idents.last().map(|ident| ident.value.clone()),
+        Expr::Nested(inner) => column_name_from_expr(inner),
+        _ => None,
+    }
+}
+
+fn object_name_to_string(name: &ObjectName) -> String {
+    name.0
+        .iter()
+        .map(|ident| ident.value.clone())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn table_with_joins_to_name(table: &TableWithJoins) -> Result<String, SqlExecutionError> {
+    if !table.joins.is_empty() {
+        return Err(SqlExecutionError::Unsupported(
+            "UPDATE with JOINs is not supported".into(),
+        ));
+    }
+    match &table.relation {
+        TableFactor::Table { name, .. } => Ok(object_name_to_string(name)),
+        _ => Err(SqlExecutionError::Unsupported(
+            "unsupported table reference".into(),
+        )),
+    }
 }
 
 fn expr_to_string(expr: &Expr) -> Result<String, SqlExecutionError> {
@@ -254,10 +716,9 @@ fn expr_to_string(expr: &Expr) -> Result<String, SqlExecutionError> {
     }
 }
 
-fn object_name_to_string(name: &ObjectName) -> String {
-    name.0
-        .iter()
-        .map(|ident| ident.value.clone())
-        .collect::<Vec<_>>()
-        .join(".")
+fn compare_strs(left: &str, right: &str) -> Ordering {
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(l), Ok(r)) => l.partial_cmp(&r).unwrap_or(Ordering::Equal),
+        _ => left.cmp(right),
+    }
 }
