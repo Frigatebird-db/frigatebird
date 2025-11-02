@@ -50,18 +50,27 @@ impl ColumnChain {
             return;
         }
 
+        let old_count = self.pages.last().map(|p| p.entry_count).unwrap_or(0);
+        let delta = descriptor.entry_count as i64 - old_count as i64;
+
+        if let Some(last_page) = self.pages.last_mut() {
+            *last_page = descriptor;
+        }
+
+        if delta != 0 {
+            let len = self.prefix_entries.len();
+            apply_delta_suffix(&mut self.prefix_entries[len - 1..], delta);
+        }
+
+        let new_entry_count = self.pages.last().map(|p| p.entry_count).unwrap_or(0);
         let base = if self.prefix_entries.len() >= 2 {
             self.prefix_entries[self.prefix_entries.len() - 2]
         } else {
             0
         };
-        let new_total = base + descriptor.entry_count;
 
-        if let Some(last_page) = self.pages.last_mut() {
-            *last_page = descriptor;
-        }
         if let Some(last_prefix) = self.prefix_entries.last_mut() {
-            *last_prefix = new_total;
+            *last_prefix = base + new_entry_count;
         }
     }
 
@@ -270,19 +279,32 @@ impl TableMetaStore {
                 page.size,
                 page.entry_count,
             );
+
+            let mut old_id: Option<String> = None;
+            {
+                let chain = self
+                    .columns
+                    .entry(page.column.clone())
+                    .or_insert_with(ColumnChain::new);
+
+                if page.replace_last {
+                    old_id = chain.last().map(|p| p.id.clone());
+                    if old_id.is_some() {
+                        chain.replace_last(descriptor.clone());
+                    } else {
+                        chain.push(descriptor.clone());
+                    }
+                } else {
+                    chain.push(descriptor.clone());
+                }
+            }
+
+            if let Some(old) = old_id {
+                self.page_index.remove(&old);
+            }
+
             self.page_index
                 .insert(descriptor.id.clone(), descriptor.clone());
-
-            let chain = self
-                .columns
-                .entry(page.column.clone())
-                .or_insert_with(ColumnChain::new);
-            let has_existing = chain.last().is_some();
-            if page.replace_last && has_existing {
-                chain.replace_last(descriptor.clone());
-            } else {
-                chain.push(descriptor.clone());
-            }
 
             registered.push(descriptor);
         }
@@ -397,4 +419,58 @@ impl PageDirectory {
         };
         guard.register_batch(pages)
     }
+}
+
+#[inline]
+fn apply_delta_suffix(entries: &mut [u64], delta: i64) {
+    if delta == 0 || entries.is_empty() {
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && entries.len() >= 8 {
+            unsafe {
+                add_delta_suffix_avx2(entries, delta);
+            }
+            return;
+        }
+    }
+
+    apply_delta_suffix_scalar(entries, delta);
+}
+
+#[inline]
+fn apply_delta_suffix_scalar(entries: &mut [u64], delta: i64) {
+    if delta >= 0 {
+        let delta_u = delta as u64;
+        for value in entries {
+            *value = value.wrapping_add(delta_u);
+        }
+    } else {
+        let delta_u = (-delta) as u64;
+        for value in entries {
+            *value = value.wrapping_sub(delta_u);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn add_delta_suffix_avx2(entries: &mut [u64], delta: i64) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_add_epi64, _mm256_loadu_si256, _mm256_set1_epi64x, _mm256_storeu_si256,
+    };
+
+    let delta_vec = _mm256_set1_epi64x(delta);
+    let mut chunks = entries.chunks_exact_mut(4);
+    for chunk in &mut chunks {
+        let ptr = chunk.as_mut_ptr() as *mut __m256i;
+        let current = _mm256_loadu_si256(ptr as *const __m256i);
+        let updated = _mm256_add_epi64(current, delta_vec);
+        _mm256_storeu_si256(ptr, updated);
+    }
+
+    let remainder = chunks.into_remainder();
+    apply_delta_suffix_scalar(remainder, delta);
 }
