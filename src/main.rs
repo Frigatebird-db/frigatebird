@@ -1,6 +1,6 @@
 use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
 use crate::page_handler::{
-    page_io::PageIO, PageFetcher, PageHandler, PageLocator, PageMaterializer,
+    PageFetcher, PageHandler, PageLocator, PageMaterializer, page_io::PageIO,
 };
 use crate::writer::{
     DirectBlockAllocator, DirectoryMetadataClient, MetadataClient, PageAllocator, Writer,

@@ -60,9 +60,7 @@ impl FileState {
         self.ensure_capacity(alloc_len)?;
         let allocation = PageAllocation {
             file_id: self.file_id,
-            path: data_file_path(self.file_id)
-                .to_string_lossy()
-                .to_string(),
+            path: data_file_path(self.file_id).to_string_lossy().to_string(),
             offset: self.offset,
             actual_len,
             alloc_len,
@@ -149,10 +147,7 @@ mod tests {
     fn compute_alloc_len_handles_full_blocks_and_tail() {
         assert_eq!(compute_alloc_len(0), ALIGN_4K);
         assert_eq!(compute_alloc_len(BLOCK_SIZE), BLOCK_SIZE);
-        assert_eq!(
-            compute_alloc_len(BLOCK_SIZE + 1),
-            BLOCK_SIZE + ALIGN_4K
-        );
+        assert_eq!(compute_alloc_len(BLOCK_SIZE + 1), BLOCK_SIZE + ALIGN_4K);
         assert_eq!(
             compute_alloc_len(BLOCK_SIZE * 3 + 113_568),
             BLOCK_SIZE * 3 + round_up_4k(113_568)

@@ -409,5 +409,8 @@ fn zero_timestamp_query() {
 
     // Timestamp filtering is not supported; expect data.
     let results = directory.range("col1", 0, 10, 0);
-    assert!(results.len() > 0, "Timestamp 0 should return current versions");
+    assert!(
+        results.len() > 0,
+        "Timestamp 0 should return current versions"
+    );
 }
