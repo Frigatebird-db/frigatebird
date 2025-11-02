@@ -317,7 +317,7 @@ impl SqlExecutor {
         }
         let row_idx = matching_rows[0];
 
-        let mut current_row = read_row(&self.page_handler, &table_name, row_idx)
+        let current_row = read_row(&self.page_handler, &table_name, row_idx)
             .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
         let mut new_row = current_row.clone();
         for (ordinal, value) in &assignments_vec {
