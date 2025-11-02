@@ -8,8 +8,11 @@ use bincode;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::fs::{self, OpenOptions};
 use std::io;
-use std::path::Path;
+#[cfg(target_family = "unix")]
 use std::os::unix::fs::FileExt;
+#[cfg(target_family = "windows")]
+use std::os::windows::fs::FileExt;
+use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -288,7 +291,16 @@ fn persist_allocation(prepared: &StagedColumn, descriptor: &PageDescriptor) -> i
         .create(true)
         .open(path)?;
 
-    file.write_all_at(&buffer, descriptor.offset)?;
+    #[cfg(target_family = "unix")]
+    {
+        file.write_all_at(&buffer, descriptor.offset)?;
+    }
+
+    #[cfg(target_family = "windows")]
+    {
+        file.seek_write(&buffer, descriptor.offset)?;
+    }
+
     Ok(())
 }
 

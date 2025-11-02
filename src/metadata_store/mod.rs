@@ -248,15 +248,12 @@ impl TableMetaStore {
     }
 
     pub fn locate_row(&self, column: &str, row: u64) -> Option<RowLocation> {
-        self.columns.get(column).and_then(|chain| chain.locate_row(row))
+        self.columns
+            .get(column)
+            .and_then(|chain| chain.locate_row(row))
     }
 
-    pub fn locate_range(
-        &self,
-        column: &str,
-        start_row: u64,
-        end_row: u64,
-    ) -> Vec<PageSlice> {
+    pub fn locate_range(&self, column: &str, start_row: u64, end_row: u64) -> Vec<PageSlice> {
         self.columns
             .get(column)
             .map(|chain| chain.locate_range(start_row, end_row))
@@ -365,12 +362,7 @@ impl PageDirectory {
         guard.locate_row(column, row)
     }
 
-    pub fn locate_range(
-        &self,
-        column: &str,
-        start_row: u64,
-        end_row: u64,
-    ) -> Vec<PageSlice> {
+    pub fn locate_range(&self, column: &str, start_row: u64, end_row: u64) -> Vec<PageSlice> {
         let guard = match self.store.read() {
             Ok(g) => g,
             Err(_) => return Vec::new(),
@@ -424,7 +416,14 @@ impl PageDirectory {
         entry_count: u64,
     ) -> Option<PageDescriptor> {
         let mut guard = self.store.write().ok()?;
-        Some(guard.register_page(column, disk_path, offset, alloc_len, actual_len, entry_count))
+        Some(guard.register_page(
+            column,
+            disk_path,
+            offset,
+            alloc_len,
+            actual_len,
+            entry_count,
+        ))
     }
 
     pub fn register_batch(&self, pages: &[PendingPage]) -> Vec<PageDescriptor> {

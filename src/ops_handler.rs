@@ -63,7 +63,10 @@ pub fn range_scan_column_entry(
         return Vec::new();
     }
 
-    let descriptors: Vec<PageDescriptor> = slices.iter().map(|slice| slice.descriptor.clone()).collect();
+    let descriptors: Vec<PageDescriptor> = slices
+        .iter()
+        .map(|slice| slice.descriptor.clone())
+        .collect();
     let pages = handler.get_pages(descriptors);
 
     let mut out: Vec<Entry> = Vec::new();
