@@ -3,9 +3,13 @@ use crate::metadata_store::{PageDescriptor, PageDirectory, PendingPage};
 use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::writer::allocator::PageAllocator;
-use bincode;
 use crate::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
+use bincode;
 use crossbeam::channel::{self, Receiver, Sender};
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::path::Path;
+use std::os::unix::fs::FileExt;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -24,7 +28,8 @@ pub struct MetadataUpdate {
     pub column: String,
     pub disk_path: String,
     pub offset: u64,
-    pub size: u64,
+    pub alloc_len: u64,
+    pub actual_len: u64,
     pub entry_count: u64,
     pub replace_last: bool,
 }
@@ -46,7 +51,8 @@ impl MetadataClient for NoopMetadataClient {
                 id: format!("noop-{}-{idx}", update.column),
                 disk_path: update.disk_path,
                 offset: update.offset,
-                size: update.size,
+                alloc_len: update.alloc_len,
+                actual_len: update.actual_len,
                 entry_count: update.entry_count,
             })
             .collect()
@@ -79,7 +85,8 @@ impl MetadataClient for DirectoryMetadataClient {
                 column: update.column,
                 disk_path: update.disk_path,
                 offset: update.offset,
-                size: update.size,
+                alloc_len: update.alloc_len,
+                actual_len: update.actual_len,
                 entry_count: update.entry_count,
                 replace_last: update.replace_last,
             })
@@ -119,7 +126,8 @@ impl WorkerContext {
                 column: prepared.column.clone(),
                 disk_path: prepared.disk_path.clone(),
                 offset: prepared.offset,
-                size: prepared.alloc_len,
+                alloc_len: prepared.alloc_len,
+                actual_len: prepared.actual_len,
                 entry_count: prepared.entry_count,
                 replace_last: prepared.replace_last,
             })
@@ -131,6 +139,9 @@ impl WorkerContext {
         }
 
         for (prepared, descriptor) in staged.into_iter().zip(descriptors.into_iter()) {
+            if let Err(err) = persist_allocation(&prepared, &descriptor) {
+                eprintln!("writer: failed to persist allocation: {err}");
+            }
             let mut page = prepared.page;
             page.page.page_metadata = descriptor.id.clone();
             self.page_handler
@@ -151,10 +162,11 @@ impl WorkerContext {
         apply_operations(&mut prepared, &update.operations);
 
         let entry_count = prepared.page.entries.len() as u64;
-        let actual_len = match bincode::serialized_size(&prepared.page) {
-            Ok(sz) => sz,
+        let serialized = match bincode::serialize(&prepared.page) {
+            Ok(bytes) => bytes,
             Err(_) => return None,
         };
+        let actual_len = serialized.len() as u64;
         let allocation = match self.allocator.allocate(actual_len) {
             Ok(a) => a,
             Err(_) => return None,
@@ -166,7 +178,9 @@ impl WorkerContext {
             entry_count,
             disk_path: allocation.path,
             offset: allocation.offset,
+            actual_len,
             alloc_len: allocation.alloc_len,
+            serialized,
             replace_last: latest.is_some(),
         })
     }
@@ -178,7 +192,9 @@ struct StagedColumn {
     entry_count: u64,
     disk_path: String,
     offset: u64,
+    actual_len: u64,
     alloc_len: u64,
+    serialized: Vec<u8>,
     replace_last: bool,
 }
 
@@ -255,6 +271,25 @@ fn run_worker(ctx: WorkerContext, shutdown_flag: Arc<AtomicBool>) {
             }
         }
     }
+}
+
+fn persist_allocation(prepared: &StagedColumn, descriptor: &PageDescriptor) -> io::Result<()> {
+    let mut buffer = vec![0u8; descriptor.alloc_len as usize];
+    buffer[..prepared.actual_len as usize].copy_from_slice(&prepared.serialized);
+
+    let path = Path::new(&descriptor.disk_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+
+    file.write_all_at(&buffer, descriptor.offset)?;
+    Ok(())
 }
 
 fn apply_operations(page: &mut PageCacheEntryUncompressed, operations: &[UpdateOp]) {

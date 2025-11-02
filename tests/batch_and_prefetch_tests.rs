@@ -272,11 +272,12 @@ fn column_chain_handles_many_versions() {
 
     for i in 0..20 {
         directory
-            .register_page_with_size_and_entries(
+            .register_page_with_sizes(
                 "col1",
                 format!("test{}.db", i),
                 i * 1024,
                 256 * 1024,
+                (i + 1) as u64,
                 (i + 1) as u64,
             )
             .unwrap();
