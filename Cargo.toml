@@ -15,5 +15,9 @@ crossbeam = "0.8.4"
 crossbeam-skiplist = "0.1"
 rand = "0.8"
 
+[[bin]]
+name = "high_volume_bench"
+path = "benchmarks/high_volume.rs"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
