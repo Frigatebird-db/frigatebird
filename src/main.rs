@@ -1,11 +1,10 @@
 use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
 use crate::page_handler::{
-    PageFetcher, PageHandler, PageLocator, PageMaterializer, page_io::PageIO,
+    page_io::PageIO, PageFetcher, PageHandler, PageLocator, PageMaterializer,
 };
-use std::collections::HashMap;
-use std::fs::File;
-use std::hash::Hash;
-use std::io::{self, Seek, SeekFrom, Write};
+use crate::writer::{
+    DirectoryMetadataClient, DummyPageAllocator, MetadataClient, PageAllocator, Writer,
+};
 mod cache;
 mod entry;
 mod helpers;
@@ -14,6 +13,7 @@ mod ops_handler;
 mod page;
 mod page_handler;
 mod pool;
+mod writer;
 use cache::lifecycle::{CompressedToDiskLifecycle, UncompressedToCompressedLifecycle};
 use helpers::compressor::Compressor;
 use metadata_store::{PageDirectory, TableMetaStore};
@@ -55,7 +55,17 @@ fn main() {
         Arc::clone(&uncompressed_page_cache),
         Arc::clone(&compressor),
     ));
-    let page_handler = PageHandler::new(locator, fetcher, materializer);
+    let page_handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
+
+    let allocator: Arc<dyn PageAllocator> = Arc::new(DummyPageAllocator::default());
+    let metadata_client: Arc<dyn MetadataClient> =
+        Arc::new(DirectoryMetadataClient::new(Arc::clone(&page_directory)));
+
+    let _writer = Writer::new(
+        Arc::clone(&page_handler),
+        Arc::clone(&allocator),
+        Arc::clone(&metadata_client),
+    );
 
     // cleanup
     drop(uncompressed_page_cache);
