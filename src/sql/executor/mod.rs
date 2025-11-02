@@ -200,8 +200,7 @@ impl SqlExecutor {
 
         let distinct_flag = distinct.is_some();
 
-        if distinct_flag
-            || top.is_some()
+        if top.is_some()
             || into.is_some()
             || !lateral_views.is_empty()
             || !cluster_by.is_empty()
