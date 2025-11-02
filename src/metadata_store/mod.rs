@@ -294,6 +294,23 @@ impl ColumnChain {
         })
     }
 
+    fn update_last_entry_count(&mut self, entry_count: u64) -> Option<PageDescriptor> {
+        if self.pages.is_empty() {
+            return None;
+        }
+        let last_idx = self.pages.len() - 1;
+        self.pages[last_idx].entry_count = entry_count;
+        let base = if last_idx == 0 {
+            0
+        } else {
+            self.prefix_entries[last_idx - 1]
+        };
+        if let Some(prefix) = self.prefix_entries.get_mut(last_idx) {
+            *prefix = base + entry_count;
+        }
+        self.pages.last().cloned()
+    }
+
     fn locate_range(&self, start_row: u64, end_row: u64) -> Vec<PageSlice> {
         if self.pages.is_empty() || start_row > end_row {
             return Vec::new();
@@ -657,6 +674,33 @@ impl TableMetaStore {
         }
         registered
     }
+
+    pub fn update_latest_entry_count(
+        &mut self,
+        table: &str,
+        column: &str,
+        entry_count: u64,
+    ) -> Result<(), CatalogError> {
+        let key = TableColumnKey::new(table, column);
+        let chain = self
+            .column_chains
+            .get_mut(&key)
+            .ok_or_else(|| CatalogError::UnknownColumn {
+                table: table.to_string(),
+                column: column.to_string(),
+            })?;
+
+        let descriptor = chain.update_last_entry_count(entry_count).ok_or_else(|| {
+            CatalogError::UnknownColumn {
+                table: table.to_string(),
+                column: column.to_string(),
+            }
+        })?;
+
+        self.page_index
+            .insert(descriptor.id.clone(), descriptor);
+        Ok(())
+    }
 }
 
 impl Default for TableMetaStore {
@@ -879,6 +923,19 @@ impl PageDirectory {
             Err(_) => return Vec::new(),
         };
         guard.register_batch(pages)
+    }
+
+    pub fn update_latest_entry_count(
+        &self,
+        table: &str,
+        column: &str,
+        entry_count: u64,
+    ) -> Result<(), CatalogError> {
+        let mut guard = self
+            .store
+            .write()
+            .map_err(|_| CatalogError::StoreUnavailable)?;
+        guard.update_latest_entry_count(table, column, entry_count)
     }
 }
 

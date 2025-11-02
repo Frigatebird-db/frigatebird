@@ -6,6 +6,7 @@ use crate::metadata_store::{
 };
 use crate::page_handler::PageHandler;
 use crate::sql::CreateTablePlan;
+use std::cmp::Ordering;
 
 pub fn create_table_from_plan(
     directory: &PageDirectory,
@@ -39,6 +40,13 @@ pub fn upsert_data_into_table_column(
     col: &str,
     data: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    if let Some(catalog) = handler.table_catalog(table) {
+        let sort_columns = catalog.sort_key();
+        if sort_columns.len() == 1 && sort_columns[0].name == col {
+            return sorted_insert_single_column(handler, table, col, data);
+        }
+    }
+
     let page_meta = handler
         .locate_latest_in_table(table, col)
         .ok_or_else(|| "missing page metadata for column")?;
@@ -53,6 +61,54 @@ pub fn upsert_data_into_table_column(
     handler.write_back_uncompressed(&page_meta.id, updated);
 
     Ok(true)
+}
+
+fn sorted_insert_single_column(
+    handler: &PageHandler,
+    table: &str,
+    col: &str,
+    data: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let page_meta = handler
+        .locate_latest_in_table(table, col)
+        .ok_or_else(|| "missing page metadata for column")?;
+
+    let page_arc = handler
+        .get_page(page_meta.clone())
+        .ok_or_else(|| "unable to load page")?;
+
+    let mut updated = (*page_arc).clone();
+    let insert_idx = binary_search_insert_index(&updated.page.entries, data);
+    updated
+        .page
+        .entries
+        .insert(insert_idx, Entry::new(data));
+    let new_entry_count = updated.page.entries.len() as u64;
+
+    handler.write_back_uncompressed(&page_meta.id, updated);
+    handler
+        .update_entry_count_in_table(table, col, new_entry_count)
+        .map_err(|err| format!("failed to update metadata entry count: {err}"))?;
+    Ok(true)
+}
+
+fn binary_search_insert_index(entries: &[Entry], value: &str) -> usize {
+    match entries.binary_search_by(|entry| compare_entry_value(entry, value)) {
+        Ok(idx) | Err(idx) => idx,
+    }
+}
+
+fn compare_entry_value(entry: &Entry, value: &str) -> Ordering {
+    compare_strs(entry.get_data(), value)
+}
+
+fn compare_strs(left: &str, right: &str) -> Ordering {
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(l), Ok(r)) => l
+            .partial_cmp(&r)
+            .unwrap_or(Ordering::Equal),
+        _ => left.cmp(right),
+    }
 }
 
 pub fn update_column_entry(

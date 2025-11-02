@@ -185,6 +185,43 @@ fn register_batch_replaces_tail_and_updates_prefix() {
 }
 
 #[test]
+fn update_latest_entry_count_adjusts_metadata() {
+    let store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = Arc::new(PageDirectory::new(Arc::clone(&store)));
+
+    let definition = TableDefinition::new(
+        "metric",
+        vec![ColumnDefinition::new("value", "String")],
+        Vec::new(),
+    );
+    directory
+        .register_table(definition)
+        .expect("register table");
+
+    let descriptor = directory
+        .register_page_in_table_with_sizes(
+            "metric",
+            "value",
+            "mem://metric_value".into(),
+            0,
+            0,
+            0,
+            2,
+        )
+        .expect("register page");
+    assert_eq!(descriptor.entry_count, 2);
+
+    directory
+        .update_latest_entry_count("metric", "value", 4)
+        .expect("update entry count");
+
+    let latest = directory
+        .latest_in_table("metric", "value")
+        .expect("latest descriptor");
+    assert_eq!(latest.entry_count, 4);
+}
+
+#[test]
 fn page_directory_concurrent_register() {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
     let directory = Arc::new(PageDirectory::new(store));

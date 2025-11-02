@@ -367,6 +367,12 @@ fn apply_operations(page: &mut PageCacheEntryUncompressed, operations: &[UpdateO
             UpdateOp::Append { entry } => {
                 page.page.entries.push(entry.clone());
             }
+            UpdateOp::InsertAt { row, entry } => {
+                let len = page.page.entries.len() as u64;
+                let target = (*row).min(len);
+                let row_idx = target as usize;
+                page.page.entries.insert(row_idx, entry.clone());
+            }
         }
     }
 }
