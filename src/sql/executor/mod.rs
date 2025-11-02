@@ -16,7 +16,7 @@ use crate::page_handler::PageHandler;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
 use sqlparser::ast::{
     Assignment, BinaryOperator, Expr, FromTable, GroupByExpr, ObjectName, OrderByExpr, Query,
-    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,
+    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
@@ -30,8 +30,8 @@ use aggregates::{
 use expressions::evaluate_selection_expr;
 use helpers::{
     collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
-    extract_equality_filters, object_name_matches_table, object_name_to_string, parse_limit,
-    parse_offset, table_with_joins_to_name, wildcard_options_supported,
+    object_name_matches_table, object_name_to_string, parse_limit, parse_offset,
+    table_with_joins_to_name, wildcard_options_supported,
 };
 use values::{CachedValue, compare_strs};
 
@@ -156,7 +156,6 @@ impl SqlExecutor {
 
     fn execute_select(&self, mut query: Query) -> Result<SelectResult, SqlExecutionError> {
         if query.with.is_some()
-            || !query.order_by.is_empty()
             || !query.limit_by.is_empty()
             || query.fetch.is_some()
             || !query.locks.is_empty()
@@ -167,6 +166,7 @@ impl SqlExecutor {
             ));
         }
 
+        let order_by_clauses = std::mem::take(&mut query.order_by);
         let limit_expr = query.limit.take();
         let offset_expr = query.offset.take();
 
@@ -262,10 +262,11 @@ impl SqlExecutor {
 
         let projection_items = projection;
 
-        let selection = selection.ok_or_else(|| {
-            SqlExecutionError::Unsupported("SELECT requires a WHERE clause for now".into())
-        })?;
-        let selection_expr = selection;
+        let selection_expr_opt = selection;
+        let (selection_expr, has_selection) = match selection_expr_opt {
+            Some(expr) => (expr, true),
+            None => (Expr::Value(Value::Boolean(true)), false),
+        };
 
         let sort_columns_refs = catalog.sort_key();
         if sort_columns_refs.is_empty() {
@@ -274,6 +275,8 @@ impl SqlExecutor {
             ));
         }
         let sort_columns: Vec<ColumnCatalog> = sort_columns_refs.into_iter().cloned().collect();
+
+        validate_order_by(&order_by_clauses, &sort_columns, &table_name)?;
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
 
@@ -308,11 +311,20 @@ impl SqlExecutor {
             required_ordinals.insert(column.ordinal);
         }
 
-        let predicate_ordinals =
-            collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
-        required_ordinals.extend(predicate_ordinals);
+        if has_selection {
+            let predicate_ordinals =
+                collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
+            required_ordinals.extend(predicate_ordinals);
+        }
 
-        let sort_key_filters = collect_sort_key_filters(&selection_expr, &sort_columns)?;
+        let sort_key_filters = collect_sort_key_filters(
+            if has_selection {
+                Some(&selection_expr)
+            } else {
+                None
+            },
+            &sort_columns,
+        )?;
 
         let mut candidate_rows = if let Some(sort_key_filters) = sort_key_filters {
             for column in &sort_columns {
@@ -330,7 +342,11 @@ impl SqlExecutor {
                 &table_name,
                 &columns,
                 &required_ordinals,
-                &selection_expr,
+                if has_selection {
+                    Some(&selection_expr)
+                } else {
+                    None
+                },
                 &column_ordinals,
             )?
         };
@@ -354,7 +370,14 @@ impl SqlExecutor {
 
         let mut matching_rows = Vec::new();
         for &row_idx in &candidate_rows {
-            if evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)? {
+            if !has_selection
+                || evaluate_selection_expr(
+                    &selection_expr,
+                    row_idx,
+                    &column_ordinals,
+                    &materialized,
+                )?
+            {
                 matching_rows.push(row_idx);
             }
         }
@@ -582,42 +605,57 @@ impl SqlExecutor {
             assignments_vec.push((ordinal, value));
         }
 
-        let selection = selection.ok_or_else(|| {
-            SqlExecutionError::Unsupported(
-                "UPDATE requires WHERE with equality filters on ORDER BY columns".into(),
-            )
+        let selection_expr = selection.ok_or_else(|| {
+            SqlExecutionError::Unsupported("UPDATE requires a WHERE clause".into())
         })?;
 
-        let filters = extract_equality_filters(&selection)?;
-        for column in filters.keys() {
-            if !column_ordinals.contains_key(column) {
-                return Err(SqlExecutionError::ColumnMismatch {
-                    table: table_name.clone(),
-                    column: column.clone(),
-                });
-            }
-        }
+        let mut required_ordinals: BTreeSet<usize> = sort_indices.iter().copied().collect();
+        let predicate_ordinals =
+            collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
+        required_ordinals.extend(predicate_ordinals);
+
+        let sort_key_filters = collect_sort_key_filters(Some(&selection_expr), &sort_columns)?;
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
-        for column in &sort_columns {
-            let value = filters.get(&column.name).cloned().ok_or_else(|| {
-                SqlExecutionError::Unsupported(format!(
-                    "UPDATE requires equality predicate for ORDER BY column {}",
-                    column.name
-                ))
-            })?;
-            key_values.push(value);
-        }
+        let mut candidate_rows = if let Some(filters) = sort_key_filters {
+            for column in &sort_columns {
+                let value = filters.get(&column.name).cloned().ok_or_else(|| {
+                    SqlExecutionError::Unsupported(format!(
+                        "UPDATE requires equality predicate for ORDER BY column {}",
+                        column.name
+                    ))
+                })?;
+                key_values.push(value);
+            }
+            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?
+        } else {
+            self.scan_rows_via_full_table(
+                &table_name,
+                &columns,
+                &required_ordinals,
+                Some(&selection_expr),
+                &column_ordinals,
+            )?
+        };
 
-        let candidate_rows =
-            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?;
         if candidate_rows.is_empty() {
             return Ok(());
         }
 
+        candidate_rows.sort_unstable();
+        candidate_rows.dedup();
+
+        let materialized = materialize_columns(
+            &self.page_handler,
+            &table_name,
+            &columns,
+            &required_ordinals,
+            &candidate_rows,
+        )?;
+
         let mut matching_rows = Vec::new();
-        for row_idx in candidate_rows {
-            if self.row_matches_filters(&table_name, &columns, row_idx, &filters)? {
+        for &row_idx in &candidate_rows {
+            if evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)? {
                 matching_rows.push(row_idx);
             }
         }
@@ -709,14 +747,6 @@ impl SqlExecutor {
             }
         };
 
-        let selection = selection.ok_or_else(|| {
-            SqlExecutionError::Unsupported(
-                "DELETE requires WHERE with equality predicates on ORDER BY columns".into(),
-            )
-        })?;
-
-        let filters = extract_equality_filters(&selection)?;
-
         let catalog = self
             .page_directory
             .table_catalog(&table_name)
@@ -725,15 +755,6 @@ impl SqlExecutor {
         let mut column_ordinals: HashMap<String, usize> = HashMap::new();
         for column in &columns {
             column_ordinals.insert(column.name.clone(), column.ordinal);
-        }
-
-        for column in filters.keys() {
-            if !column_ordinals.contains_key(column) {
-                return Err(SqlExecutionError::ColumnMismatch {
-                    table: table_name.clone(),
-                    column: column.clone(),
-                });
-            }
         }
 
         let sort_indices: Vec<usize> = catalog.sort_key().iter().map(|col| col.ordinal).collect();
@@ -747,26 +768,57 @@ impl SqlExecutor {
             .map(|&idx| columns[idx].clone())
             .collect();
 
-        let mut key_values = Vec::with_capacity(sort_columns.len());
-        for column in &sort_columns {
-            let value = filters.get(&column.name).cloned().ok_or_else(|| {
-                SqlExecutionError::Unsupported(format!(
-                    "DELETE requires equality predicate for ORDER BY column {}",
-                    column.name
-                ))
-            })?;
-            key_values.push(value);
-        }
+        let selection_expr = selection.ok_or_else(|| {
+            SqlExecutionError::Unsupported("DELETE requires a WHERE clause".into())
+        })?;
 
-        let candidate_rows =
-            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?;
+        let mut required_ordinals: BTreeSet<usize> = sort_indices.iter().copied().collect();
+        let predicate_ordinals =
+            collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
+        required_ordinals.extend(predicate_ordinals);
+
+        let sort_key_filters = collect_sort_key_filters(Some(&selection_expr), &sort_columns)?;
+
+        let mut key_values = Vec::with_capacity(sort_columns.len());
+        let mut candidate_rows = if let Some(filters) = sort_key_filters {
+            for column in &sort_columns {
+                let value = filters.get(&column.name).cloned().ok_or_else(|| {
+                    SqlExecutionError::Unsupported(format!(
+                        "DELETE requires equality predicate for ORDER BY column {}",
+                        column.name
+                    ))
+                })?;
+                key_values.push(value);
+            }
+            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?
+        } else {
+            self.scan_rows_via_full_table(
+                &table_name,
+                &columns,
+                &required_ordinals,
+                Some(&selection_expr),
+                &column_ordinals,
+            )?
+        };
+
         if candidate_rows.is_empty() {
             return Ok(());
         }
 
+        candidate_rows.sort_unstable();
+        candidate_rows.dedup();
+
+        let materialized = materialize_columns(
+            &self.page_handler,
+            &table_name,
+            &columns,
+            &required_ordinals,
+            &candidate_rows,
+        )?;
+
         let mut matching_rows = Vec::new();
-        for row_idx in candidate_rows {
-            if self.row_matches_filters(&table_name, &columns, row_idx, &filters)? {
+        for &row_idx in &candidate_rows {
+            if evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)? {
                 matching_rows.push(row_idx);
             }
         }
@@ -929,7 +981,7 @@ impl SqlExecutor {
         table: &str,
         columns: &[ColumnCatalog],
         required_ordinals: &BTreeSet<usize>,
-        selection_expr: &Expr,
+        selection_expr: Option<&Expr>,
         column_ordinals: &HashMap<String, usize>,
     ) -> Result<Vec<u64>, SqlExecutionError> {
         let total_rows = self.estimate_table_row_count(table, columns)?;
@@ -947,7 +999,11 @@ impl SqlExecutor {
                 materialize_columns(&self.page_handler, table, columns, required_ordinals, &rows)?;
 
             for row_idx in rows.iter().copied() {
-                if evaluate_selection_expr(selection_expr, row_idx, column_ordinals, &materialized)?
+                if selection_expr
+                    .map(|expr| {
+                        evaluate_selection_expr(expr, row_idx, column_ordinals, &materialized)
+                    })
+                    .unwrap_or(Ok(true))?
                 {
                     matching_rows.push(row_idx);
                 }
@@ -974,37 +1030,65 @@ impl SqlExecutor {
         }
         Ok(0)
     }
+}
 
-    fn row_matches_filters(
-        &self,
-        table: &str,
-        columns: &[ColumnCatalog],
-        row_idx: u64,
-        filters: &HashMap<String, String>,
-    ) -> Result<bool, SqlExecutionError> {
-        if filters.is_empty() {
-            return Ok(true);
-        }
-        let row = read_row(&self.page_handler, table, row_idx)
-            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
-        for column in columns {
-            if let Some(expected) = filters.get(&column.name) {
-                if compare_strs(&row[column.ordinal], expected) != Ordering::Equal {
-                    return Ok(false);
-                }
-            }
-        }
-        Ok(true)
+fn validate_order_by(
+    clauses: &[OrderByExpr],
+    sort_columns: &[ColumnCatalog],
+    table_name: &str,
+) -> Result<(), SqlExecutionError> {
+    if clauses.is_empty() {
+        return Ok(());
     }
+
+    if clauses.len() > sort_columns.len() {
+        return Err(SqlExecutionError::Unsupported(format!(
+            "ORDER BY on table {table_name} must match the table ORDER BY prefix",
+        )));
+    }
+
+    for (idx, clause) in clauses.iter().enumerate() {
+        if clause.asc == Some(false) {
+            return Err(SqlExecutionError::Unsupported(
+                "ORDER BY DESC is not supported yet".into(),
+            ));
+        }
+        if clause.nulls_first.is_some() || clause.nulls_last.is_some() {
+            return Err(SqlExecutionError::Unsupported(
+                "ORDER BY with NULLS FIRST/LAST is not supported yet".into(),
+            ));
+        }
+
+        let column_name = column_name_from_expr(&clause.expr).ok_or_else(|| {
+            SqlExecutionError::Unsupported(
+                "ORDER BY expressions must be simple column references".into(),
+            )
+        })?;
+
+        let expected = &sort_columns[idx].name;
+        if column_name != *expected {
+            return Err(SqlExecutionError::Unsupported(format!(
+                "ORDER BY column {} does not match table ORDER BY column {}",
+                column_name, expected
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_sort_key_filters(
-    expr: &Expr,
+    expr: Option<&Expr>,
     sort_columns: &[ColumnCatalog],
 ) -> Result<Option<HashMap<String, String>>, SqlExecutionError> {
     if sort_columns.is_empty() {
         return Ok(Some(HashMap::new()));
     }
+
+    let expr = match expr {
+        Some(expr) => expr,
+        None => return Ok(None),
+    };
 
     let sort_names: HashSet<&str> = sort_columns.iter().map(|col| col.name.as_str()).collect();
     let mut filters = HashMap::with_capacity(sort_columns.len());
