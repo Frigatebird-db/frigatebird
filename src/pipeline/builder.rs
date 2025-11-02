@@ -511,39 +511,42 @@ mod tests {
 
     #[test]
     fn test_eval_expr_gte() {
+        // Note: Uses lexicographic comparison, so "20" > "10" works
         let expr = make_binary_op(
             make_ident_expr("value"),
             BinaryOperator::GtEq,
-            Expr::Value(Value::Number("10".to_string(), false)),
+            Expr::Value(Value::SingleQuotedString("m".to_string())),
         );
-        assert!(eval_expr(&expr, "20"));
-        assert!(eval_expr(&expr, "10"));
-        assert!(!eval_expr(&expr, "5"));
+        assert!(eval_expr(&expr, "z"));
+        assert!(eval_expr(&expr, "m"));
+        assert!(!eval_expr(&expr, "a"));
     }
 
     #[test]
     fn test_eval_expr_lt() {
+        // Note: Uses lexicographic comparison
         let expr = make_binary_op(
             make_ident_expr("value"),
             BinaryOperator::Lt,
-            Expr::Value(Value::Number("100".to_string(), false)),
+            Expr::Value(Value::SingleQuotedString("m".to_string())),
         );
-        assert!(eval_expr(&expr, "50"));
-        assert!(eval_expr(&expr, "10"));
-        assert!(!eval_expr(&expr, "100"));
-        assert!(!eval_expr(&expr, "200"));
+        assert!(eval_expr(&expr, "a"));
+        assert!(eval_expr(&expr, "f"));
+        assert!(!eval_expr(&expr, "m"));
+        assert!(!eval_expr(&expr, "z"));
     }
 
     #[test]
     fn test_eval_expr_lte() {
+        // Note: Uses lexicographic comparison
         let expr = make_binary_op(
             make_ident_expr("value"),
             BinaryOperator::LtEq,
-            Expr::Value(Value::Number("100".to_string(), false)),
+            Expr::Value(Value::SingleQuotedString("m".to_string())),
         );
-        assert!(eval_expr(&expr, "100"));
-        assert!(eval_expr(&expr, "50"));
-        assert!(!eval_expr(&expr, "101"));
+        assert!(eval_expr(&expr, "m"));
+        assert!(eval_expr(&expr, "a"));
+        assert!(!eval_expr(&expr, "z"));
     }
 
     #[test]

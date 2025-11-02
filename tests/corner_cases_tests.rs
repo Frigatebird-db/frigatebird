@@ -481,6 +481,7 @@ fn job_with_zero_steps() {
 fn job_single_step() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let (tx2, _rx2) = crossbeam_channel::unbounded();
+    let (page_handler, _) = setup_page_handler();
 
     let step = PipelineStep {
         current_producer: tx2,
@@ -488,6 +489,8 @@ fn job_single_step() {
         column: "col1".to_string(),
         filters: vec![],
         is_root: true,
+        table: "test".to_string(),
+        page_handler,
     };
 
     let job = Job {

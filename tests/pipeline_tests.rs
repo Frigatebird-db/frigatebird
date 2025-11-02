@@ -1,12 +1,35 @@
+use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use idk_uwu_ig::helpers::compressor::Compressor;
+use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
+use idk_uwu_ig::page_handler::page_io::PageIO;
+use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use idk_uwu_ig::pipeline::{PipelineBatch, build_pipeline};
 use idk_uwu_ig::sql::plan_sql;
 use std::cmp::Ordering as CmpOrdering;
 use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::{Arc, RwLock};
+
+fn create_test_page_handler() -> Arc<PageHandler> {
+    let meta_store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = Arc::new(PageDirectory::new(meta_store));
+    let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
+
+    let compressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryCompressed>::new()));
+    let page_io = Arc::new(PageIO {});
+    let fetcher = Arc::new(PageFetcher::new(compressed_cache, page_io));
+
+    let uncompressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
+    let compressor = Arc::new(Compressor::new());
+    let materializer = Arc::new(PageMaterializer::new(uncompressed_cache, compressor));
+
+    Arc::new(PageHandler::new(locator, fetcher, materializer))
+}
 
 #[test]
 fn builds_empty_pipeline_for_no_filters() {
     let plan = plan_sql("SELECT id FROM users").unwrap();
-    let jobs = build_pipeline(&plan);
+    let page_handler = create_test_page_handler();
+    let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].table_name, "users");
@@ -17,7 +40,8 @@ fn builds_empty_pipeline_for_no_filters() {
 #[test]
 fn builds_single_step_for_single_column_filter() {
     let plan = plan_sql("SELECT id FROM users WHERE age > 18").unwrap();
-    let jobs = build_pipeline(&plan);
+    let page_handler = create_test_page_handler();
+    let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].table_name, "users");
@@ -30,7 +54,8 @@ fn builds_single_step_for_single_column_filter() {
 #[test]
 fn builds_multiple_steps_for_multiple_column_filters() {
     let plan = plan_sql("SELECT id FROM users WHERE age > 18 AND name = 'John'").unwrap();
-    let jobs = build_pipeline(&plan);
+    let page_handler = create_test_page_handler();
+    let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].table_name, "users");
@@ -46,7 +71,8 @@ fn builds_multiple_steps_for_multiple_column_filters() {
 #[test]
 fn groups_multiple_filters_on_same_column() {
     let plan = plan_sql("SELECT id FROM users WHERE age > 18 AND age < 65").unwrap();
-    let jobs = build_pipeline(&plan);
+    let page_handler = create_test_page_handler();
+    let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].steps.len(), 1);
@@ -61,7 +87,8 @@ fn builds_pipeline_for_complex_query() {
         "SELECT id FROM accounts WHERE status = 'active' AND region = 'US' AND balance > 1000",
     )
     .unwrap();
-    let jobs = build_pipeline(&plan);
+    let page_handler = create_test_page_handler();
+    let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].table_name, "accounts");
@@ -77,7 +104,8 @@ fn builds_pipeline_for_complex_query() {
 #[test]
 fn builds_pipeline_for_delete_with_filter() {
     let plan = plan_sql("DELETE FROM sessions WHERE expires_at < NOW()").unwrap();
-    let jobs = build_pipeline(&plan);
+    let page_handler = create_test_page_handler();
+    let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].table_name, "sessions");
@@ -90,7 +118,8 @@ fn builds_pipeline_for_delete_with_filter() {
 fn builds_pipeline_for_update_with_filter() {
     let plan =
         plan_sql("UPDATE accounts SET balance = 0 WHERE id = 42 AND status = 'closed'").unwrap();
-    let jobs = build_pipeline(&plan);
+    let page_handler = create_test_page_handler();
+    let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].table_name, "accounts");
@@ -106,7 +135,8 @@ fn builds_pipeline_for_update_with_filter() {
 fn job_get_next_advances_steps() {
     let plan =
         plan_sql("SELECT id FROM users WHERE age > 18 AND name = 'John'").expect("valid plan");
-    let jobs = build_pipeline(&plan);
+    let page_handler = create_test_page_handler();
+    let jobs = build_pipeline(&plan, page_handler);
     let job = &jobs[0];
 
     job.get_next();
@@ -120,14 +150,18 @@ fn job_get_next_advances_steps() {
 
 #[test]
 fn compares_jobs_by_cost() {
+    let page_handler = create_test_page_handler();
+
     let mut single_step = build_pipeline(
         &plan_sql("SELECT id FROM users WHERE age > 18").expect("valid single-step plan"),
+        Arc::clone(&page_handler),
     );
     let job_small = single_step.remove(0);
 
     let mut multi_step = build_pipeline(
         &plan_sql("SELECT id FROM users WHERE age > 18 AND name = 'John'")
             .expect("valid multi-step plan"),
+        page_handler,
     );
     let job_large = multi_step.remove(0);
 
@@ -140,7 +174,8 @@ fn compares_jobs_by_cost() {
 fn wires_channel_chain_between_steps() {
     let plan =
         plan_sql("SELECT id FROM users WHERE age > 18 AND name = 'John'").expect("valid plan");
-    let jobs = build_pipeline(&plan);
+    let page_handler = create_test_page_handler();
+    let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
     let job = &jobs[0];
