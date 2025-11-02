@@ -3,6 +3,7 @@ use crate::metadata_store::{PageDescriptor, PageDirectory, PendingPage};
 use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::writer::allocator::PageAllocator;
+use bincode;
 use crate::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
 use crossbeam::channel::{self, Receiver, Sender};
 use std::sync::{
@@ -29,6 +30,7 @@ pub struct MetadataUpdate {
 }
 
 /// Placeholder metadata client used until the real store integration lands.
+#[allow(dead_code)]
 pub struct NoopMetadataClient;
 
 impl MetadataClient for NoopMetadataClient {
@@ -117,7 +119,7 @@ impl WorkerContext {
                 column: prepared.column.clone(),
                 disk_path: prepared.disk_path.clone(),
                 offset: prepared.offset,
-                size: prepared.size,
+                size: prepared.alloc_len,
                 entry_count: prepared.entry_count,
                 replace_last: prepared.replace_last,
             })
@@ -149,15 +151,22 @@ impl WorkerContext {
         apply_operations(&mut prepared, &update.operations);
 
         let entry_count = prepared.page.entries.len() as u64;
-        let allocation = self.allocator.allocate();
+        let actual_len = match bincode::serialized_size(&prepared.page) {
+            Ok(sz) => sz,
+            Err(_) => return None,
+        };
+        let allocation = match self.allocator.allocate(actual_len) {
+            Ok(a) => a,
+            Err(_) => return None,
+        };
 
         Some(StagedColumn {
             column: update.column,
             page: prepared,
             entry_count,
-            disk_path: allocation.disk_path,
+            disk_path: allocation.path,
             offset: allocation.offset,
-            size: allocation.buffer.len() as u64,
+            alloc_len: allocation.alloc_len,
             replace_last: latest.is_some(),
         })
     }
@@ -169,7 +178,7 @@ struct StagedColumn {
     entry_count: u64,
     disk_path: String,
     offset: u64,
-    size: u64,
+    alloc_len: u64,
     replace_last: bool,
 }
 

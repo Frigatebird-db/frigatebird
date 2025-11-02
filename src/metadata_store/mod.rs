@@ -260,7 +260,8 @@ impl TableMetaStore {
         size: u64,
         entry_count: u64,
     ) -> PageDescriptor {
-        let descriptor = self.allocate_descriptor(disk_path, offset, size, entry_count);
+        let count = if entry_count == 0 { 1 } else { entry_count };
+        let descriptor = self.allocate_descriptor(disk_path, offset, size, count);
         self.page_index
             .insert(descriptor.id.clone(), descriptor.clone());
         self.columns
@@ -387,7 +388,7 @@ impl PageDirectory {
         disk_path: String,
         offset: u64,
     ) -> Option<PageDescriptor> {
-        self.register_page_with_size_and_entries(column, disk_path, offset, 0, 0)
+        self.register_page_with_size_and_entries(column, disk_path, offset, 0, 1)
     }
 
     pub fn register_page_with_size(
@@ -397,7 +398,7 @@ impl PageDirectory {
         offset: u64,
         size: u64,
     ) -> Option<PageDescriptor> {
-        self.register_page_with_size_and_entries(column, disk_path, offset, size, 0)
+        self.register_page_with_size_and_entries(column, disk_path, offset, size, 1)
     }
 
     pub fn register_page_with_size_and_entries(

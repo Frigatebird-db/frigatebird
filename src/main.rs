@@ -3,7 +3,7 @@ use crate::page_handler::{
     page_io::PageIO, PageFetcher, PageHandler, PageLocator, PageMaterializer,
 };
 use crate::writer::{
-    DirectoryMetadataClient, DummyPageAllocator, MetadataClient, PageAllocator, Writer,
+    DirectBlockAllocator, DirectoryMetadataClient, MetadataClient, PageAllocator, Writer,
 };
 mod cache;
 mod entry;
@@ -57,7 +57,8 @@ fn main() {
     ));
     let page_handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
 
-    let allocator: Arc<dyn PageAllocator> = Arc::new(DummyPageAllocator::default());
+    let allocator: Arc<dyn PageAllocator> =
+        Arc::new(DirectBlockAllocator::new().expect("allocator init failed"));
     let metadata_client: Arc<dyn MetadataClient> =
         Arc::new(DirectoryMetadataClient::new(Arc::clone(&page_directory)));
 
