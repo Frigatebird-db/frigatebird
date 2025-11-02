@@ -130,6 +130,9 @@ fn run_insert_phase(executor: &SqlExecutor, config: &BenchmarkConfig) -> Result<
                 "Inserted {rows_written}/{total} rows (last batch: {batch_rows} rows in {batch_elapsed:?})",
                 total = config.rows
             );
+            println!(
+                "So far, that is {rows_written} shits lovingly stuffed into the table."
+            );
         }
     }
 
@@ -142,6 +145,10 @@ fn run_insert_phase(executor: &SqlExecutor, config: &BenchmarkConfig) -> Result<
         rows = config.rows,
         time = elapsed_total,
         batches = batches,
+    );
+    println!(
+        "Grand total: {rows} shits inserted. That is a whole lot of shits.",
+        rows = config.rows
     );
 
     Ok(())
