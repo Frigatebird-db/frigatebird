@@ -8,9 +8,9 @@ use idk_uwu_ig::ops_handler::{
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::SqlExecutor;
 use idk_uwu_ig::sql::ColumnSpec;
 use idk_uwu_ig::sql::CreateTablePlan;
+use idk_uwu_ig::sql::executor::SqlExecutor;
 use std::sync::{Arc, RwLock};
 
 fn build_sql_executor() -> (
@@ -100,11 +100,17 @@ fn test_empty_table_operations() {
 
     // Try to update empty table
     let result = executor.execute("UPDATE empty_test SET val = '10' WHERE val = '5'");
-    assert!(result.is_ok(), "update on empty table should succeed (no-op)");
+    assert!(
+        result.is_ok(),
+        "update on empty table should succeed (no-op)"
+    );
 
     // Try to delete from empty table
     let result = executor.execute("DELETE FROM empty_test WHERE val = '5'");
-    assert!(result.is_ok(), "delete on empty table should succeed (no-op)");
+    assert!(
+        result.is_ok(),
+        "delete on empty table should succeed (no-op)"
+    );
 
     // Now insert one row
     executor
@@ -422,15 +428,17 @@ fn test_mixed_numeric_string_sorting() {
         ("r3", "2"),
         ("r4", "xyz"),
         ("r5", "100"),
-        ("r6", "1a"),   // Doesn't parse as number
-        ("r7", "a1"),   // Doesn't parse as number
+        ("r6", "1a"), // Doesn't parse as number
+        ("r7", "a1"), // Doesn't parse as number
         ("r8", "50"),
         ("r9", "def"),
     ];
 
     for (id, val) in &values {
         executor
-            .execute(&format!("INSERT INTO mixed (id, val) VALUES ('{id}', '{val}')"))
+            .execute(&format!(
+                "INSERT INTO mixed (id, val) VALUES ('{id}', '{val}')"
+            ))
             .expect(&format!("insert {id}"));
     }
 
@@ -612,7 +620,9 @@ fn test_insert_after_delete_all() {
     // Insert some rows
     for i in 0..5 {
         executor
-            .execute(&format!("INSERT INTO reset (id, val) VALUES ('r{i}', '{i}')"))
+            .execute(&format!(
+                "INSERT INTO reset (id, val) VALUES ('r{i}', '{i}')"
+            ))
             .expect("insert");
     }
 
@@ -626,7 +636,9 @@ fn test_insert_after_delete_all() {
     // Insert new rows
     for i in 10..15 {
         executor
-            .execute(&format!("INSERT INTO reset (id, val) VALUES ('new{i}', '{i}')"))
+            .execute(&format!(
+                "INSERT INTO reset (id, val) VALUES ('new{i}', '{i}')"
+            ))
             .expect("insert new");
     }
 
