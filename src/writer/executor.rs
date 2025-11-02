@@ -1,11 +1,14 @@
 use crate::cache::page_cache::PageCacheEntryUncompressed;
-use crate::metadata_store::{PageDescriptor, PageDirectory, PendingPage};
+use crate::metadata_store::{
+    CatalogError, ColumnDefinition, PageDescriptor, PageDirectory, PendingPage, TableDefinition,
+};
 use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::writer::allocator::PageAllocator;
 use crate::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
 use bincode;
 use crossbeam::channel::{self, Receiver, Sender};
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io;
 #[cfg(target_family = "unix")]
@@ -28,6 +31,7 @@ pub trait MetadataClient: Send + Sync {
 /// Describes a staged update ready to be made visible.
 #[derive(Clone, Debug)]
 pub struct MetadataUpdate {
+    pub table: String,
     pub column: String,
     pub disk_path: String,
     pub offset: u64,
@@ -74,17 +78,62 @@ impl DirectoryMetadataClient {
 }
 
 impl MetadataClient for DirectoryMetadataClient {
-    fn latest_descriptor(&self, _table: &str, column: &str) -> Option<PageDescriptor> {
-        self.directory.latest(column)
+    fn latest_descriptor(&self, table: &str, column: &str) -> Option<PageDescriptor> {
+        self.directory.latest_in_table(table, column)
     }
 
-    fn commit(&self, _table: &str, updates: Vec<MetadataUpdate>) -> Vec<PageDescriptor> {
+    fn commit(&self, table: &str, updates: Vec<MetadataUpdate>) -> Vec<PageDescriptor> {
         if updates.is_empty() {
             return Vec::new();
         }
+
+        let mut table_name = table.to_string();
+        if let Some(explicit) = updates.iter().find(|update| !update.table.is_empty()) {
+            table_name = explicit.table.clone();
+        }
+
+        let mut unique_columns: BTreeSet<String> = BTreeSet::new();
+        for update in &updates {
+            unique_columns.insert(update.column.clone());
+        }
+
+        if !unique_columns.is_empty() {
+            let column_defs: Vec<ColumnDefinition> = unique_columns
+                .iter()
+                .map(|name| ColumnDefinition::new(name.clone(), "String"))
+                .collect();
+            let order: Vec<String> = unique_columns.iter().cloned().collect();
+            let definition = TableDefinition::new(table_name.clone(), column_defs.clone(), order);
+            match self.directory.register_table(definition) {
+                Ok(_) => {}
+                Err(CatalogError::TableExists(_)) => {
+                    if let Err(err) = self
+                        .directory
+                        .add_columns_to_table(&table_name, column_defs)
+                    {
+                        eprintln!(
+                            "metadata client: failed to extend table {}: {}",
+                            table_name, err
+                        );
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "metadata client: failed to register table {}: {}",
+                        table_name, err
+                    );
+                }
+            }
+        }
+
         let pending: Vec<PendingPage> = updates
             .into_iter()
             .map(|update| PendingPage {
+                table: if update.table.is_empty() {
+                    table_name.clone()
+                } else {
+                    update.table
+                },
                 column: update.column,
                 disk_path: update.disk_path,
                 offset: update.offset,
@@ -112,9 +161,11 @@ struct WorkerContext {
 
 impl WorkerContext {
     fn handle_job(&self, job: UpdateJob) {
-        let mut staged = Vec::with_capacity(job.columns.len());
-        for column in job.columns {
-            if let Some(prepared) = self.stage_column(&job.table, column) {
+        let UpdateJob { table, columns } = job;
+
+        let mut staged = Vec::with_capacity(columns.len());
+        for column in columns {
+            if let Some(prepared) = self.stage_column(&table, column) {
                 staged.push(prepared);
             }
         }
@@ -126,6 +177,7 @@ impl WorkerContext {
         let metadata_updates: Vec<MetadataUpdate> = staged
             .iter()
             .map(|prepared| MetadataUpdate {
+                table: table.clone(),
                 column: prepared.column.clone(),
                 disk_path: prepared.disk_path.clone(),
                 offset: prepared.offset,
@@ -136,7 +188,7 @@ impl WorkerContext {
             })
             .collect();
 
-        let descriptors = self.metadata.commit(&job.table, metadata_updates);
+        let descriptors = self.metadata.commit(&table, metadata_updates);
         if descriptors.len() != staged.len() {
             return;
         }

@@ -1,4 +1,4 @@
-use idk_uwu_ig::sql::{FilterExpr, QueryPlan, TableAccess, plan_sql};
+use idk_uwu_ig::sql::{FilterExpr, QueryPlan, TableAccess, plan_create_table_sql, plan_sql};
 
 fn table_by_name<'a>(plan: &'a QueryPlan, name: &str) -> &'a TableAccess {
     plan.tables
@@ -88,4 +88,31 @@ fn captures_and_or_filters() {
         }
         _ => panic!("expected AND root"),
     }
+}
+
+#[test]
+fn plans_basic_create_table() {
+    let plan = plan_create_table_sql(
+        "CREATE TABLE items (id UUID, name String, created DateTime) ORDER BY (id, created)",
+    )
+    .expect("plan create table");
+
+    assert_eq!(plan.table_name, "items");
+    assert_eq!(plan.columns.len(), 3);
+    assert_eq!(plan.columns[0].name, "id");
+    assert_eq!(plan.columns[1].name, "name");
+    assert_eq!(plan.columns[2].name, "created");
+    assert_eq!(plan.order_by, vec!["id".to_string(), "created".to_string()]);
+    assert!(!plan.if_not_exists);
+}
+
+#[test]
+fn plans_create_table_with_if_not_exists() {
+    let sql = "CREATE TABLE IF NOT EXISTS metrics (ts TIMESTAMP, value DOUBLE)";
+    let plan = plan_create_table_sql(sql).expect("plan create table");
+
+    assert_eq!(plan.table_name, "metrics");
+    assert_eq!(plan.columns.len(), 2);
+    assert!(plan.order_by.is_empty());
+    assert!(plan.if_not_exists);
 }

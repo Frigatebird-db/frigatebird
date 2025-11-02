@@ -8,6 +8,7 @@ use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMateri
 use idk_uwu_ig::writer::allocator::DirectBlockAllocator;
 use idk_uwu_ig::writer::executor::{DirectoryMetadataClient, Writer};
 use idk_uwu_ig::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
+use idk_uwu_ig::{ops_handler::create_table_from_plan, sql::plan_create_table_sql};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -35,11 +36,7 @@ fn setup_writer() -> (Arc<Writer>, Arc<PageHandler>, Arc<PageDirectory>) {
     let allocator = Arc::new(DirectBlockAllocator::new().expect("allocator creation failed"));
     let metadata = Arc::new(DirectoryMetadataClient::new(Arc::clone(&directory)));
 
-    let writer = Arc::new(Writer::new(
-        Arc::clone(&page_handler),
-        allocator,
-        metadata,
-    ));
+    let writer = Arc::new(Writer::new(Arc::clone(&page_handler), allocator, metadata));
 
     (writer, page_handler, directory)
 }
@@ -71,7 +68,7 @@ fn writer_submit_single_column_append() {
     thread::sleep(Duration::from_millis(100));
 
     // Verify metadata was committed
-    let latest = directory.latest("email");
+    let latest = directory.latest_in_table("users", "email");
     assert!(latest.is_some(), "Expected metadata to be committed");
     let descriptor = latest.unwrap();
     assert_eq!(descriptor.entry_count, 1);
@@ -103,8 +100,8 @@ fn writer_submit_multiple_columns() {
     thread::sleep(Duration::from_millis(100));
 
     // Both columns should have metadata
-    assert!(directory.latest("email").is_some());
-    assert!(directory.latest("name").is_some());
+    assert!(directory.latest_in_table("users", "email").is_some());
+    assert!(directory.latest_in_table("users", "name").is_some());
 }
 
 #[test]
@@ -139,7 +136,7 @@ fn writer_submit_overwrite_operation() {
     thread::sleep(Duration::from_millis(100));
 
     // Verify the entry was overwritten
-    let descriptor = directory.latest("status").unwrap();
+    let descriptor = directory.latest_in_table("users", "status").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
     assert_eq!(page.page.entries.len(), 1);
     assert_eq!(page.page.entries[0].get_data(), "active");
@@ -163,7 +160,7 @@ fn writer_submit_overwrite_extends_page() {
     writer.submit(job).expect("submit failed");
     thread::sleep(Duration::from_millis(100));
 
-    let descriptor = directory.latest("data").unwrap();
+    let descriptor = directory.latest_in_table("users", "data").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
     assert_eq!(page.page.entries.len(), 6); // 0-5 inclusive
     assert_eq!(page.page.entries[5].get_data(), "value_at_5");
@@ -197,7 +194,7 @@ fn writer_submit_multiple_operations_same_column() {
     writer.submit(job).expect("submit failed");
     thread::sleep(Duration::from_millis(100));
 
-    let descriptor = directory.latest("tags").unwrap();
+    let descriptor = directory.latest_in_table("users", "tags").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
     assert_eq!(page.page.entries.len(), 3);
     assert_eq!(page.page.entries[0].get_data(), "tag1");
@@ -226,7 +223,7 @@ fn writer_submit_sequential_jobs_ordering() {
     thread::sleep(Duration::from_millis(200));
 
     // All entries should be in order
-    let descriptor = directory.latest("counter").unwrap();
+    let descriptor = directory.latest_in_table("users", "counter").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
     assert_eq!(page.page.entries.len(), 3);
     assert_eq!(page.page.entries[0].get_data(), "value_0");
@@ -289,7 +286,10 @@ fn writer_submit_after_shutdown_returns_error() {
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
     let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), page_io));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), compressor));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        compressor,
+    ));
 
     let page_handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
 
@@ -377,9 +377,9 @@ fn writer_concurrent_submits() {
 
     // Verify metadata was created (at least some columns should exist)
     // Note: Concurrent writes may have race conditions in current implementation
-    let has_thread1 = directory.latest("thread1").is_some();
-    let has_thread2 = directory.latest("thread2").is_some();
-    let has_thread3 = directory.latest("thread3").is_some();
+    let has_thread1 = directory.latest_in_table("users", "thread1").is_some();
+    let has_thread2 = directory.latest_in_table("users", "thread2").is_some();
+    let has_thread3 = directory.latest_in_table("users", "thread3").is_some();
 
     // At least one thread should have committed successfully
     assert!(
@@ -398,7 +398,7 @@ fn writer_empty_job_no_effect() {
     thread::sleep(Duration::from_millis(100));
 
     // No metadata should be created
-    assert!(directory.latest("nonexistent").is_none());
+    assert!(directory.latest_in_table("users", "nonexistent").is_none());
 }
 
 #[test]
@@ -409,9 +409,24 @@ fn writer_metadata_commit_atomicity() {
     let job = UpdateJob::new(
         "users",
         vec![
-            ColumnUpdate::new("col1", vec![UpdateOp::Append { entry: Entry::new("a") }]),
-            ColumnUpdate::new("col2", vec![UpdateOp::Append { entry: Entry::new("b") }]),
-            ColumnUpdate::new("col3", vec![UpdateOp::Append { entry: Entry::new("c") }]),
+            ColumnUpdate::new(
+                "col1",
+                vec![UpdateOp::Append {
+                    entry: Entry::new("a"),
+                }],
+            ),
+            ColumnUpdate::new(
+                "col2",
+                vec![UpdateOp::Append {
+                    entry: Entry::new("b"),
+                }],
+            ),
+            ColumnUpdate::new(
+                "col3",
+                vec![UpdateOp::Append {
+                    entry: Entry::new("c"),
+                }],
+            ),
         ],
     );
 
@@ -419,9 +434,9 @@ fn writer_metadata_commit_atomicity() {
     thread::sleep(Duration::from_millis(100));
 
     // All three columns should be committed together
-    let desc1 = directory.latest("col1");
-    let desc2 = directory.latest("col2");
-    let desc3 = directory.latest("col3");
+    let desc1 = directory.latest_in_table("users", "col1");
+    let desc2 = directory.latest_in_table("users", "col2");
+    let desc3 = directory.latest_in_table("users", "col3");
 
     // Either all exist or none exist (atomicity)
     let all_exist = desc1.is_some() && desc2.is_some() && desc3.is_some();
@@ -448,7 +463,7 @@ fn writer_updates_existing_page() {
     writer.submit(job1).expect("submit failed");
     thread::sleep(Duration::from_millis(100));
 
-    let desc_v1 = directory.latest("version").unwrap();
+    let desc_v1 = directory.latest_in_table("users", "version").unwrap();
     let page_v1_id = desc_v1.id.clone();
 
     // Second write (should create new version)
@@ -464,7 +479,7 @@ fn writer_updates_existing_page() {
     writer.submit(job2).expect("submit failed");
     thread::sleep(Duration::from_millis(100));
 
-    let desc_v2 = directory.latest("version").unwrap();
+    let desc_v2 = directory.latest_in_table("users", "version").unwrap();
     let page_v2 = page_handler.get_page(desc_v2.clone()).unwrap();
 
     // New version should have both entries
@@ -493,7 +508,7 @@ fn writer_large_page() {
     writer.submit(job).expect("submit failed");
     thread::sleep(Duration::from_millis(500));
 
-    let descriptor = directory.latest("large").unwrap();
+    let descriptor = directory.latest_in_table("users", "large").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
 
     assert_eq!(page.page.entries.len(), 1000);
@@ -519,7 +534,7 @@ fn writer_special_characters_in_data() {
     writer.submit(job).expect("submit failed");
     thread::sleep(Duration::from_millis(100));
 
-    let descriptor = directory.latest("special").unwrap();
+    let descriptor = directory.latest_in_table("users", "special").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
 
     assert_eq!(page.page.entries.len(), 1);
@@ -544,7 +559,7 @@ fn writer_unicode_data() {
     writer.submit(job).expect("submit failed");
     thread::sleep(Duration::from_millis(100));
 
-    let descriptor = directory.latest("unicode").unwrap();
+    let descriptor = directory.latest_in_table("users", "unicode").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
 
     assert_eq!(page.page.entries.len(), 1);
@@ -561,9 +576,24 @@ fn integration_full_write_read_cycle() {
     let job = UpdateJob::new(
         "products",
         vec![
-            ColumnUpdate::new("id", vec![UpdateOp::Append { entry: Entry::new("123") }]),
-            ColumnUpdate::new("name", vec![UpdateOp::Append { entry: Entry::new("Widget") }]),
-            ColumnUpdate::new("price", vec![UpdateOp::Append { entry: Entry::new("19.99") }]),
+            ColumnUpdate::new(
+                "id",
+                vec![UpdateOp::Append {
+                    entry: Entry::new("123"),
+                }],
+            ),
+            ColumnUpdate::new(
+                "name",
+                vec![UpdateOp::Append {
+                    entry: Entry::new("Widget"),
+                }],
+            ),
+            ColumnUpdate::new(
+                "price",
+                vec![UpdateOp::Append {
+                    entry: Entry::new("19.99"),
+                }],
+            ),
         ],
     );
 
@@ -571,13 +601,23 @@ fn integration_full_write_read_cycle() {
     thread::sleep(Duration::from_millis(150));
 
     // Read back all columns
-    let id_desc = directory.latest("id").expect("id column not found");
-    let name_desc = directory.latest("name").expect("name column not found");
-    let price_desc = directory.latest("price").expect("price column not found");
+    let id_desc = directory
+        .latest_in_table("products", "id")
+        .expect("id column not found");
+    let name_desc = directory
+        .latest_in_table("products", "name")
+        .expect("name column not found");
+    let price_desc = directory
+        .latest_in_table("products", "price")
+        .expect("price column not found");
 
     let id_page = page_handler.get_page(id_desc).expect("id page not found");
-    let name_page = page_handler.get_page(name_desc).expect("name page not found");
-    let price_page = page_handler.get_page(price_desc).expect("price page not found");
+    let name_page = page_handler
+        .get_page(name_desc)
+        .expect("name page not found");
+    let price_page = page_handler
+        .get_page(price_desc)
+        .expect("price page not found");
 
     assert_eq!(id_page.page.entries[0].get_data(), "123");
     assert_eq!(name_page.page.entries[0].get_data(), "Widget");
@@ -594,9 +634,15 @@ fn integration_write_update_read() {
         vec![ColumnUpdate::new(
             "stock",
             vec![
-                UpdateOp::Append { entry: Entry::new("100") },
-                UpdateOp::Append { entry: Entry::new("50") },
-                UpdateOp::Append { entry: Entry::new("75") },
+                UpdateOp::Append {
+                    entry: Entry::new("100"),
+                },
+                UpdateOp::Append {
+                    entry: Entry::new("50"),
+                },
+                UpdateOp::Append {
+                    entry: Entry::new("75"),
+                },
             ],
         )],
     );
@@ -618,7 +664,7 @@ fn integration_write_update_read() {
     thread::sleep(Duration::from_millis(100));
 
     // Read back
-    let desc = directory.latest("stock").unwrap();
+    let desc = directory.latest_in_table("inventory", "stock").unwrap();
     let page = page_handler.get_page(desc).unwrap();
 
     assert_eq!(page.page.entries.len(), 3);
@@ -667,9 +713,10 @@ fn integration_concurrent_writes_different_tables() {
     h2.join().unwrap();
     thread::sleep(Duration::from_millis(300));
 
-    // Both columns should exist and have correct counts
-    let a_desc = directory.latest("data"); // Note: this will get the last one written
-    assert!(a_desc.is_some());
+    // Both columns should exist and have committed metadata
+    let a_desc = directory.latest_in_table("table_a", "data");
+    let b_desc = directory.latest_in_table("table_b", "data");
+    assert!(a_desc.is_some() && b_desc.is_some());
 }
 
 #[test]
@@ -696,7 +743,10 @@ fn integration_write_with_cache_eviction() {
     // (Reading pages may fail if data is still being compressed/written)
     let mut found_count = 0;
     for i in 0..15 {
-        if directory.latest(&format!("col_{}", i)).is_some() {
+        if directory
+            .latest_in_table("users", &format!("col_{}", i))
+            .is_some()
+        {
             found_count += 1;
         }
     }
@@ -719,8 +769,12 @@ fn integration_append_after_overwrite() {
         vec![ColumnUpdate::new(
             "log",
             vec![
-                UpdateOp::Append { entry: Entry::new("event1") },
-                UpdateOp::Append { entry: Entry::new("event2") },
+                UpdateOp::Append {
+                    entry: Entry::new("event1"),
+                },
+                UpdateOp::Append {
+                    entry: Entry::new("event2"),
+                },
             ],
         )],
     );
@@ -754,13 +808,41 @@ fn integration_append_after_overwrite() {
     writer.submit(job3).unwrap();
     thread::sleep(Duration::from_millis(100));
 
-    let desc = directory.latest("log").unwrap();
+    let desc = directory.latest_in_table("events", "log").unwrap();
     let page = page_handler.get_page(desc).unwrap();
 
     assert_eq!(page.page.entries.len(), 3);
     assert_eq!(page.page.entries[0].get_data(), "modified_event1");
     assert_eq!(page.page.entries[1].get_data(), "event2");
     assert_eq!(page.page.entries[2].get_data(), "event3");
+}
+
+#[test]
+fn integration_create_table_plan_then_write() {
+    let (writer, page_handler, directory) = setup_writer();
+    let ddl = "CREATE TABLE items (id UUID, name String) ORDER BY (id)";
+    let plan = plan_create_table_sql(ddl).expect("plan create table");
+    create_table_from_plan(&directory, &plan).expect("register table");
+
+    let job = UpdateJob::new(
+        "items",
+        vec![ColumnUpdate::new(
+            "name",
+            vec![UpdateOp::Append {
+                entry: Entry::new("widget"),
+            }],
+        )],
+    );
+
+    writer.submit(job).expect("write job");
+    thread::sleep(Duration::from_millis(150));
+
+    let desc = directory
+        .latest_in_table("items", "name")
+        .expect("metadata committed");
+    let page = page_handler.get_page(desc).expect("page available");
+    assert_eq!(page.page.entries.len(), 1);
+    assert_eq!(page.page.entries[0].get_data(), "widget");
 }
 
 #[test]
@@ -773,9 +855,15 @@ fn integration_mixed_operations_single_job() {
         vec![ColumnUpdate::new(
             "values",
             vec![
-                UpdateOp::Append { entry: Entry::new("a") },
-                UpdateOp::Append { entry: Entry::new("b") },
-                UpdateOp::Append { entry: Entry::new("c") },
+                UpdateOp::Append {
+                    entry: Entry::new("a"),
+                },
+                UpdateOp::Append {
+                    entry: Entry::new("b"),
+                },
+                UpdateOp::Append {
+                    entry: Entry::new("c"),
+                },
             ],
         )],
     );
@@ -788,17 +876,27 @@ fn integration_mixed_operations_single_job() {
         vec![ColumnUpdate::new(
             "values",
             vec![
-                UpdateOp::Overwrite { row: 1, entry: Entry::new("B") }, // Overwrite 'b'
-                UpdateOp::Append { entry: Entry::new("d") },            // Append 'd'
-                UpdateOp::Overwrite { row: 0, entry: Entry::new("A") }, // Overwrite 'a'
-                UpdateOp::Append { entry: Entry::new("e") },            // Append 'e'
+                UpdateOp::Overwrite {
+                    row: 1,
+                    entry: Entry::new("B"),
+                }, // Overwrite 'b'
+                UpdateOp::Append {
+                    entry: Entry::new("d"),
+                }, // Append 'd'
+                UpdateOp::Overwrite {
+                    row: 0,
+                    entry: Entry::new("A"),
+                }, // Overwrite 'a'
+                UpdateOp::Append {
+                    entry: Entry::new("e"),
+                }, // Append 'e'
             ],
         )],
     );
     writer.submit(job2).unwrap();
     thread::sleep(Duration::from_millis(100));
 
-    let desc = directory.latest("values").unwrap();
+    let desc = directory.latest_in_table("mixed", "values").unwrap();
     let page = page_handler.get_page(desc).unwrap();
 
     // Operations applied in order: overwrite[1], append, overwrite[0], append
@@ -834,7 +932,7 @@ fn integration_persistence_survives_restart() {
     thread::sleep(Duration::from_millis(150));
 
     // Verify data is available in current session
-    let desc = directory.latest("data");
+    let desc = directory.latest_in_table("persistent", "data");
     // Note: May be None if writer hasn't committed metadata yet
     if desc.is_some() {
         // Data is available
@@ -864,7 +962,7 @@ fn integration_rapid_sequential_writes() {
     // Wait for all to complete
     thread::sleep(Duration::from_millis(1000));
 
-    let desc = directory.latest("seq").unwrap();
+    let desc = directory.latest_in_table("rapid", "seq").unwrap();
     let page = page_handler.get_page(desc).unwrap();
 
     // All 50 entries should be present in order
@@ -872,4 +970,3 @@ fn integration_rapid_sequential_writes() {
     assert_eq!(page.page.entries[0].get_data(), "seq_0");
     assert_eq!(page.page.entries[49].get_data(), "seq_49");
 }
-

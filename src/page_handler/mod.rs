@@ -25,8 +25,28 @@ impl PageLocator {
         self.directory.latest(column)
     }
 
+    pub fn latest(&self, table: &str, column: &str) -> Option<PageDescriptor> {
+        self.directory.latest_in_table(table, column)
+    }
+
     pub fn pages_for_column(&self, column: &str) -> Vec<PageDescriptor> {
         self.directory.pages_for_column(column)
+    }
+
+    pub fn pages_for(&self, table: &str, column: &str) -> Vec<PageDescriptor> {
+        self.directory.pages_for_in_table(table, column)
+    }
+
+    pub fn range_for(
+        &self,
+        table: &str,
+        column: &str,
+        l_bound: u64,
+        r_bound: u64,
+        commit_time_upper_bound: u64,
+    ) -> Vec<PageDescriptor> {
+        self.directory
+            .range_in_table(table, column, l_bound, r_bound, commit_time_upper_bound)
     }
 
     pub fn range_for_column(
@@ -38,6 +58,17 @@ impl PageLocator {
     ) -> Vec<PageDescriptor> {
         self.directory
             .range(column, l_bound, r_bound, commit_time_upper_bound)
+    }
+
+    pub fn range_slices_for(
+        &self,
+        table: &str,
+        column: &str,
+        start_row: u64,
+        end_row: u64,
+    ) -> Vec<PageSlice> {
+        self.directory
+            .locate_range_in_table(table, column, start_row, end_row)
     }
 
     pub fn range_slices_for_column(
@@ -280,13 +311,32 @@ impl PageHandler {
         self.locator.latest_for_column(column)
     }
 
+    pub fn locate_latest_in_table(&self, table: &str, column: &str) -> Option<PageDescriptor> {
+        self.locator.latest(table, column)
+    }
+
     pub fn list_pages(&self, column: &str) -> Vec<PageDescriptor> {
         self.locator.pages_for_column(column)
+    }
+
+    pub fn list_pages_in_table(&self, table: &str, column: &str) -> Vec<PageDescriptor> {
+        self.locator.pages_for(table, column)
     }
 
     pub fn list_range(&self, column: &str, start_row: u64, end_row: u64) -> Vec<PageSlice> {
         self.locator
             .range_slices_for_column(column, start_row, end_row)
+    }
+
+    pub fn list_range_in_table(
+        &self,
+        table: &str,
+        column: &str,
+        start_row: u64,
+        end_row: u64,
+    ) -> Vec<PageSlice> {
+        self.locator
+            .range_slices_for(table, column, start_row, end_row)
     }
 
     pub fn get_page(&self, page_meta: PageDescriptor) -> Option<Arc<PageCacheEntryUncompressed>> {

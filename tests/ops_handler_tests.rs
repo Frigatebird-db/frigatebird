@@ -1,9 +1,12 @@
 use idk_uwu_ig::cache::page_cache::PageCache;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
-use idk_uwu_ig::ops_handler::{range_scan_column_entry, update_column_entry, upsert_data_into_column};
+use idk_uwu_ig::ops_handler::{
+    create_table_from_plan, range_scan_column_entry, update_column_entry, upsert_data_into_column,
+};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
 use std::sync::{Arc, RwLock};
 
 fn setup_page_handler() -> Arc<PageHandler> {
@@ -16,9 +19,34 @@ fn setup_page_handler() -> Arc<PageHandler> {
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
     let fetcher = Arc::new(PageFetcher::new(Arc::clone(&compressed_cache), page_io));
-    let materializer = Arc::new(PageMaterializer::new(Arc::clone(&uncompressed_cache), compressor));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        compressor,
+    ));
 
     Arc::new(PageHandler::new(locator, fetcher, materializer))
+}
+
+#[test]
+fn create_table_plan_registers_metadata() {
+    let store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = PageDirectory::new(Arc::clone(&store));
+
+    let plan = CreateTablePlan::new(
+        "items",
+        vec![
+            ColumnSpec::new("id", "UUID"),
+            ColumnSpec::new("name", "String"),
+        ],
+        vec!["id".into()],
+        false,
+    );
+
+    create_table_from_plan(&directory, &plan).expect("create table");
+
+    let catalog = directory.table_catalog("items").expect("catalog exists");
+    assert_eq!(catalog.columns().len(), 2);
+    assert_eq!(catalog.columns()[0].name, "id");
 }
 
 #[test]
@@ -99,7 +127,11 @@ fn range_scan_column_entry_empty_range() {
 
     // Scan range when column doesn't exist
     let results = range_scan_column_entry(&page_handler, "empty", 100, 200, 0);
-    assert_eq!(results.len(), 0, "Should return empty vec for non-existent column");
+    assert_eq!(
+        results.len(),
+        0,
+        "Should return empty vec for non-existent column"
+    );
 }
 
 #[test]
@@ -117,7 +149,11 @@ fn range_scan_column_entry_nonexistent_column() {
 
     // Scan column that doesn't exist
     let results = range_scan_column_entry(&page_handler, "nonexistent", 0, 10, 0);
-    assert_eq!(results.len(), 0, "Non-existent column should return empty vec");
+    assert_eq!(
+        results.len(),
+        0,
+        "Non-existent column should return empty vec"
+    );
 }
 
 #[test]
@@ -186,7 +222,11 @@ fn range_scan_with_max_bounds() {
 
     // Scan with maximum range
     let results = range_scan_column_entry(&page_handler, "col", 0, u64::MAX, 0);
-    assert_eq!(results.len(), 0, "Should return empty for non-existent column");
+    assert_eq!(
+        results.len(),
+        0,
+        "Should return empty for non-existent column"
+    );
 }
 
 #[test]

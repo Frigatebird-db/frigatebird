@@ -2,9 +2,9 @@ pub mod models;
 pub mod parser;
 pub mod planner;
 
-pub use models::{FilterExpr, PlannerError, QueryPlan, TableAccess};
+pub use models::{ColumnSpec, CreateTablePlan, FilterExpr, PlannerError, QueryPlan, TableAccess};
 pub use parser::parse_sql;
-pub use planner::plan_statement;
+pub use planner::{plan_create_table_statement, plan_statement};
 
 use sqlparser::ast::Statement;
 
@@ -59,6 +59,22 @@ pub fn plan_sql(sql: &str) -> Result<QueryPlan, SqlPlannerError> {
     }
     let statement = statements.pop().expect("len checked above");
     plan_statement(&statement).map_err(Into::into)
+}
+
+/// Parse and plan a CREATE TABLE statement.
+pub fn plan_create_table_sql(sql: &str) -> Result<CreateTablePlan, SqlPlannerError> {
+    let mut statements = parse_sql(sql)?;
+    if statements.is_empty() {
+        return Err(PlannerError::EmptyStatement.into());
+    }
+    if statements.len() > 1 {
+        return Err(PlannerError::Unsupported(
+            "only single SQL statements are supported for now".into(),
+        )
+        .into());
+    }
+    let statement = statements.pop().expect("len checked above");
+    plan_create_table_statement(&statement).map_err(Into::into)
 }
 
 /// Convenience for callers that already parsed the SQL.

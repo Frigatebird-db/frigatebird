@@ -1,5 +1,171 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+
+pub const DEFAULT_TABLE: &str = "_default";
+
+fn split_table_column(identifier: &str) -> (&str, &str) {
+    if let Some(pos) = identifier.find('.') {
+        let table = &identifier[..pos];
+        let column = &identifier[pos + 1..];
+        if table.is_empty() || column.is_empty() {
+            (DEFAULT_TABLE, identifier)
+        } else {
+            (table, column)
+        }
+    } else {
+        (DEFAULT_TABLE, identifier)
+    }
+}
+
+/// Identifies a column within a specific table.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TableColumnKey {
+    table: String,
+    column: String,
+}
+
+impl TableColumnKey {
+    fn new(table: &str, column: &str) -> Self {
+        TableColumnKey {
+            table: table.to_string(),
+            column: column.to_string(),
+        }
+    }
+}
+
+/// Definition supplied when registering a table.
+#[derive(Clone, Debug)]
+pub struct ColumnDefinition {
+    pub name: String,
+    pub data_type: String,
+}
+
+impl ColumnDefinition {
+    pub fn new(name: impl Into<String>, data_type: impl Into<String>) -> Self {
+        ColumnDefinition {
+            name: name.into(),
+            data_type: data_type.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TableDefinition {
+    pub name: String,
+    pub columns: Vec<ColumnDefinition>,
+    pub sort_key: Vec<String>,
+}
+
+impl TableDefinition {
+    pub fn new(
+        name: impl Into<String>,
+        columns: Vec<ColumnDefinition>,
+        sort_key: Vec<String>,
+    ) -> Self {
+        TableDefinition {
+            name: name.into(),
+            columns,
+            sort_key,
+        }
+    }
+}
+
+/// Catalog entry describing a single column.
+#[derive(Clone, Debug)]
+pub struct ColumnCatalog {
+    pub name: String,
+    pub data_type: String,
+    pub ordinal: usize,
+}
+
+/// Catalog entry describing a table schema.
+#[derive(Clone, Debug)]
+pub struct TableCatalog {
+    pub name: String,
+    columns: Vec<ColumnCatalog>,
+    column_index: HashMap<String, usize>,
+    sort_key_ordinals: Vec<usize>,
+}
+
+impl TableCatalog {
+    fn new(
+        name: String,
+        columns: Vec<ColumnCatalog>,
+        column_index: HashMap<String, usize>,
+        sort_key_ordinals: Vec<usize>,
+    ) -> Self {
+        TableCatalog {
+            name,
+            columns,
+            column_index,
+            sort_key_ordinals,
+        }
+    }
+
+    pub fn columns(&self) -> &[ColumnCatalog] {
+        &self.columns
+    }
+
+    pub fn column(&self, name: &str) -> Option<&ColumnCatalog> {
+        self.column_index
+            .get(name)
+            .and_then(|idx| self.columns.get(*idx))
+    }
+
+    pub fn sort_key(&self) -> Vec<&ColumnCatalog> {
+        self.sort_key_ordinals
+            .iter()
+            .filter_map(|idx| self.columns.get(*idx))
+            .collect()
+    }
+
+    fn insert_column(&mut self, name: String, data_type: String) -> bool {
+        if self.column_index.contains_key(&name) {
+            return false;
+        }
+        let ordinal = self.columns.len();
+        self.column_index.insert(name.clone(), ordinal);
+        self.columns.push(ColumnCatalog {
+            name,
+            data_type,
+            ordinal,
+        });
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogError {
+    TableExists(String),
+    UnknownTable(String),
+    UnknownColumn { table: String, column: String },
+    DuplicateColumn { table: String, column: String },
+    DuplicateSortKey { table: String, column: String },
+    StoreUnavailable,
+}
+
+impl std::fmt::Display for CatalogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CatalogError::TableExists(table) => {
+                write!(f, "table already exists: {table}")
+            }
+            CatalogError::UnknownTable(table) => write!(f, "unknown table: {table}"),
+            CatalogError::UnknownColumn { table, column } => {
+                write!(f, "unknown column {table}.{column}")
+            }
+            CatalogError::DuplicateColumn { table, column } => {
+                write!(f, "duplicate column {table}.{column}")
+            }
+            CatalogError::DuplicateSortKey { table, column } => {
+                write!(f, "duplicate column in ORDER BY: {table}.{column}")
+            }
+            CatalogError::StoreUnavailable => write!(f, "metadata store unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for CatalogError {}
 
 /// Descriptor for the physical location of a column page.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,6 +360,7 @@ pub struct PageSlice {
 /// Batch append description used to publish new page versions.
 #[derive(Clone, Debug)]
 pub struct PendingPage {
+    pub table: String,
     pub column: String,
     pub disk_path: String,
     pub offset: u64,
@@ -205,7 +372,8 @@ pub struct PendingPage {
 
 /// In-memory catalog mapping columns to their latest page chain.
 pub struct TableMetaStore {
-    columns: HashMap<String, ColumnChain>,
+    tables: HashMap<String, TableCatalog>,
+    column_chains: HashMap<TableColumnKey, ColumnChain>,
     page_index: HashMap<String, PageDescriptor>,
     next_page_id: u64,
 }
@@ -213,10 +381,149 @@ pub struct TableMetaStore {
 impl TableMetaStore {
     pub fn new() -> Self {
         TableMetaStore {
-            columns: HashMap::new(),
+            tables: HashMap::new(),
+            column_chains: HashMap::new(),
             page_index: HashMap::new(),
             next_page_id: 1,
         }
+    }
+
+    fn ensure_default_table_column(&mut self, column: &str) {
+        if !self.tables.contains_key(DEFAULT_TABLE) {
+            let mut column_index = HashMap::new();
+            column_index.insert(column.to_string(), 0);
+            let catalog = TableCatalog::new(
+                DEFAULT_TABLE.to_string(),
+                vec![ColumnCatalog {
+                    name: column.to_string(),
+                    data_type: "String".to_string(),
+                    ordinal: 0,
+                }],
+                column_index,
+                Vec::new(),
+            );
+            self.tables.insert(DEFAULT_TABLE.to_string(), catalog);
+            self.column_chains.insert(
+                TableColumnKey::new(DEFAULT_TABLE, column),
+                ColumnChain::new(),
+            );
+            return;
+        }
+
+        if let Some(catalog) = self.tables.get_mut(DEFAULT_TABLE) {
+            if catalog.column(column).is_none() {
+                if catalog.insert_column(column.to_string(), "String".to_string()) {
+                    self.column_chains.insert(
+                        TableColumnKey::new(DEFAULT_TABLE, column),
+                        ColumnChain::new(),
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn register_table(&mut self, definition: TableDefinition) -> Result<(), CatalogError> {
+        let TableDefinition {
+            name,
+            columns,
+            sort_key,
+        } = definition;
+
+        if self.tables.contains_key(&name) {
+            return Err(CatalogError::TableExists(name.clone()));
+        }
+
+        let mut column_index: HashMap<String, usize> = HashMap::with_capacity(columns.len());
+        let mut catalog_columns: Vec<ColumnCatalog> = Vec::with_capacity(columns.len());
+        for (ordinal, column) in columns.into_iter().enumerate() {
+            if column_index.contains_key(&column.name) {
+                return Err(CatalogError::DuplicateColumn {
+                    table: name.clone(),
+                    column: column.name,
+                });
+            }
+            column_index.insert(column.name.clone(), ordinal);
+            catalog_columns.push(ColumnCatalog {
+                name: column.name,
+                data_type: column.data_type,
+                ordinal,
+            });
+        }
+
+        let mut seen_sort = HashSet::with_capacity(sort_key.len());
+        let mut sort_key_ordinals = Vec::with_capacity(sort_key.len());
+        for key in sort_key {
+            if !seen_sort.insert(key.clone()) {
+                return Err(CatalogError::DuplicateSortKey {
+                    table: name.clone(),
+                    column: key,
+                });
+            }
+            let ordinal =
+                column_index
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| CatalogError::UnknownColumn {
+                        table: name.clone(),
+                        column: key.clone(),
+                    })?;
+            sort_key_ordinals.push(ordinal);
+        }
+
+        for column in &catalog_columns {
+            let key = TableColumnKey::new(&name, &column.name);
+            debug_assert!(
+                !self.column_chains.contains_key(&key),
+                "column chain unexpectedly exists for {}.{}",
+                &name,
+                &column.name
+            );
+            self.column_chains.insert(key, ColumnChain::new());
+        }
+
+        let catalog = TableCatalog::new(
+            name.clone(),
+            catalog_columns,
+            column_index,
+            sort_key_ordinals,
+        );
+        self.tables.insert(name, catalog);
+        Ok(())
+    }
+
+    pub fn add_columns(
+        &mut self,
+        table: &str,
+        columns: Vec<ColumnDefinition>,
+    ) -> Result<(), CatalogError> {
+        let catalog = self
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| CatalogError::UnknownTable(table.to_string()))?;
+
+        for column in columns {
+            if catalog.insert_column(column.name.clone(), column.data_type) {
+                let key = TableColumnKey::new(table, &column.name);
+                self.column_chains
+                    .entry(key)
+                    .or_insert_with(ColumnChain::new);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn table(&self, name: &str) -> Option<&TableCatalog> {
+        self.tables.get(name)
+    }
+
+    pub fn table_catalog(&self, name: &str) -> Option<TableCatalog> {
+        self.tables.get(name).cloned()
+    }
+
+    pub fn column_defined(&self, table: &str, column: &str) -> bool {
+        let key = TableColumnKey::new(table, column);
+        self.column_chains.contains_key(&key)
     }
 
     fn allocate_descriptor(
@@ -232,13 +539,15 @@ impl TableMetaStore {
         PageDescriptor::new(id, disk_path, offset, alloc_len, actual_len, entry_count)
     }
 
-    pub fn latest(&self, column: &str) -> Option<PageDescriptor> {
-        self.columns.get(column).and_then(|chain| chain.last())
+    pub fn latest(&self, table: &str, column: &str) -> Option<PageDescriptor> {
+        let key = TableColumnKey::new(table, column);
+        self.column_chains.get(&key).and_then(|chain| chain.last())
     }
 
-    pub fn pages_for_column(&self, column: &str) -> Vec<PageDescriptor> {
-        self.columns
-            .get(column)
+    pub fn pages_for_column(&self, table: &str, column: &str) -> Vec<PageDescriptor> {
+        let key = TableColumnKey::new(table, column);
+        self.column_chains
+            .get(&key)
             .map(|chain| chain.all_pages())
             .unwrap_or_default()
     }
@@ -247,42 +556,72 @@ impl TableMetaStore {
         self.page_index.get(id).cloned()
     }
 
-    pub fn locate_row(&self, column: &str, row: u64) -> Option<RowLocation> {
-        self.columns
-            .get(column)
+    pub fn locate_row(&self, table: &str, column: &str, row: u64) -> Option<RowLocation> {
+        let key = TableColumnKey::new(table, column);
+        self.column_chains
+            .get(&key)
             .and_then(|chain| chain.locate_row(row))
     }
 
-    pub fn locate_range(&self, column: &str, start_row: u64, end_row: u64) -> Vec<PageSlice> {
-        self.columns
-            .get(column)
+    pub fn locate_range(
+        &self,
+        table: &str,
+        column: &str,
+        start_row: u64,
+        end_row: u64,
+    ) -> Vec<PageSlice> {
+        let key = TableColumnKey::new(table, column);
+        self.column_chains
+            .get(&key)
             .map(|chain| chain.locate_range(start_row, end_row))
             .unwrap_or_default()
     }
 
     pub fn register_page(
         &mut self,
+        table: &str,
         column: &str,
         disk_path: String,
         offset: u64,
         alloc_len: u64,
         actual_len: u64,
         entry_count: u64,
-    ) -> PageDescriptor {
+    ) -> Option<PageDescriptor> {
+        let key = TableColumnKey::new(table, column);
+        if !self.column_chains.contains_key(&key) {
+            if table == DEFAULT_TABLE {
+                self.ensure_default_table_column(column);
+            }
+        }
+        if !self.column_chains.contains_key(&key) {
+            return None;
+        }
         let count = if entry_count == 0 { 1 } else { entry_count };
         let descriptor = self.allocate_descriptor(disk_path, offset, alloc_len, actual_len, count);
+        {
+            let chain = self
+                .column_chains
+                .get_mut(&key)
+                .expect("column chain must exist after contains_key check");
+            chain.push(descriptor.clone());
+        }
         self.page_index
             .insert(descriptor.id.clone(), descriptor.clone());
-        self.columns
-            .entry(column.to_string())
-            .or_insert_with(ColumnChain::new)
-            .push(descriptor.clone());
-        descriptor
+        Some(descriptor)
     }
 
     pub fn register_batch(&mut self, pages: &[PendingPage]) -> Vec<PageDescriptor> {
         let mut registered = Vec::with_capacity(pages.len());
         for page in pages {
+            let key = TableColumnKey::new(&page.table, &page.column);
+            if !self.column_chains.contains_key(&key) {
+                if page.table == DEFAULT_TABLE {
+                    self.ensure_default_table_column(&page.column);
+                }
+                if !self.column_chains.contains_key(&key) {
+                    continue;
+                }
+            }
             let descriptor = self.allocate_descriptor(
                 page.disk_path.clone(),
                 page.offset,
@@ -290,14 +629,9 @@ impl TableMetaStore {
                 page.actual_len,
                 page.entry_count,
             );
-
             let mut old_id: Option<String> = None;
-            {
-                let chain = self
-                    .columns
-                    .entry(page.column.clone())
-                    .or_insert_with(ColumnChain::new);
 
+            if let Some(chain) = self.column_chains.get_mut(&key) {
                 if page.replace_last {
                     old_id = chain.last().map(|p| p.id.clone());
                     if old_id.is_some() {
@@ -308,6 +642,8 @@ impl TableMetaStore {
                 } else {
                     chain.push(descriptor.clone());
                 }
+            } else {
+                continue;
             }
 
             if let Some(old) = old_id {
@@ -339,17 +675,52 @@ impl PageDirectory {
         Self { store }
     }
 
-    pub fn latest(&self, column: &str) -> Option<PageDescriptor> {
-        let guard = self.store.read().ok()?;
-        guard.latest(column)
+    pub fn register_table(&self, definition: TableDefinition) -> Result<(), CatalogError> {
+        let mut guard = self
+            .store
+            .write()
+            .map_err(|_| CatalogError::StoreUnavailable)?;
+        guard.register_table(definition)
     }
 
-    pub fn pages_for_column(&self, column: &str) -> Vec<PageDescriptor> {
+    pub fn add_columns_to_table(
+        &self,
+        table: &str,
+        columns: Vec<ColumnDefinition>,
+    ) -> Result<(), CatalogError> {
+        let mut guard = self
+            .store
+            .write()
+            .map_err(|_| CatalogError::StoreUnavailable)?;
+        guard.add_columns(table, columns)
+    }
+
+    pub fn table_catalog(&self, name: &str) -> Option<TableCatalog> {
+        let guard = self.store.read().ok()?;
+        guard.table_catalog(name)
+    }
+
+    pub fn latest_in_table(&self, table: &str, column: &str) -> Option<PageDescriptor> {
+        let guard = self.store.read().ok()?;
+        guard.latest(table, column)
+    }
+
+    pub fn latest(&self, column: &str) -> Option<PageDescriptor> {
+        let (table, column) = split_table_column(column);
+        self.latest_in_table(table, column)
+    }
+
+    pub fn pages_for_in_table(&self, table: &str, column: &str) -> Vec<PageDescriptor> {
         let guard = match self.store.read() {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
-        guard.pages_for_column(column)
+        guard.pages_for_column(table, column)
+    }
+
+    pub fn pages_for_column(&self, column: &str) -> Vec<PageDescriptor> {
+        let (table, column) = split_table_column(column);
+        self.pages_for_in_table(table, column)
     }
 
     pub fn lookup(&self, id: &str) -> Option<PageDescriptor> {
@@ -357,17 +728,51 @@ impl PageDirectory {
         guard.lookup(id)
     }
 
-    pub fn locate_row(&self, column: &str, row: u64) -> Option<RowLocation> {
+    pub fn locate_row_in_table(&self, table: &str, column: &str, row: u64) -> Option<RowLocation> {
         let guard = self.store.read().ok()?;
-        guard.locate_row(column, row)
+        guard.locate_row(table, column, row)
     }
 
-    pub fn locate_range(&self, column: &str, start_row: u64, end_row: u64) -> Vec<PageSlice> {
+    pub fn locate_row(&self, column: &str, row: u64) -> Option<RowLocation> {
+        let (table, column) = split_table_column(column);
+        self.locate_row_in_table(table, column, row)
+    }
+
+    pub fn locate_range_in_table(
+        &self,
+        table: &str,
+        column: &str,
+        start_row: u64,
+        end_row: u64,
+    ) -> Vec<PageSlice> {
         let guard = match self.store.read() {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
-        guard.locate_range(column, start_row, end_row)
+        guard.locate_range(table, column, start_row, end_row)
+    }
+
+    pub fn locate_range(&self, column: &str, start_row: u64, end_row: u64) -> Vec<PageSlice> {
+        let (table, column) = split_table_column(column);
+        self.locate_range_in_table(table, column, start_row, end_row)
+    }
+
+    pub fn range_in_table(
+        &self,
+        table: &str,
+        column: &str,
+        l_bound: u64,
+        r_bound: u64,
+        commit_time_upper_bound: u64,
+    ) -> Vec<PageDescriptor> {
+        if r_bound == 0 || l_bound >= r_bound {
+            return Vec::new();
+        }
+        let end = r_bound - 1;
+        self.locate_range_in_table(table, column, l_bound, end)
+            .into_iter()
+            .map(|slice| slice.descriptor)
+            .collect()
     }
 
     pub fn range(
@@ -375,16 +780,20 @@ impl PageDirectory {
         column: &str,
         l_bound: u64,
         r_bound: u64,
-        _commit_time_upper_bound: u64,
+        commit_time_upper_bound: u64,
     ) -> Vec<PageDescriptor> {
-        if r_bound == 0 || l_bound >= r_bound {
-            return Vec::new();
-        }
-        let end = r_bound - 1;
-        self.locate_range(column, l_bound, end)
-            .into_iter()
-            .map(|slice| slice.descriptor)
-            .collect()
+        let (table, column) = split_table_column(column);
+        self.range_in_table(table, column, l_bound, r_bound, commit_time_upper_bound)
+    }
+
+    pub fn register_page_in_table(
+        &self,
+        table: &str,
+        column: &str,
+        disk_path: String,
+        offset: u64,
+    ) -> Option<PageDescriptor> {
+        self.register_page_in_table_with_sizes(table, column, disk_path, offset, 0, 1, 1)
     }
 
     pub fn register_page(
@@ -393,7 +802,21 @@ impl PageDirectory {
         disk_path: String,
         offset: u64,
     ) -> Option<PageDescriptor> {
-        self.register_page_with_sizes(column, disk_path, offset, 0, 1, 1)
+        let (table, column) = split_table_column(column);
+        self.register_page_in_table(table, column, disk_path, offset)
+    }
+
+    pub fn register_page_in_table_with_size(
+        &self,
+        table: &str,
+        column: &str,
+        disk_path: String,
+        offset: u64,
+        alloc_len: u64,
+    ) -> Option<PageDescriptor> {
+        self.register_page_in_table_with_sizes(
+            table, column, disk_path, offset, alloc_len, alloc_len, 1,
+        )
     }
 
     pub fn register_page_with_size(
@@ -403,7 +826,30 @@ impl PageDirectory {
         offset: u64,
         alloc_len: u64,
     ) -> Option<PageDescriptor> {
-        self.register_page_with_sizes(column, disk_path, offset, alloc_len, alloc_len, 1)
+        let (table, column) = split_table_column(column);
+        self.register_page_in_table_with_size(table, column, disk_path, offset, alloc_len)
+    }
+
+    pub fn register_page_in_table_with_sizes(
+        &self,
+        table: &str,
+        column: &str,
+        disk_path: String,
+        offset: u64,
+        alloc_len: u64,
+        actual_len: u64,
+        entry_count: u64,
+    ) -> Option<PageDescriptor> {
+        let mut guard = self.store.write().ok()?;
+        guard.register_page(
+            table,
+            column,
+            disk_path,
+            offset,
+            alloc_len,
+            actual_len,
+            entry_count,
+        )
     }
 
     pub fn register_page_with_sizes(
@@ -415,15 +861,16 @@ impl PageDirectory {
         actual_len: u64,
         entry_count: u64,
     ) -> Option<PageDescriptor> {
-        let mut guard = self.store.write().ok()?;
-        Some(guard.register_page(
+        let (table, column) = split_table_column(column);
+        self.register_page_in_table_with_sizes(
+            table,
             column,
             disk_path,
             offset,
             alloc_len,
             actual_len,
             entry_count,
-        ))
+        )
     }
 
     pub fn register_batch(&self, pages: &[PendingPage]) -> Vec<PageDescriptor> {
