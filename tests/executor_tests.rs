@@ -1,5 +1,7 @@
 use crossbeam::channel;
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use idk_uwu_ig::cache::page_cache::{
+    PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
+};
 use idk_uwu_ig::executor::PipelineExecutor;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
@@ -7,8 +9,8 @@ use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use idk_uwu_ig::pipeline::{Job, PipelineBatch, PipelineStep};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -92,7 +94,15 @@ fn executor_job_get_next_executes_steps() {
     let (tx, rx) = channel::unbounded::<PipelineBatch>();
     let page_handler = create_test_page_handler();
 
-    let step = PipelineStep::new("col1".to_string(), Vec::new(), tx.clone(), rx.clone(), true, "table".to_string(), page_handler);
+    let step = PipelineStep::new(
+        "col1".to_string(),
+        Vec::new(),
+        tx.clone(),
+        rx.clone(),
+        true,
+        "table".to_string(),
+        page_handler,
+    );
 
     let job = Job::new("table".into(), vec![step], entry_tx);
 
@@ -245,8 +255,24 @@ fn executor_step_execution_sequence() {
 
     let page_handler = create_test_page_handler();
 
-    let step1 = PipelineStep::new("col1".into(), vec![], tx1, rx1, true, "table".to_string(), Arc::clone(&page_handler));
-    let step2 = PipelineStep::new("col2".into(), vec![], tx2, rx2, false, "table".to_string(), page_handler);
+    let step1 = PipelineStep::new(
+        "col1".into(),
+        vec![],
+        tx1,
+        rx1,
+        true,
+        "table".to_string(),
+        Arc::clone(&page_handler),
+    );
+    let step2 = PipelineStep::new(
+        "col2".into(),
+        vec![],
+        tx2,
+        rx2,
+        false,
+        "table".to_string(),
+        page_handler,
+    );
 
     let job = Job::new("table".into(), vec![step1, step2], entry_tx);
     let job_arc = Arc::new(job);

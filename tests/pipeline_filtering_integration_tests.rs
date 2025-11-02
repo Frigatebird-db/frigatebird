@@ -1,10 +1,12 @@
 // Integration tests for pipeline filtering functionality
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use idk_uwu_ig::cache::page_cache::{
+    PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
+};
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::pipeline::{build_pipeline, PipelineBatch};
+use idk_uwu_ig::pipeline::{PipelineBatch, build_pipeline};
 use idk_uwu_ig::sql::plan_sql;
 use std::sync::{Arc, RwLock};
 
@@ -67,7 +69,9 @@ fn test_pipeline_step_execution_flow() {
         job.get_next();
 
         // Verify step was executed
-        let executed_count = job.next_free_slot.load(std::sync::atomic::Ordering::Relaxed);
+        let executed_count = job
+            .next_free_slot
+            .load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(executed_count, 1);
     }
 }
@@ -91,7 +95,8 @@ fn test_pipeline_step_execute_flow() {
 
         // Verify the step was executed
         assert_eq!(
-            job.next_free_slot.load(std::sync::atomic::Ordering::Relaxed),
+            job.next_free_slot
+                .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
     }
@@ -118,8 +123,9 @@ fn test_multiple_filters_on_same_column() {
 fn test_pipeline_with_complex_filters() {
     let page_handler = create_page_handler_with_data();
     let plan = plan_sql(
-        "SELECT id FROM accounts WHERE status = 'active' AND region = 'US' AND balance > '1000'"
-    ).unwrap();
+        "SELECT id FROM accounts WHERE status = 'active' AND region = 'US' AND balance > '1000'",
+    )
+    .unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
@@ -154,21 +160,29 @@ fn test_pipeline_execute_sequence() {
     let jobs = build_pipeline(&plan, page_handler);
 
     let job = &jobs[0];
-    let initial_slot = job.next_free_slot.load(std::sync::atomic::Ordering::Relaxed);
+    let initial_slot = job
+        .next_free_slot
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(initial_slot, 0);
 
     // Execute steps
     job.get_next();
-    let after_first = job.next_free_slot.load(std::sync::atomic::Ordering::Relaxed);
+    let after_first = job
+        .next_free_slot
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(after_first, 1);
 
     job.get_next();
-    let after_second = job.next_free_slot.load(std::sync::atomic::Ordering::Relaxed);
+    let after_second = job
+        .next_free_slot
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(after_second, 2);
 
     // Trying to execute beyond available steps should not panic
     job.get_next();
-    let final_slot = job.next_free_slot.load(std::sync::atomic::Ordering::Relaxed);
+    let final_slot = job
+        .next_free_slot
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert!(final_slot >= job.steps.len());
 }
 
@@ -205,7 +219,8 @@ fn test_pipeline_with_delete_statement() {
 #[test]
 fn test_pipeline_with_update_statement() {
     let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("UPDATE accounts SET balance = 0 WHERE id = '42' AND status = 'closed'").unwrap();
+    let plan =
+        plan_sql("UPDATE accounts SET balance = 0 WHERE id = '42' AND status = 'closed'").unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
@@ -238,7 +253,10 @@ fn test_pipeline_channel_wiring() {
     assert_eq!(received_first, batch);
 
     // Forward to next step
-    first_step.current_producer.send(received_first.clone()).unwrap();
+    first_step
+        .current_producer
+        .send(received_first.clone())
+        .unwrap();
 
     // Second step should receive from first
     let second_step = &job.steps[1];
@@ -271,7 +289,9 @@ fn test_job_comparison_by_cost() {
     let mut jobs_small = build_pipeline(&plan_small, Arc::clone(&page_handler));
     let job_small = jobs_small.remove(0);
 
-    let plan_large = plan_sql("SELECT id FROM users WHERE age > '18' AND name = 'John' AND status = 'active'").unwrap();
+    let plan_large =
+        plan_sql("SELECT id FROM users WHERE age > '18' AND name = 'John' AND status = 'active'")
+            .unwrap();
     let mut jobs_large = build_pipeline(&plan_large, page_handler);
     let job_large = jobs_large.remove(0);
 

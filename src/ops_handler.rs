@@ -86,10 +86,7 @@ fn sorted_insert_single_column(
 
     let mut updated = (*page_arc).clone();
     let insert_idx = binary_search_insert_index(&updated.page.entries, data);
-    updated
-        .page
-        .entries
-        .insert(insert_idx, Entry::new(data));
+    updated.page.entries.insert(insert_idx, Entry::new(data));
     let new_entry_count = updated.page.entries.len() as u64;
 
     handler.write_back_uncompressed(&page_meta.id, updated);
@@ -261,9 +258,7 @@ fn compare_entry_value(entry: &Entry, value: &str) -> Ordering {
 
 fn compare_strs(left: &str, right: &str) -> Ordering {
     match (left.parse::<f64>(), right.parse::<f64>()) {
-        (Ok(l), Ok(r)) => l
-            .partial_cmp(&r)
-            .unwrap_or(Ordering::Equal),
+        (Ok(l), Ok(r)) => l.partial_cmp(&r).unwrap_or(Ordering::Equal),
         _ => left.cmp(right),
     }
 }

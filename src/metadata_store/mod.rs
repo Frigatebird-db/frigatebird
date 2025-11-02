@@ -613,8 +613,8 @@ impl TableMetaStore {
         if !self.column_chains.contains_key(&key) {
             return None;
         }
-        let count = if entry_count == 0 { 1 } else { entry_count };
-        let descriptor = self.allocate_descriptor(disk_path, offset, alloc_len, actual_len, count);
+        let descriptor =
+            self.allocate_descriptor(disk_path, offset, alloc_len, actual_len, entry_count);
         {
             let chain = self
                 .column_chains
@@ -682,13 +682,13 @@ impl TableMetaStore {
         entry_count: u64,
     ) -> Result<(), CatalogError> {
         let key = TableColumnKey::new(table, column);
-        let chain = self
-            .column_chains
-            .get_mut(&key)
-            .ok_or_else(|| CatalogError::UnknownColumn {
-                table: table.to_string(),
-                column: column.to_string(),
-            })?;
+        let chain =
+            self.column_chains
+                .get_mut(&key)
+                .ok_or_else(|| CatalogError::UnknownColumn {
+                    table: table.to_string(),
+                    column: column.to_string(),
+                })?;
 
         let descriptor = chain.update_last_entry_count(entry_count).ok_or_else(|| {
             CatalogError::UnknownColumn {
@@ -697,8 +697,7 @@ impl TableMetaStore {
             }
         })?;
 
-        self.page_index
-            .insert(descriptor.id.clone(), descriptor);
+        self.page_index.insert(descriptor.id.clone(), descriptor);
         Ok(())
     }
 }

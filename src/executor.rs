@@ -160,11 +160,13 @@ impl Ord for JobHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+    use crate::cache::page_cache::{
+        PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
+    };
     use crate::helpers::compressor::Compressor;
     use crate::metadata_store::PageDirectory;
-    use crate::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
     use crate::page_handler::page_io::PageIO;
+    use crate::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
     use crate::pipeline::{Job, PipelineBatch, PipelineStep};
     use crossbeam::channel;
     use std::sync::{Arc, RwLock};
@@ -178,7 +180,8 @@ mod tests {
         let page_io = Arc::new(PageIO {});
         let fetcher = Arc::new(PageFetcher::new(compressed_cache, page_io));
 
-        let uncompressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
+        let uncompressed_cache =
+            Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
         let compressor = Arc::new(Compressor::new());
         let materializer = Arc::new(PageMaterializer::new(uncompressed_cache, compressor));
 

@@ -6,9 +6,9 @@ use idk_uwu_ig::ops_handler::{
     create_table_from_plan, range_scan_column_entry, update_column_entry, upsert_data_into_column,
     upsert_data_into_table_column,
 };
+use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::page::Page;
 use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
 use std::sync::{Arc, RwLock};
 
@@ -386,15 +386,7 @@ fn sorted_upsert_inserts_in_order() {
     create_table_from_plan(&directory, &plan).expect("create ordered table");
 
     let descriptor = directory
-        .register_page_in_table_with_sizes(
-            "users",
-            "score",
-            "mem://users_score".into(),
-            0,
-            0,
-            0,
-            2,
-        )
+        .register_page_in_table_with_sizes("users", "score", "mem://users_score".into(), 0, 0, 0, 2)
         .expect("register page");
 
     let mut cached = PageCacheEntryUncompressed { page: Page::new() };
@@ -415,9 +407,7 @@ fn sorted_upsert_inserts_in_order() {
         .latest_in_table("users", "score")
         .expect("directory descriptor");
     assert_eq!(latest_from_directory.entry_count, 3);
-    let page = page_handler
-        .get_page(latest)
-        .expect("page loaded");
+    let page = page_handler.get_page(latest).expect("page loaded");
     let values: Vec<&str> = page.page.entries.iter().map(|e| e.get_data()).collect();
     assert_eq!(values, vec!["10", "20", "30"]);
 }

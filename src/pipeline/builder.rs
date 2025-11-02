@@ -5,8 +5,8 @@ use rand::{Rng, distributions::Alphanumeric};
 use sqlparser::ast::Expr;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 /// Lightweight batch placeholder flowing between pipeline stages.
 pub type PipelineBatch = Vec<usize>;
@@ -85,21 +85,18 @@ impl PipelineStep {
         let first_row = *rows.first().unwrap() as u64;
         let last_row = *rows.last().unwrap() as u64;
 
-        let slices = self.page_handler.list_range_in_table(
-            &self.table,
-            &self.column,
-            first_row,
-            last_row,
-        );
+        let slices =
+            self.page_handler
+                .list_range_in_table(&self.table, &self.column, first_row, last_row);
 
         if slices.is_empty() {
             rows.clear();
             return;
         }
 
-        let pages = self.page_handler.get_pages(
-            slices.iter().map(|s| s.descriptor.clone()).collect()
-        );
+        let pages = self
+            .page_handler
+            .get_pages(slices.iter().map(|s| s.descriptor.clone()).collect());
 
         // Build row->value lookup (amortized O(1) per row)
         let mut row_values: HashMap<usize, &str> = HashMap::with_capacity(rows.len());
@@ -231,17 +228,28 @@ fn eval_expr(expr: &Expr, value: &str) -> bool {
 
             match op {
                 BinaryOperator::Eq => compare_values(value, literal, |cmp| cmp == Ordering::Equal),
-                BinaryOperator::NotEq => compare_values(value, literal, |cmp| cmp != Ordering::Equal),
-                BinaryOperator::Gt => compare_values(value, literal, |cmp| cmp == Ordering::Greater),
+                BinaryOperator::NotEq => {
+                    compare_values(value, literal, |cmp| cmp != Ordering::Equal)
+                }
+                BinaryOperator::Gt => {
+                    compare_values(value, literal, |cmp| cmp == Ordering::Greater)
+                }
                 BinaryOperator::GtEq => compare_values(value, literal, |cmp| cmp != Ordering::Less),
                 BinaryOperator::Lt => compare_values(value, literal, |cmp| cmp == Ordering::Less),
-                BinaryOperator::LtEq => compare_values(value, literal, |cmp| cmp != Ordering::Greater),
+                BinaryOperator::LtEq => {
+                    compare_values(value, literal, |cmp| cmp != Ordering::Greater)
+                }
                 _ => true, // Conservative: include row if unsure
             }
         }
         Expr::IsNull(_) => is_null(value),
         Expr::IsNotNull(_) => !is_null(value),
-        Expr::Like { negated, expr: _, pattern, escape_char: _ } => {
+        Expr::Like {
+            negated,
+            expr: _,
+            pattern,
+            escape_char: _,
+        } => {
             let pattern_str = match pattern.as_ref() {
                 Expr::Value(Value::SingleQuotedString(s)) => s.as_str(),
                 _ => return true,
@@ -249,7 +257,12 @@ fn eval_expr(expr: &Expr, value: &str) -> bool {
             let matches = like_match(value, pattern_str, true);
             if *negated { !matches } else { matches }
         }
-        Expr::ILike { negated, expr: _, pattern, escape_char: _ } => {
+        Expr::ILike {
+            negated,
+            expr: _,
+            pattern,
+            escape_char: _,
+        } => {
             let pattern_str = match pattern.as_ref() {
                 Expr::Value(Value::SingleQuotedString(s)) => s.as_str(),
                 _ => return true,
@@ -257,7 +270,12 @@ fn eval_expr(expr: &Expr, value: &str) -> bool {
             let matches = like_match(value, pattern_str, false);
             if *negated { !matches } else { matches }
         }
-        Expr::RLike { negated, expr: _, pattern, .. } => {
+        Expr::RLike {
+            negated,
+            expr: _,
+            pattern,
+            ..
+        } => {
             let pattern_str = match pattern.as_ref() {
                 Expr::Value(Value::SingleQuotedString(s)) => s.as_str(),
                 _ => return true,
@@ -419,7 +437,20 @@ fn days_since_epoch(year: i32, month: u32, day: u32) -> Option<i64> {
     }
 
     // Add days for complete months in the current year
-    let days_in_month = [31, if is_leap_year(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let days_in_month = [
+        31,
+        if is_leap_year(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     for m in 0..(month - 1) as usize {
         total_days += days_in_month[m] as i64;
     }
@@ -543,9 +574,9 @@ impl Ord for VersionTuple {
 
         // For prerelease: empty string (release) > any prerelease
         match (&self.prerelease.is_empty(), &other.prerelease.is_empty()) {
-            (true, false) => Ordering::Greater,  // Release > prerelease
-            (false, true) => Ordering::Less,     // Prerelease < release
-            (true, true) => Ordering::Equal,     // Both releases
+            (true, false) => Ordering::Greater, // Release > prerelease
+            (false, true) => Ordering::Less,    // Prerelease < release
+            (true, true) => Ordering::Equal,    // Both releases
             (false, false) => self.prerelease.cmp(&other.prerelease), // Compare prereleases
         }
     }
@@ -646,8 +677,16 @@ fn try_parse_compact_duration(s: &str) -> Option<i64> {
 /// Pattern matching for LIKE operator.
 /// Supports % (any characters) and _ (single character) wildcards.
 fn like_match(value: &str, pattern: &str, case_sensitive: bool) -> bool {
-    let val = if case_sensitive { value.to_string() } else { value.to_lowercase() };
-    let pat = if case_sensitive { pattern.to_string() } else { pattern.to_lowercase() };
+    let val = if case_sensitive {
+        value.to_string()
+    } else {
+        value.to_lowercase()
+    };
+    let pat = if case_sensitive {
+        pattern.to_string()
+    } else {
+        pattern.to_lowercase()
+    };
 
     like_match_recursive(&val, &pat)
 }
@@ -665,7 +704,10 @@ fn like_match_recursive(value: &str, pattern: &str) -> bool {
                 }
                 // Try matching rest of pattern at each position
                 for i in 0..=value.len() {
-                    if like_match_recursive(&value[i..], p_chars.clone().collect::<String>().as_str()) {
+                    if like_match_recursive(
+                        &value[i..],
+                        p_chars.clone().collect::<String>().as_str(),
+                    ) {
                         return true;
                     }
                 }
@@ -699,9 +741,7 @@ fn regex_match(value: &str, pattern: &str) -> bool {
     let starts_with_anchor = pattern.starts_with('^');
     let ends_with_anchor = pattern.ends_with('$');
 
-    let clean_pattern = pattern
-        .trim_start_matches('^')
-        .trim_end_matches('$');
+    let clean_pattern = pattern.trim_start_matches('^').trim_end_matches('$');
 
     if starts_with_anchor && ends_with_anchor {
         // Exact match needed
@@ -851,11 +891,13 @@ fn generate_pipeline_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+    use crate::cache::page_cache::{
+        PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
+    };
     use crate::helpers::compressor::Compressor;
     use crate::metadata_store::PageDirectory;
-    use crate::page_handler::{PageFetcher, PageLocator, PageMaterializer};
     use crate::page_handler::page_io::PageIO;
+    use crate::page_handler::{PageFetcher, PageLocator, PageMaterializer};
     use crate::sql::models::TableAccess;
     use sqlparser::ast::{BinaryOperator, Expr, Ident, Value};
     use std::sync::{Arc, RwLock};
@@ -881,7 +923,8 @@ mod tests {
         let page_io = Arc::new(PageIO {});
         let fetcher = Arc::new(PageFetcher::new(compressed_cache, page_io));
 
-        let uncompressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
+        let uncompressed_cache =
+            Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
         let compressor = Arc::new(Compressor::new());
         let materializer = Arc::new(PageMaterializer::new(uncompressed_cache, compressor));
 
@@ -1071,10 +1114,7 @@ mod tests {
             BinaryOperator::Lt,
             Expr::Value(Value::Number("65".to_string(), false)),
         );
-        let filter = FilterExpr::And(vec![
-            FilterExpr::Leaf(expr1),
-            FilterExpr::Leaf(expr2),
-        ]);
+        let filter = FilterExpr::And(vec![FilterExpr::Leaf(expr1), FilterExpr::Leaf(expr2)]);
         assert!(eval_filter(&filter, "25"));
         assert!(eval_filter(&filter, "50"));
         assert!(!eval_filter(&filter, "10")); // Too young
@@ -1093,10 +1133,7 @@ mod tests {
             BinaryOperator::Lt,
             Expr::Value(Value::Number("200".to_string(), false)),
         );
-        let filter = FilterExpr::And(vec![
-            FilterExpr::Leaf(expr1),
-            FilterExpr::Leaf(expr2),
-        ]);
+        let filter = FilterExpr::And(vec![FilterExpr::Leaf(expr1), FilterExpr::Leaf(expr2)]);
         // First condition false, should short-circuit
         assert!(!eval_filter(&filter, "50"));
     }
@@ -1113,10 +1150,7 @@ mod tests {
             BinaryOperator::Eq,
             Expr::Value(Value::SingleQuotedString("pending".to_string())),
         );
-        let filter = FilterExpr::Or(vec![
-            FilterExpr::Leaf(expr1),
-            FilterExpr::Leaf(expr2),
-        ]);
+        let filter = FilterExpr::Or(vec![FilterExpr::Leaf(expr1), FilterExpr::Leaf(expr2)]);
         assert!(eval_filter(&filter, "active"));
         assert!(eval_filter(&filter, "pending"));
         assert!(!eval_filter(&filter, "inactive"));
@@ -1145,10 +1179,7 @@ mod tests {
             FilterExpr::Leaf(age_gt.clone()),
             FilterExpr::Leaf(age_lt),
         ]);
-        let combined = FilterExpr::And(vec![
-            age_filter,
-            FilterExpr::Leaf(status_eq.clone()),
-        ]);
+        let combined = FilterExpr::And(vec![age_filter, FilterExpr::Leaf(status_eq.clone())]);
 
         // This would require actually checking both columns, which our current
         // implementation doesn't support (it only checks one column at a time)
@@ -1159,8 +1190,8 @@ mod tests {
 
     // Tests for apply_filters
     use crate::entry::Entry;
+    use crate::metadata_store::{ColumnDefinition, TableDefinition};
     use crate::page::Page;
-    use crate::metadata_store::{TableDefinition, ColumnDefinition};
 
     #[test]
     fn test_apply_filters_empty_batch() {
@@ -1765,7 +1796,9 @@ mod tests {
         let expr = Expr::Like {
             negated: false,
             expr: Box::new(make_ident_expr("email")),
-            pattern: Box::new(Expr::Value(Value::SingleQuotedString("%@gmail.com".to_string()))),
+            pattern: Box::new(Expr::Value(Value::SingleQuotedString(
+                "%@gmail.com".to_string(),
+            ))),
             escape_char: None,
         };
         assert!(eval_expr(&expr, "user@gmail.com"));
@@ -1778,7 +1811,9 @@ mod tests {
         let expr = Expr::Like {
             negated: false,
             expr: Box::new(make_ident_expr("text")),
-            pattern: Box::new(Expr::Value(Value::SingleQuotedString("%world%".to_string()))),
+            pattern: Box::new(Expr::Value(Value::SingleQuotedString(
+                "%world%".to_string(),
+            ))),
             escape_char: None,
         };
         assert!(eval_expr(&expr, "hello world"));
@@ -1985,7 +2020,7 @@ mod tests {
             Expr::Value(Value::SingleQuotedString("1.0.0-alpha".to_string())),
         );
         assert!(eval_expr(&expr, "1.0.0-beta")); // beta > alpha lexicographically
-        assert!(eval_expr(&expr, "1.0.0"));       // Release > prerelease
+        assert!(eval_expr(&expr, "1.0.0")); // Release > prerelease
     }
 
     // ========== Duration Comparison Tests ==========
@@ -2095,7 +2130,9 @@ mod tests {
         let expr = Expr::RLike {
             negated: false,
             expr: Box::new(make_ident_expr("text")),
-            pattern: Box::new(Expr::Value(Value::SingleQuotedString("^exact$".to_string()))),
+            pattern: Box::new(Expr::Value(Value::SingleQuotedString(
+                "^exact$".to_string(),
+            ))),
             regexp: false,
         };
         assert!(eval_expr(&expr, "exact"));
