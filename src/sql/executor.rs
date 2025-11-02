@@ -8,15 +8,25 @@ use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
 use sqlparser::ast::{
-    Assignment, BinaryOperator, Expr, FromTable, GroupByExpr, ObjectName, Offset, OrderByExpr,
-    Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, UnaryOperator,
-    Value, WildcardAdditionalOptions,
+    Assignment, BinaryOperator, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
+    GroupByExpr, ObjectName, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement,
+    TableFactor, TableWithJoins, UnaryOperator, Value, WildcardAdditionalOptions,
 };
 use sqlparser::parser::ParserError;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+
+const NULL_SENTINEL: &str = "\u{0001}";
+
+fn encode_null() -> String {
+    NULL_SENTINEL.to_string()
+}
+
+fn is_encoded_null(value: &str) -> bool {
+    value == NULL_SENTINEL
+}
 
 #[derive(Debug)]
 pub enum SqlExecutionError {
@@ -62,7 +72,97 @@ impl From<crate::sql::models::PlannerError> for SqlExecutionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectResult {
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    pub rows: Vec<Vec<Option<String>>>,
+}
+
+#[derive(Debug, Clone)]
+enum CachedValue {
+    Null,
+    Text(String),
+}
+
+impl CachedValue {
+    fn from_entry(entry: &Entry) -> Self {
+        let data = entry.get_data();
+        if is_encoded_null(data) {
+            CachedValue::Null
+        } else {
+            CachedValue::Text(data.to_string())
+        }
+    }
+
+    fn into_option_string(self) -> Option<String> {
+        match self {
+            CachedValue::Null => None,
+            CachedValue::Text(text) => Some(text),
+        }
+    }
+}
+
+fn cached_to_scalar(value: &CachedValue) -> ScalarValue {
+    match value {
+        CachedValue::Null => ScalarValue::Null,
+        CachedValue::Text(text) => ScalarValue::Text(text.clone()),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ScalarValue {
+    Null,
+    Int(i128),
+    Float(f64),
+    Text(String),
+    Bool(bool),
+}
+
+impl ScalarValue {
+    fn is_null(&self) -> bool {
+        matches!(self, ScalarValue::Null)
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            ScalarValue::Null => None,
+            ScalarValue::Int(value) => Some(*value as f64),
+            ScalarValue::Float(value) => Some(*value),
+            ScalarValue::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+            ScalarValue::Text(text) => text.parse::<f64>().ok(),
+        }
+    }
+
+    fn as_i128(&self) -> Option<i128> {
+        match self {
+            ScalarValue::Null => None,
+            ScalarValue::Int(value) => Some(*value),
+            ScalarValue::Float(value) => Some(*value as i128),
+            ScalarValue::Bool(value) => Some(if *value { 1 } else { 0 }),
+            ScalarValue::Text(text) => text.parse::<i128>().ok(),
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            ScalarValue::Null => None,
+            ScalarValue::Bool(value) => Some(*value),
+            ScalarValue::Int(value) => Some(*value != 0),
+            ScalarValue::Float(value) => Some(*value != 0.0),
+            ScalarValue::Text(text) => match text.to_lowercase().as_str() {
+                "true" | "t" | "1" | "yes" | "y" => Some(true),
+                "false" | "f" | "0" | "no" | "n" => Some(false),
+                _ => None,
+            },
+        }
+    }
+
+    fn into_option_string(self) -> Option<String> {
+        match self {
+            ScalarValue::Null => None,
+            ScalarValue::Int(value) => Some(value.to_string()),
+            ScalarValue::Float(value) => Some(format_float(value)),
+            ScalarValue::Text(text) => Some(text),
+            ScalarValue::Bool(value) => Some(if value { "true".into() } else { "false".into() }),
+        }
+    }
 }
 
 pub struct SqlExecutor {
@@ -241,13 +341,7 @@ impl SqlExecutor {
             column_ordinals.insert(column.name.clone(), column.ordinal);
         }
 
-        let (result_columns, projection_ordinals) = build_projection(
-            projection,
-            &columns,
-            &column_ordinals,
-            &table_name,
-            table_alias.as_deref(),
-        )?;
+        let projection_items = projection;
 
         let selection = selection.ok_or_else(|| {
             SqlExecutionError::Unsupported(
@@ -275,9 +369,52 @@ impl SqlExecutor {
             })?);
         }
 
+        let aggregate_query = projection_items
+            .iter()
+            .any(|item| select_item_contains_aggregate(item));
+
+        if aggregate_query && (limit_expr.is_some() || offset_expr.is_some()) {
+            return Err(SqlExecutionError::Unsupported(
+                "aggregate SELECT does not support LIMIT/OFFSET".into(),
+            ));
+        }
+
+        let mut aggregate_plan_opt: Option<AggregateProjectionPlan> = None;
+        let mut projection_ordinals_opt: Option<Vec<usize>> = None;
+        let mut required_ordinals: BTreeSet<usize>;
+        let result_columns: Vec<String>;
+
+        if aggregate_query {
+            let plan = plan_aggregate_projection(&projection_items, &column_ordinals, &table_name)?;
+            required_ordinals = plan.required_ordinals.clone();
+            result_columns = plan.headers.clone();
+            aggregate_plan_opt = Some(plan);
+        } else {
+            let (cols, projection_ordinals_vec) = build_projection(
+                projection_items.clone(),
+                &columns,
+                &column_ordinals,
+                &table_name,
+                table_alias.as_deref(),
+            )?;
+            required_ordinals = projection_ordinals_vec.iter().copied().collect();
+            result_columns = cols;
+            projection_ordinals_opt = Some(projection_ordinals_vec);
+        }
+
+        for column in &sort_columns {
+            required_ordinals.insert(column.ordinal);
+        }
+
+        let predicate_ordinals =
+            collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
+        required_ordinals.extend(predicate_ordinals);
+
+        println!("required ordinals: {:?}", required_ordinals);
+
         let mut candidate_rows =
             self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?;
-        if candidate_rows.is_empty() {
+        if candidate_rows.is_empty() && !aggregate_query {
             return Ok(SelectResult {
                 columns: result_columns,
                 rows: Vec::new(),
@@ -286,15 +423,6 @@ impl SqlExecutor {
 
         candidate_rows.sort_unstable();
         candidate_rows.dedup();
-
-        let mut required_ordinals: BTreeSet<usize> = projection_ordinals.iter().copied().collect();
-        for column in &sort_columns {
-            required_ordinals.insert(column.ordinal);
-        }
-
-        let predicate_ordinals =
-            collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
-        required_ordinals.extend(predicate_ordinals);
 
         let materialized = materialize_columns(
             &self.page_handler,
@@ -309,6 +437,20 @@ impl SqlExecutor {
             if evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)? {
                 matching_rows.push(row_idx);
             }
+        }
+
+        if aggregate_query {
+            let dataset = AggregateDataset {
+                rows: matching_rows.as_slice(),
+                materialized: &materialized,
+                column_ordinals: &column_ordinals,
+            };
+            let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");
+            let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
+            return Ok(SelectResult {
+                columns: result_columns,
+                rows: vec![output_row],
+            });
         }
 
         if matching_rows.is_empty() {
@@ -329,18 +471,20 @@ impl SqlExecutor {
         };
         let window = &matching_rows[start..end];
 
+        let projection_ordinals = projection_ordinals_opt.expect("projection ordinals required");
+
         let mut rows = Vec::with_capacity(window.len());
         for &row_idx in window {
             let mut projected = Vec::with_capacity(projection_ordinals.len());
             for &ordinal in &projection_ordinals {
-                let value = materialized
+                let cached = materialized
                     .get(&ordinal)
                     .and_then(|column_map| column_map.get(&row_idx))
                     .cloned()
                     .or_else(|| {
                         self.page_handler
                             .read_entry_at(&table_name, &columns[ordinal].name, row_idx)
-                            .map(|entry| entry.get_data().to_string())
+                            .map(|entry| CachedValue::from_entry(&entry))
                     })
                     .ok_or_else(|| {
                         SqlExecutionError::OperationFailed(format!(
@@ -348,7 +492,7 @@ impl SqlExecutor {
                             columns[ordinal].name
                         ))
                     })?;
-                projected.push(value);
+                projected.push(cached.into_option_string());
             }
             rows.push(projected);
         }
@@ -883,7 +1027,7 @@ impl SqlExecutor {
     }
 }
 
-type MaterializedColumns = HashMap<usize, HashMap<u64, String>>;
+type MaterializedColumns = HashMap<usize, HashMap<u64, CachedValue>>;
 
 fn collect_sort_key_filters(
     expr: &Expr,
@@ -1041,7 +1185,1375 @@ fn collect_expr_column_names(expr: &Expr, columns: &mut BTreeSet<String>) {
             collect_expr_column_names(left, columns);
             collect_expr_column_names(right, columns);
         }
+        Expr::Function(function) => {
+            for function_arg in &function.args {
+                match function_arg {
+                    FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+                        if let FunctionArgExpr::Expr(expr) = arg {
+                            collect_expr_column_names(expr, columns);
+                        }
+                    }
+                }
+            }
+            if let Some(filter) = &function.filter {
+                collect_expr_column_names(filter, columns);
+            }
+            for order in &function.order_by {
+                collect_expr_column_names(&order.expr, columns);
+            }
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(op) = operand {
+                collect_expr_column_names(op, columns);
+            }
+            for condition in conditions {
+                collect_expr_column_names(condition, columns);
+            }
+            for result in results {
+                collect_expr_column_names(result, columns);
+            }
+            if let Some(else_expr) = else_result {
+                collect_expr_column_names(else_expr, columns);
+            }
+        }
         _ => {}
+    }
+}
+
+fn select_item_contains_aggregate(item: &SelectItem) -> bool {
+    match item {
+        SelectItem::UnnamedExpr(expr) => expr_contains_aggregate(expr),
+        SelectItem::ExprWithAlias { expr, .. } => expr_contains_aggregate(expr),
+        SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => false,
+    }
+}
+
+fn expr_contains_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function(function) => {
+            if is_aggregate_function(function) {
+                return true;
+            }
+            function.args.iter().any(|arg| match arg {
+                FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => match arg {
+                    FunctionArgExpr::Expr(expr) => expr_contains_aggregate(expr),
+                    FunctionArgExpr::QualifiedWildcard(_) => false,
+                    FunctionArgExpr::Wildcard => false,
+                },
+            }) || function
+                .order_by
+                .iter()
+                .any(|order| expr_contains_aggregate(&order.expr))
+                || function
+                    .filter
+                    .as_ref()
+                    .map(|filter| expr_contains_aggregate(filter.as_ref()))
+                    .unwrap_or(false)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            expr_contains_aggregate(left) || expr_contains_aggregate(right)
+        }
+        Expr::UnaryOp { expr, .. } | Expr::Nested(expr) => expr_contains_aggregate(expr),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_aggregate(expr)
+                || expr_contains_aggregate(low)
+                || expr_contains_aggregate(high)
+        }
+        Expr::InList { expr, list, .. } => {
+            expr_contains_aggregate(expr) || list.iter().any(expr_contains_aggregate)
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand
+                .as_ref()
+                .map(|expr| expr_contains_aggregate(expr))
+                .unwrap_or(false)
+                || conditions.iter().any(expr_contains_aggregate)
+                || results.iter().any(expr_contains_aggregate)
+                || else_result
+                    .as_ref()
+                    .map(|expr| expr_contains_aggregate(expr))
+                    .unwrap_or(false)
+        }
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::RLike { expr, pattern, .. } => {
+            expr_contains_aggregate(expr) || expr_contains_aggregate(pattern)
+        }
+        Expr::Exists { .. } | Expr::Subquery(_) => false,
+        _ => false,
+    }
+}
+
+fn is_aggregate_function(function: &Function) -> bool {
+    let name = function
+        .name
+        .0
+        .last()
+        .map(|ident| ident.value.to_uppercase())
+        .unwrap_or_default();
+
+    matches!(
+        name.as_str(),
+        "COUNT"
+            | "SUM"
+            | "AVG"
+            | "MIN"
+            | "MAX"
+            | "VARIANCE"
+            | "VAR_POP"
+            | "VAR_SAMP"
+            | "VARIANCE_POP"
+            | "VARIANCE_SAMP"
+            | "STDDEV"
+            | "STDDEV_POP"
+            | "STDDEV_SAMP"
+            | "PERCENTILE_CONT"
+    )
+}
+
+struct AggregateProjectionPlan {
+    outputs: Vec<AggregateProjection>,
+    required_ordinals: BTreeSet<usize>,
+    headers: Vec<String>,
+}
+
+struct AggregateProjection {
+    expr: Expr,
+}
+
+struct AggregateDataset<'a> {
+    rows: &'a [u64],
+    materialized: &'a MaterializedColumns,
+    column_ordinals: &'a HashMap<String, usize>,
+}
+
+impl<'a> AggregateDataset<'a> {
+    fn column_value(&self, column: &str, row_idx: u64) -> Option<&CachedValue> {
+        self.column_ordinals
+            .get(column)
+            .and_then(|ordinal| self.materialized.get(ordinal))
+            .and_then(|map| map.get(&row_idx))
+    }
+}
+
+fn plan_aggregate_projection(
+    items: &[SelectItem],
+    column_ordinals: &HashMap<String, usize>,
+    table: &str,
+) -> Result<AggregateProjectionPlan, SqlExecutionError> {
+    let mut outputs = Vec::with_capacity(items.len());
+    let mut headers = Vec::with_capacity(items.len());
+    let mut required_ordinals = BTreeSet::new();
+
+    for item in items {
+        match item {
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
+                return Err(SqlExecutionError::Unsupported(
+                    "aggregate SELECT does not support wildcard projections".into(),
+                ));
+            }
+            SelectItem::UnnamedExpr(expr) => {
+                let label = expr.to_string();
+                let expr_clone = expr.clone();
+                let mut ordinals =
+                    collect_expr_column_ordinals(&expr_clone, column_ordinals, table)?;
+                collect_function_order_ordinals(
+                    &expr_clone,
+                    column_ordinals,
+                    table,
+                    &mut ordinals,
+                )?;
+                required_ordinals.extend(ordinals.iter().copied());
+                headers.push(label);
+                outputs.push(AggregateProjection { expr: expr_clone });
+            }
+            SelectItem::ExprWithAlias { expr, alias } => {
+                let label = alias.value.clone();
+                let expr_clone = expr.clone();
+                let mut ordinals =
+                    collect_expr_column_ordinals(&expr_clone, column_ordinals, table)?;
+                collect_function_order_ordinals(
+                    &expr_clone,
+                    column_ordinals,
+                    table,
+                    &mut ordinals,
+                )?;
+                required_ordinals.extend(ordinals.iter().copied());
+                headers.push(label);
+                outputs.push(AggregateProjection { expr: expr_clone });
+            }
+        }
+    }
+
+    Ok(AggregateProjectionPlan {
+        outputs,
+        required_ordinals,
+        headers,
+    })
+}
+
+fn collect_function_order_ordinals(
+    expr: &Expr,
+    column_ordinals: &HashMap<String, usize>,
+    table: &str,
+    out: &mut BTreeSet<usize>,
+) -> Result<(), SqlExecutionError> {
+    match expr {
+        Expr::Function(function) => {
+            for order in &function.order_by {
+                let ordinals = collect_expr_column_ordinals(&order.expr, column_ordinals, table)?;
+                out.extend(ordinals);
+            }
+            if let Some(filter) = &function.filter {
+                let ordinals = collect_expr_column_ordinals(filter, column_ordinals, table)?;
+                out.extend(ordinals);
+                collect_function_order_ordinals(filter, column_ordinals, table, out)?;
+            }
+            for function_arg in &function.args {
+                match function_arg {
+                    FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+                        if let FunctionArgExpr::Expr(inner) = arg {
+                            collect_function_order_ordinals(inner, column_ordinals, table, out)?;
+                        }
+                    }
+                }
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_function_order_ordinals(left, column_ordinals, table, out)?;
+            collect_function_order_ordinals(right, column_ordinals, table, out)?;
+        }
+        Expr::UnaryOp { expr, .. } | Expr::Nested(expr) => {
+            collect_function_order_ordinals(expr, column_ordinals, table, out)?;
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            collect_function_order_ordinals(expr, column_ordinals, table, out)?;
+            collect_function_order_ordinals(low, column_ordinals, table, out)?;
+            collect_function_order_ordinals(high, column_ordinals, table, out)?;
+        }
+        Expr::InList { expr, list, .. } => {
+            collect_function_order_ordinals(expr, column_ordinals, table, out)?;
+            for item in list {
+                collect_function_order_ordinals(item, column_ordinals, table, out)?;
+            }
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                collect_function_order_ordinals(operand, column_ordinals, table, out)?;
+            }
+            for cond in conditions {
+                collect_function_order_ordinals(cond, column_ordinals, table, out)?;
+            }
+            for res in results {
+                collect_function_order_ordinals(res, column_ordinals, table, out)?;
+            }
+            if let Some(else_res) = else_result {
+                collect_function_order_ordinals(else_res, column_ordinals, table, out)?;
+            }
+        }
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::RLike { expr, pattern, .. } => {
+            collect_function_order_ordinals(expr, column_ordinals, table, out)?;
+            collect_function_order_ordinals(pattern, column_ordinals, table, out)?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn evaluate_aggregate_outputs(
+    plan: &AggregateProjectionPlan,
+    dataset: &AggregateDataset,
+) -> Result<Vec<Option<String>>, SqlExecutionError> {
+    let mut row = Vec::with_capacity(plan.outputs.len());
+    for output in &plan.outputs {
+        let value = evaluate_scalar_expression(&output.expr, dataset)?;
+        row.push(value.into_option_string());
+    }
+    Ok(row)
+}
+
+fn evaluate_scalar_expression(
+    expr: &Expr,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    match expr {
+        Expr::Value(Value::SingleQuotedString(s)) => Ok(ScalarValue::Text(s.clone())),
+        Expr::Value(Value::Number(n, _)) => Ok(match n.parse::<f64>() {
+            Ok(num) => ScalarValue::Float(num),
+            Err(_) => ScalarValue::Text(n.clone()),
+        }),
+        Expr::Value(Value::Boolean(b)) => Ok(ScalarValue::Bool(*b)),
+        Expr::Value(Value::Null) => Ok(ScalarValue::Null),
+        Expr::Function(function) => {
+            if is_aggregate_function(function) {
+                evaluate_aggregate_function(function, dataset)
+            } else {
+                evaluate_scalar_function(function, dataset)
+            }
+        }
+        Expr::BinaryOp { left, op, right } => {
+            let lhs = evaluate_scalar_expression(left, dataset)?;
+            let rhs = evaluate_scalar_expression(right, dataset)?;
+            match op {
+                BinaryOperator::Plus => combine_numeric(&lhs, &rhs, |a, b| a + b)
+                    .ok_or_else(|| SqlExecutionError::Unsupported("non-numeric addition".into())),
+                BinaryOperator::Minus => {
+                    combine_numeric(&lhs, &rhs, |a, b| a - b).ok_or_else(|| {
+                        SqlExecutionError::Unsupported("non-numeric subtraction".into())
+                    })
+                }
+                BinaryOperator::Multiply => {
+                    combine_numeric(&lhs, &rhs, |a, b| a * b).ok_or_else(|| {
+                        SqlExecutionError::Unsupported("non-numeric multiplication".into())
+                    })
+                }
+                BinaryOperator::Divide => combine_numeric(&lhs, &rhs, |a, b| a / b)
+                    .ok_or_else(|| SqlExecutionError::Unsupported("non-numeric division".into())),
+                BinaryOperator::Modulo => combine_numeric(&lhs, &rhs, |a, b| a % b)
+                    .ok_or_else(|| SqlExecutionError::Unsupported("non-numeric modulo".into())),
+                BinaryOperator::And => {
+                    let a = lhs.as_bool().unwrap_or(false);
+                    let b = rhs.as_bool().unwrap_or(false);
+                    Ok(ScalarValue::Bool(a && b))
+                }
+                BinaryOperator::Or => {
+                    let a = lhs.as_bool().unwrap_or(false);
+                    let b = rhs.as_bool().unwrap_or(false);
+                    Ok(ScalarValue::Bool(a || b))
+                }
+                BinaryOperator::Xor => {
+                    let a = lhs.as_bool().unwrap_or(false);
+                    let b = rhs.as_bool().unwrap_or(false);
+                    Ok(ScalarValue::Bool(a ^ b))
+                }
+                BinaryOperator::Eq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::NotEq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord != Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::Gt => {
+                    let result = match compare_scalar_values(&lhs, &rhs) {
+                        Some(ord) => ord == Ordering::Greater,
+                        None => false,
+                    };
+                    println!(
+                        "row compare {:?} > {:?} => {}",
+                        lhs,
+                        rhs,
+                        result
+                    );
+                    Ok(ScalarValue::Bool(result))
+                }
+                BinaryOperator::GtEq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Greater || ord == Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::Lt => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Less)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::LtEq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Less || ord == Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                _ => Err(SqlExecutionError::Unsupported(format!(
+                    "unsupported operator in aggregate expression: {op:?}"
+                ))),
+            }
+        }
+        Expr::UnaryOp { op, expr } => {
+            let value = evaluate_scalar_expression(expr, dataset)?;
+            match op {
+                UnaryOperator::Plus => Ok(value),
+                UnaryOperator::Minus => {
+                    let num = value.as_f64().ok_or_else(|| {
+                        SqlExecutionError::Unsupported(
+                            "unsupported unary minus on non-numeric value".into(),
+                        )
+                    })?;
+                    Ok(scalar_from_f64(-num))
+                }
+                UnaryOperator::Not => Ok(ScalarValue::Bool(!value.as_bool().unwrap_or(false))),
+                _ => Err(SqlExecutionError::Unsupported(format!(
+                    "unsupported unary operator {op:?}"
+                ))),
+            }
+        }
+        Expr::Nested(inner) => evaluate_scalar_expression(inner, dataset),
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => evaluate_case_expression(
+            operand.as_deref(),
+            conditions,
+            results,
+            else_result.as_deref(),
+            dataset,
+        ),
+        Expr::Like {
+            expr,
+            pattern,
+            escape_char: _,
+            ..
+        } => {
+            let value = evaluate_scalar_expression(expr, dataset)?;
+            let pattern_value = evaluate_scalar_expression(pattern, dataset)?;
+            let matches = match (
+                value.into_option_string(),
+                pattern_value.into_option_string(),
+            ) {
+                (Some(value), Some(pattern)) => like_match(&value, &pattern, true),
+                _ => false,
+            };
+            Ok(ScalarValue::Bool(matches))
+        }
+        Expr::ILike {
+            expr,
+            pattern,
+            escape_char: _,
+            ..
+        } => {
+            let value = evaluate_scalar_expression(expr, dataset)?;
+            let pattern_value = evaluate_scalar_expression(pattern, dataset)?;
+            let matches = match (
+                value.into_option_string(),
+                pattern_value.into_option_string(),
+            ) {
+                (Some(value), Some(pattern)) => like_match(&value, &pattern, false),
+                _ => false,
+            };
+            Ok(ScalarValue::Bool(matches))
+        }
+        Expr::RLike {
+            expr,
+            pattern,
+            negated,
+            ..
+        } => {
+            let value = evaluate_scalar_expression(expr, dataset)?;
+            let pattern_value = evaluate_scalar_expression(pattern, dataset)?;
+            let matches = match (
+                value.into_option_string(),
+                pattern_value.into_option_string(),
+            ) {
+                (Some(value), Some(pattern)) => regex_match(&value, &pattern),
+                _ => false,
+            };
+            Ok(ScalarValue::Bool(if *negated { !matches } else { matches }))
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
+            let target = evaluate_scalar_expression(expr, dataset)?;
+            let low_value = evaluate_scalar_expression(low, dataset)?;
+            let high_value = evaluate_scalar_expression(high, dataset)?;
+            let cmp_low = compare_scalar_values(&target, &low_value).unwrap_or(Ordering::Less);
+            let cmp_high = compare_scalar_values(&target, &high_value).unwrap_or(Ordering::Greater);
+            let between = (cmp_low == Ordering::Greater || cmp_low == Ordering::Equal)
+                && (cmp_high == Ordering::Less || cmp_high == Ordering::Equal);
+            Ok(ScalarValue::Bool(if *negated { !between } else { between }))
+        }
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let target = evaluate_scalar_expression(expr, dataset)?;
+            let mut matches = false;
+            for item in list {
+                let candidate = evaluate_scalar_expression(item, dataset)?;
+                if compare_scalar_values(&target, &candidate)
+                    .map(|ord| ord == Ordering::Equal)
+                    .unwrap_or(false)
+                {
+                    matches = true;
+                    break;
+                }
+            }
+            Ok(ScalarValue::Bool(if *negated { !matches } else { matches }))
+        }
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => Err(SqlExecutionError::Unsupported(
+            "aggregated SELECT cannot project plain columns".into(),
+        )),
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "unsupported expression in aggregate projection: {expr:?}"
+        ))),
+    }
+}
+
+fn evaluate_aggregate_function(
+    function: &Function,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    let name = function
+        .name
+        .0
+        .last()
+        .map(|ident| ident.value.to_uppercase())
+        .unwrap_or_default();
+
+    match name.as_str() {
+        "COUNT" => evaluate_count(function, dataset),
+        "SUM" | "AVG" | "MIN" | "MAX" | "VARIANCE" | "VAR_POP" | "VAR_SAMP" | "VARIANCE_POP"
+        | "VARIANCE_SAMP" | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" => {
+            evaluate_numeric_aggregate(name.as_str(), function, dataset)
+        }
+        "PERCENTILE_CONT" => evaluate_percentile_cont(function, dataset),
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "unsupported aggregate function {name}"
+        ))),
+    }
+}
+
+fn evaluate_count(
+    function: &Function,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if function.args.is_empty()
+        || matches!(
+            function.args.get(0),
+            Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard))
+        )
+    {
+        return Ok(ScalarValue::Int(dataset.rows.len() as i128));
+    }
+
+    let expr = extract_single_argument(function)?;
+    if function.distinct {
+        let mut set: HashSet<String> = HashSet::new();
+        for &row in dataset.rows {
+            let value = evaluate_row_expr(expr, row, dataset)?;
+            if let Some(text) = value.into_option_string() {
+                set.insert(text);
+            }
+        }
+        Ok(ScalarValue::Int(set.len() as i128))
+    } else {
+        let mut count: i128 = 0;
+        for &row in dataset.rows {
+            let value = evaluate_row_expr(expr, row, dataset)?;
+            if !value.is_null() {
+                count += 1;
+            }
+        }
+        Ok(ScalarValue::Int(count))
+    }
+}
+
+fn evaluate_numeric_aggregate(
+    name: &str,
+    function: &Function,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    let expr = extract_single_argument(function)?;
+    let mut count: i128 = 0;
+    let mut sum = 0.0;
+    let mut min_value: Option<f64> = None;
+    let mut max_value: Option<f64> = None;
+    let mut mean = 0.0;
+    let mut m2 = 0.0;
+
+    println!("dataset rows: {:?}", dataset.rows);
+    println!("materialized snapshot: {:?}", dataset.materialized);
+    for &row in dataset.rows {
+        let value = evaluate_row_expr(expr, row, dataset)?;
+        println!("aggregate row value: {:?}", value);
+        if let Some(num) = value.as_f64() {
+            min_value = Some(min_value.map(|m| m.min(num)).unwrap_or(num));
+            max_value = Some(max_value.map(|m| m.max(num)).unwrap_or(num));
+            count += 1;
+            sum += num;
+
+            let delta = num - mean;
+            mean += delta / count as f64;
+            let delta2 = num - mean;
+            m2 += delta * delta2;
+        }
+    }
+
+    match name {
+        "SUM" => {
+            if count == 0 {
+                Ok(ScalarValue::Null)
+            } else {
+                Ok(scalar_from_f64(sum))
+            }
+        }
+        "AVG" => {
+            if count == 0 {
+                Ok(ScalarValue::Null)
+            } else {
+                Ok(scalar_from_f64(sum / count as f64))
+            }
+        }
+        "MIN" => Ok(min_value.map(scalar_from_f64).unwrap_or(ScalarValue::Null)),
+        "MAX" => Ok(max_value.map(scalar_from_f64).unwrap_or(ScalarValue::Null)),
+        "VARIANCE" | "VAR_POP" | "VARIANCE_POP" | "STDDEV" | "STDDEV_POP" => {
+            if count == 0 {
+                Ok(ScalarValue::Null)
+            } else {
+                let variance = m2 / count as f64;
+                if name.starts_with("STDDEV") {
+                    Ok(scalar_from_f64(variance.sqrt()))
+                } else {
+                    Ok(scalar_from_f64(variance))
+                }
+            }
+        }
+        "VAR_SAMP" | "VARIANCE_SAMP" | "STDDEV_SAMP" => {
+            if count <= 1 {
+                Ok(ScalarValue::Null)
+            } else {
+                let variance = m2 / (count as f64 - 1.0);
+                if name.starts_with("STDDEV") {
+                    Ok(scalar_from_f64(variance.sqrt()))
+                } else {
+                    Ok(scalar_from_f64(variance))
+                }
+            }
+        }
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "unsupported numeric aggregate {name}"
+        ))),
+    }
+}
+
+fn evaluate_percentile_cont(
+    function: &Function,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if function.args.is_empty() {
+        return Err(SqlExecutionError::Unsupported(
+            "percentile_cont requires at least one argument".into(),
+        ));
+    }
+
+    let percent_expr = match &function.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "percentile_cont requires literal percentile argument".into(),
+            ))
+        }
+    };
+
+    let percent = evaluate_scalar_expression(percent_expr, dataset)?
+        .as_f64()
+        .ok_or_else(|| {
+            SqlExecutionError::Unsupported("percentile_cont requires numeric percentile".into())
+        })?;
+    if !(0.0..=1.0).contains(&percent) {
+        return Err(SqlExecutionError::Unsupported(
+            "percentile_cont percentile must be between 0 and 1".into(),
+        ));
+    }
+
+    let order_expr = if let Some(order) = function.order_by.first() {
+        &order.expr
+    } else if function.args.len() >= 2 {
+        match &function.args[1] {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+            | FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(expr),
+                ..
+            } => expr,
+            _ => {
+                return Err(SqlExecutionError::Unsupported(
+                    "percentile_cont requires an expression to order".into(),
+                ))
+            }
+        }
+    } else {
+        return Err(SqlExecutionError::Unsupported(
+            "percentile_cont requires an ORDER BY expression".into(),
+        ));
+    };
+    let mut values: Vec<f64> = Vec::with_capacity(dataset.rows.len());
+    for &row in dataset.rows {
+        let value = evaluate_row_expr(order_expr, row, dataset)?;
+        if let Some(num) = value.as_f64() {
+            values.push(num);
+        }
+    }
+
+    if values.is_empty() {
+        return Ok(ScalarValue::Null);
+    }
+
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let len = values.len() as f64;
+    let position = percent * (len - 1.0);
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+
+    if lower == upper {
+        Ok(scalar_from_f64(values[lower]))
+    } else {
+        let lower_value = values[lower];
+        let upper_value = values[upper];
+        let fraction = position - lower as f64;
+        Ok(scalar_from_f64(
+            lower_value + (upper_value - lower_value) * fraction,
+        ))
+    }
+}
+
+fn extract_single_argument<'a>(function: &'a Function) -> Result<&'a Expr, SqlExecutionError> {
+    if function.args.len() != 1 {
+        return Err(SqlExecutionError::Unsupported(format!(
+            "function {} requires exactly one argument",
+            function.name
+        )));
+    }
+    match &function.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => Ok(expr),
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "unsupported argument for function {}",
+            function.name
+        ))),
+    }
+}
+
+fn evaluate_case_expression(
+    operand: Option<&Expr>,
+    conditions: &[Expr],
+    results: &[Expr],
+    else_result: Option<&Expr>,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if conditions.len() != results.len() {
+        return Err(SqlExecutionError::Unsupported(
+            "CASE expression requires matching WHEN and THEN clauses".into(),
+        ));
+    }
+
+    let operand_value = if let Some(expr) = operand {
+        Some(evaluate_scalar_expression(expr, dataset)?)
+    } else {
+        None
+    };
+
+    for (condition, result) in conditions.iter().zip(results.iter()) {
+        let matches = if let Some(op_value) = &operand_value {
+            let cond_value = evaluate_scalar_expression(condition, dataset)?;
+            compare_scalar_values(op_value, &cond_value)
+                .map(|ord| ord == Ordering::Equal)
+                .unwrap_or(false)
+        } else {
+            evaluate_scalar_expression(condition, dataset)?
+                .as_bool()
+                .unwrap_or(false)
+        };
+
+        if matches {
+            return evaluate_scalar_expression(result, dataset);
+        }
+    }
+
+    if let Some(else_expr) = else_result {
+        evaluate_scalar_expression(else_expr, dataset)
+    } else {
+        Ok(ScalarValue::Null)
+    }
+}
+
+fn evaluate_row_expr(
+    expr: &Expr,
+    row_idx: u64,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    match expr {
+        Expr::Identifier(ident) => Ok(dataset
+            .column_value(&ident.value, row_idx)
+            .map(cached_to_scalar)
+            .unwrap_or(ScalarValue::Null)),
+        Expr::CompoundIdentifier(idents) => {
+            if let Some(last) = idents.last() {
+                Ok(dataset
+                    .column_value(&last.value, row_idx)
+                    .map(cached_to_scalar)
+                    .unwrap_or(ScalarValue::Null))
+            } else {
+                Err(SqlExecutionError::Unsupported(
+                    "empty compound identifier".into(),
+                ))
+            }
+        }
+        Expr::Value(Value::SingleQuotedString(s)) => Ok(ScalarValue::Text(s.clone())),
+        Expr::Value(Value::Number(n, _)) => Ok(match n.parse::<f64>() {
+            Ok(num) => ScalarValue::Float(num),
+            Err(_) => ScalarValue::Text(n.clone()),
+        }),
+        Expr::Value(Value::Boolean(b)) => Ok(ScalarValue::Bool(*b)),
+        Expr::Value(Value::Null) => Ok(ScalarValue::Null),
+        Expr::UnaryOp { op, expr } => {
+            let value = evaluate_row_expr(expr, row_idx, dataset)?;
+            match op {
+                UnaryOperator::Plus => Ok(value),
+                UnaryOperator::Minus => {
+                    let num = value.as_f64().ok_or_else(|| {
+                        SqlExecutionError::Unsupported(
+                            "unary minus requires numeric operand".into(),
+                        )
+                    })?;
+                    Ok(scalar_from_f64(-num))
+                }
+                UnaryOperator::Not => Ok(ScalarValue::Bool(!value.as_bool().unwrap_or(false))),
+                _ => Err(SqlExecutionError::Unsupported(format!(
+                    "unsupported unary operator {op:?}"
+                ))),
+            }
+        }
+        Expr::BinaryOp { left, op, right } => {
+            let lhs = evaluate_row_expr(left, row_idx, dataset)?;
+            let rhs = evaluate_row_expr(right, row_idx, dataset)?;
+            match op {
+                BinaryOperator::Plus => combine_numeric(&lhs, &rhs, |a, b| a + b)
+                    .ok_or_else(|| SqlExecutionError::Unsupported("non-numeric addition".into())),
+                BinaryOperator::Minus => {
+                    combine_numeric(&lhs, &rhs, |a, b| a - b).ok_or_else(|| {
+                        SqlExecutionError::Unsupported("non-numeric subtraction".into())
+                    })
+                }
+                BinaryOperator::Multiply => {
+                    combine_numeric(&lhs, &rhs, |a, b| a * b).ok_or_else(|| {
+                        SqlExecutionError::Unsupported("non-numeric multiplication".into())
+                    })
+                }
+                BinaryOperator::Divide => combine_numeric(&lhs, &rhs, |a, b| a / b)
+                    .ok_or_else(|| SqlExecutionError::Unsupported("non-numeric division".into())),
+                BinaryOperator::Modulo => combine_numeric(&lhs, &rhs, |a, b| a % b)
+                    .ok_or_else(|| SqlExecutionError::Unsupported("non-numeric modulo".into())),
+                BinaryOperator::And => Ok(ScalarValue::Bool(
+                    lhs.as_bool().unwrap_or(false) && rhs.as_bool().unwrap_or(false),
+                )),
+                BinaryOperator::Or => Ok(ScalarValue::Bool(
+                    lhs.as_bool().unwrap_or(false) || rhs.as_bool().unwrap_or(false),
+                )),
+                BinaryOperator::Xor => Ok(ScalarValue::Bool(
+                    lhs.as_bool().unwrap_or(false) ^ rhs.as_bool().unwrap_or(false),
+                )),
+                BinaryOperator::Eq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::NotEq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord != Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::Gt => {
+                    let result = compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Greater)
+                        .unwrap_or(false);
+                    println!("row compare {:?} > {:?} => {}", lhs, rhs, result);
+                    Ok(ScalarValue::Bool(result))
+                }
+                BinaryOperator::GtEq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Greater || ord == Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::Lt => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Less)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::LtEq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Less || ord == Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                _ => Err(SqlExecutionError::Unsupported(format!(
+                    "unsupported operator {op:?} in row expression"
+                ))),
+            }
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape_char: _,
+            ..
+        } => {
+            let value = evaluate_row_expr(expr, row_idx, dataset)?;
+            let pattern_value = evaluate_row_expr(pattern, row_idx, dataset)?;
+            let matches = match (
+                value.into_option_string(),
+                pattern_value.into_option_string(),
+            ) {
+                (Some(value), Some(pattern)) => like_match(&value, &pattern, true),
+                _ => false,
+            };
+            Ok(ScalarValue::Bool(matches))
+        }
+        Expr::ILike {
+            expr,
+            pattern,
+            escape_char: _,
+            ..
+        } => {
+            let value = evaluate_row_expr(expr, row_idx, dataset)?;
+            let pattern_value = evaluate_row_expr(pattern, row_idx, dataset)?;
+            let matches = match (
+                value.into_option_string(),
+                pattern_value.into_option_string(),
+            ) {
+                (Some(value), Some(pattern)) => like_match(&value, &pattern, false),
+                _ => false,
+            };
+            Ok(ScalarValue::Bool(matches))
+        }
+        Expr::RLike {
+            expr,
+            pattern,
+            negated,
+            ..
+        } => {
+            let value = evaluate_row_expr(expr, row_idx, dataset)?;
+            let pattern_value = evaluate_row_expr(pattern, row_idx, dataset)?;
+            let matches = match (
+                value.into_option_string(),
+                pattern_value.into_option_string(),
+            ) {
+                (Some(value), Some(pattern)) => regex_match(&value, &pattern),
+                _ => false,
+            };
+            Ok(ScalarValue::Bool(if *negated { !matches } else { matches }))
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
+            let target = evaluate_row_expr(expr, row_idx, dataset)?;
+            let low_value = evaluate_row_expr(low, row_idx, dataset)?;
+            let high_value = evaluate_row_expr(high, row_idx, dataset)?;
+            let cmp_low = compare_scalar_values(&target, &low_value).unwrap_or(Ordering::Less);
+            let cmp_high = compare_scalar_values(&target, &high_value).unwrap_or(Ordering::Greater);
+            let between = (cmp_low == Ordering::Greater || cmp_low == Ordering::Equal)
+                && (cmp_high == Ordering::Less || cmp_high == Ordering::Equal);
+            Ok(ScalarValue::Bool(if *negated { !between } else { between }))
+        }
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let target = evaluate_row_expr(expr, row_idx, dataset)?;
+            let mut matches = false;
+            for item in list {
+                let candidate = evaluate_row_expr(item, row_idx, dataset)?;
+                if compare_scalar_values(&target, &candidate)
+                    .map(|ord| ord == Ordering::Equal)
+                    .unwrap_or(false)
+                {
+                    matches = true;
+                    break;
+                }
+            }
+            Ok(ScalarValue::Bool(if *negated { !matches } else { matches }))
+        }
+        Expr::IsNull(inner) => {
+            let value = evaluate_row_expr(inner, row_idx, dataset)?;
+            Ok(ScalarValue::Bool(value.is_null()))
+        }
+        Expr::IsNotNull(inner) => {
+            let value = evaluate_row_expr(inner, row_idx, dataset)?;
+            Ok(ScalarValue::Bool(!value.is_null()))
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => evaluate_row_case_expr(
+            operand.as_deref(),
+            conditions,
+            results,
+            else_result.as_deref(),
+            row_idx,
+            dataset,
+        ),
+        Expr::Function(function) => evaluate_row_function(function, row_idx, dataset),
+        Expr::Nested(inner) => evaluate_row_expr(inner, row_idx, dataset),
+        Expr::Cast { expr, .. }
+        | Expr::SafeCast { expr, .. }
+        | Expr::TryCast { expr, .. }
+        | Expr::Convert { expr, .. } => evaluate_row_expr(expr, row_idx, dataset),
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "unsupported row-level expression: {expr:?}"
+        ))),
+    }
+}
+
+fn evaluate_row_function(
+    function: &Function,
+    row_idx: u64,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    let name = function
+        .name
+        .0
+        .last()
+        .map(|ident| ident.value.to_uppercase())
+        .unwrap_or_default();
+
+    let mut args = Vec::with_capacity(function.args.len());
+    for arg in &function.args {
+        match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+            | FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(expr),
+                ..
+            } => args.push(evaluate_row_expr(expr, row_idx, dataset)?),
+            _ => {
+                return Err(SqlExecutionError::Unsupported(format!(
+                    "unsupported argument for function {name}"
+                )));
+            }
+        }
+    }
+
+    match name.as_str() {
+        "ABS" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("ABS requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.abs()))
+        }
+        "ROUND" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("ROUND requires numeric argument".into())
+            })?;
+            let digits = args
+                .get(1)
+                .and_then(|v| v.as_i128())
+                .unwrap_or(0)
+                .clamp(-18, 18) as i32;
+            let factor = 10_f64.powi(digits);
+            Ok(scalar_from_f64((value * factor).round() / factor))
+        }
+        "CEIL" | "CEILING" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("CEIL requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.ceil()))
+        }
+        "FLOOR" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("FLOOR requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.floor()))
+        }
+        "EXP" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("EXP requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.exp()))
+        }
+        "LN" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("LN requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.ln()))
+        }
+        "LOG" => {
+            let result = match args.len() {
+                1 => {
+                    let value = args[0].as_f64().ok_or_else(|| {
+                        SqlExecutionError::Unsupported("LOG requires numeric argument".into())
+                    })?;
+                    value.ln()
+                }
+                2 => {
+                    let base = args[0].as_f64().ok_or_else(|| {
+                        SqlExecutionError::Unsupported("LOG requires numeric base".into())
+                    })?;
+                    let value = args[1].as_f64().ok_or_else(|| {
+                        SqlExecutionError::Unsupported("LOG requires numeric argument".into())
+                    })?;
+                    value.log(base)
+                }
+                _ => {
+                    return Err(SqlExecutionError::Unsupported(
+                        "LOG requires one or two arguments".into(),
+                    ));
+                }
+            };
+            Ok(scalar_from_f64(result))
+        }
+        "POWER" => {
+            let base = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("POWER requires numeric base".into())
+            })?;
+            let exponent = args.get(1).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("POWER requires numeric exponent".into())
+            })?;
+            Ok(scalar_from_f64(base.powf(exponent)))
+        }
+        "WIDTH_BUCKET" => {
+            if args.len() != 4 {
+                return Err(SqlExecutionError::Unsupported(
+                    "WIDTH_BUCKET requires four arguments".into(),
+                ));
+            }
+            let value = args[0].as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("WIDTH_BUCKET requires numeric value".into())
+            })?;
+            let low = args[1].as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("WIDTH_BUCKET requires numeric low".into())
+            })?;
+            let high = args[2].as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("WIDTH_BUCKET requires numeric high".into())
+            })?;
+            let buckets = args[3].as_i128().ok_or_else(|| {
+                SqlExecutionError::Unsupported("WIDTH_BUCKET requires integer bucket count".into())
+            })?;
+
+            if buckets <= 0 || high <= low {
+                return Err(SqlExecutionError::Unsupported(
+                    "WIDTH_BUCKET arguments out of range".into(),
+                ));
+            }
+
+            let bucket = if value < low {
+                0
+            } else if value >= high {
+                buckets + 1
+            } else {
+                let step = (high - low) / buckets as f64;
+                ((value - low) / step).floor() as i128 + 1
+            };
+            Ok(ScalarValue::Int(bucket))
+        }
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "unsupported row-level function {name}"
+        ))),
+    }
+}
+
+fn evaluate_row_case_expr(
+    operand: Option<&Expr>,
+    conditions: &[Expr],
+    results: &[Expr],
+    else_result: Option<&Expr>,
+    row_idx: u64,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if conditions.len() != results.len() {
+        return Err(SqlExecutionError::Unsupported(
+            "CASE expression requires matching WHEN and THEN clauses".into(),
+        ));
+    }
+
+    let operand_value = if let Some(expr) = operand {
+        Some(evaluate_row_expr(expr, row_idx, dataset)?)
+    } else {
+        None
+    };
+
+    for (condition, result) in conditions.iter().zip(results.iter()) {
+        let matches = if let Some(ref op_value) = operand_value {
+            let cond_value = evaluate_row_expr(condition, row_idx, dataset)?;
+            compare_scalar_values(op_value, &cond_value)
+                .map(|ord| ord == Ordering::Equal)
+                .unwrap_or(false)
+        } else {
+            if let Some(raw) = dataset.column_value("value", row_idx) {
+                println!("dataset column value at row {}: {:?}", row_idx, raw);
+            }
+            let cond = evaluate_row_expr(condition, row_idx, dataset)?;
+            let cond_bool = cond.as_bool().unwrap_or(false);
+            println!(
+                "case condition {:?} evaluated to {} (value {:?}) for row {}",
+                condition, cond_bool, cond, row_idx
+            );
+            cond_bool
+        };
+
+        if matches {
+            return evaluate_row_expr(result, row_idx, dataset);
+        }
+    }
+
+    if let Some(else_expr) = else_result {
+        evaluate_row_expr(else_expr, row_idx, dataset)
+    } else {
+        Ok(ScalarValue::Null)
+    }
+}
+
+fn evaluate_scalar_function(
+    function: &Function,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    let name = function
+        .name
+        .0
+        .last()
+        .map(|ident| ident.value.to_uppercase())
+        .unwrap_or_default();
+
+    let mut args = Vec::with_capacity(function.args.len());
+    for arg in &function.args {
+        match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+            | FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(expr),
+                ..
+            } => args.push(evaluate_scalar_expression(expr, dataset)?),
+            _ => {
+                return Err(SqlExecutionError::Unsupported(format!(
+                    "unsupported argument for function {name}"
+                )));
+            }
+        }
+    }
+
+    match name.as_str() {
+        "ABS" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("ABS requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.abs()))
+        }
+        "ROUND" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("ROUND requires numeric argument".into())
+            })?;
+            let digits = args
+                .get(1)
+                .and_then(|v| v.as_i128())
+                .unwrap_or(0)
+                .clamp(-18, 18) as i32;
+            let factor = 10_f64.powi(digits);
+            Ok(scalar_from_f64((value * factor).round() / factor))
+        }
+        "CEIL" | "CEILING" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("CEIL requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.ceil()))
+        }
+        "FLOOR" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("FLOOR requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.floor()))
+        }
+        "EXP" => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("EXP requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.exp()))
+        }
+        "LN" | "LOG" if args.len() == 1 => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("LN requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.ln()))
+        }
+        "LOG" if args.len() == 2 => {
+            let base = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("LOG requires numeric base".into())
+            })?;
+            let value = args.get(1).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("LOG requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.log(base)))
+        }
+        "POWER" => {
+            let base = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("POWER requires numeric base".into())
+            })?;
+            let exponent = args.get(1).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("POWER requires numeric exponent".into())
+            })?;
+            Ok(scalar_from_f64(base.powf(exponent)))
+        }
+        "WIDTH_BUCKET" => {
+            if args.len() != 4 {
+                return Err(SqlExecutionError::Unsupported(
+                    "WIDTH_BUCKET requires four arguments".into(),
+                ));
+            }
+            let value = args[0].as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("WIDTH_BUCKET requires numeric value".into())
+            })?;
+            let low = args[1].as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("WIDTH_BUCKET requires numeric low".into())
+            })?;
+            let high = args[2].as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("WIDTH_BUCKET requires numeric high".into())
+            })?;
+            let buckets = args[3].as_i128().ok_or_else(|| {
+                SqlExecutionError::Unsupported("WIDTH_BUCKET requires integer bucket count".into())
+            })?;
+
+            if buckets <= 0 || !high.is_finite() || !low.is_finite() || high <= low {
+                return Err(SqlExecutionError::Unsupported(
+                    "WIDTH_BUCKET arguments out of range".into(),
+                ));
+            }
+
+            let bucket = if value < low {
+                0
+            } else if value >= high {
+                buckets + 1
+            } else {
+                let step = (high - low) / buckets as f64;
+                ((value - low) / step).floor() as i128 + 1
+            };
+            Ok(ScalarValue::Int(bucket))
+        }
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "unsupported scalar function {name}"
+        ))),
     }
 }
 
@@ -1085,7 +2597,7 @@ fn materialize_columns(
             page_map.insert(page.page.page_metadata.clone(), page);
         }
 
-        let mut values: HashMap<u64, String> = HashMap::with_capacity(rows.len());
+        let mut values: HashMap<u64, CachedValue> = HashMap::with_capacity(rows.len());
         let mut row_iter = rows.iter().copied().peekable();
         let mut current_row = start_row;
 
@@ -1117,7 +2629,7 @@ fn materialize_columns(
                 match row_iter.peek().copied() {
                     Some(target) if target == current_row => {
                         if let Some(entry) = entries.get(idx) {
-                            values.insert(target, entry.get_data().to_string());
+                            values.insert(target, CachedValue::from_entry(entry));
                         }
                         row_iter.next();
                     }
@@ -1401,17 +2913,29 @@ fn column_operand<'a>(
     let ordinal = column_ordinals.get(column_name).copied().ok_or_else(|| {
         SqlExecutionError::Unsupported(format!("unknown column referenced: {column_name}"))
     })?;
+    println!("column operand lookup {} -> ordinal {} for row {}", column_name, ordinal, row_idx);
+    if let Some(map) = materialized.get(&ordinal) {
+        println!(
+            "column map keys for ordinal {}: {:?}",
+            ordinal,
+            map.keys().collect::<Vec<_>>()
+        );
+    }
     let value = materialized
         .get(&ordinal)
         .and_then(|column_map| column_map.get(&row_idx));
     match value {
-        Some(val) => Ok(OperandValue::Text(Cow::Borrowed(val.as_str()))),
+        Some(CachedValue::Null) => Ok(OperandValue::Null),
+        Some(CachedValue::Text(text)) => Ok(OperandValue::Text(Cow::Borrowed(text.as_str()))),
         None => Ok(OperandValue::Null),
     }
 }
 
 fn is_null_value(value: &str) -> bool {
-    value.is_empty() || value.eq_ignore_ascii_case("null") || value.eq_ignore_ascii_case("nil")
+    value.is_empty()
+        || value.eq_ignore_ascii_case("null")
+        || value.eq_ignore_ascii_case("nil")
+        || is_encoded_null(value)
 }
 
 fn like_match(value: &str, pattern: &str, case_sensitive: bool) -> bool {
@@ -1749,7 +3273,7 @@ fn expr_to_string(expr: &Expr) -> Result<String, SqlExecutionError> {
         Expr::Value(Value::SingleQuotedString(s)) => Ok(s.clone()),
         Expr::Value(Value::Number(n, _)) => Ok(n.clone()),
         Expr::Value(Value::Boolean(b)) => Ok(if *b { "true" } else { "false" }.into()),
-        Expr::Value(Value::Null) => Ok(String::new()),
+        Expr::Value(Value::Null) => Ok(encode_null()),
         _ => Err(SqlExecutionError::Unsupported(format!(
             "unsupported literal expression: {expr:?}"
         ))),
@@ -1757,8 +3281,69 @@ fn expr_to_string(expr: &Expr) -> Result<String, SqlExecutionError> {
 }
 
 fn compare_strs(left: &str, right: &str) -> Ordering {
+    if is_encoded_null(left) && is_encoded_null(right) {
+        return Ordering::Equal;
+    }
+    if is_encoded_null(left) {
+        return Ordering::Less;
+    }
+    if is_encoded_null(right) {
+        return Ordering::Greater;
+    }
+
     match (left.parse::<f64>(), right.parse::<f64>()) {
         (Ok(l), Ok(r)) => l.partial_cmp(&r).unwrap_or(Ordering::Equal),
         _ => left.cmp(right),
+    }
+}
+
+fn format_float(value: f64) -> String {
+    if value.is_nan() || value.is_infinite() {
+        return value.to_string();
+    }
+
+    let rounded = (value * 1_000_000.0).round() / 1_000_000.0;
+    if (rounded.fract().abs() - 0.0).abs() < f64::EPSILON {
+        format!("{:.0}", rounded)
+    } else {
+        let mut s = format!("{rounded}");
+        while s.contains('.') && s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+        s
+    }
+}
+
+fn scalar_from_f64(value: f64) -> ScalarValue {
+    if value.is_nan() || value.is_infinite() {
+        ScalarValue::Float(value)
+    } else if (value.fract().abs() - 0.0).abs() < 1e-9 {
+        ScalarValue::Int(value as i128)
+    } else {
+        ScalarValue::Float(value)
+    }
+}
+
+fn combine_numeric<F>(left: &ScalarValue, right: &ScalarValue, op: F) -> Option<ScalarValue>
+where
+    F: Fn(f64, f64) -> f64,
+{
+    let lhs = left.as_f64()?;
+    let rhs = right.as_f64()?;
+    Some(scalar_from_f64(op(lhs, rhs)))
+}
+
+fn compare_scalar_values(left: &ScalarValue, right: &ScalarValue) -> Option<Ordering> {
+    match (left.as_f64(), right.as_f64()) {
+        (Some(lhs), Some(rhs)) => lhs.partial_cmp(&rhs),
+        _ => match (left, right) {
+            (ScalarValue::Text(lhs), ScalarValue::Text(rhs)) => Some(compare_strs(lhs, rhs)),
+            (ScalarValue::Bool(lhs), ScalarValue::Bool(rhs)) => Some(lhs.cmp(rhs)),
+            (ScalarValue::Int(lhs), ScalarValue::Int(rhs)) => Some(lhs.cmp(rhs)),
+            _ => None,
+        },
     }
 }
