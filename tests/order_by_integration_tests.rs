@@ -264,9 +264,9 @@ fn sql_executor_end_to_end_sorted_insert() {
     assert_eq!(
         rows,
         vec![
-            vec!["u2b".into(), "20".into()],
-            vec!["u1".into(), "50".into()],
-            vec!["u4".into(), "60".into()],
+            vec!["u2b".to_string(), "20".to_string()],
+            vec!["u1".to_string(), "50".to_string()],
+            vec!["u4".to_string(), "60".to_string()],
         ]
     );
 }
