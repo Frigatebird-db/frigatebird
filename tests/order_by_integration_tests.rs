@@ -414,3 +414,540 @@ fn composite_order_by_numeric_then_lexicographic() {
     assert_rows_sorted(&rows, &[0, 1]);
     assert_metadata_for_columns(&store, "rankings", &column_names, rows.len());
 }
+
+#[test]
+fn long_end_to_end_single_column_order_by_with_updates_and_deletes() {
+    let (executor, handler, directory, store) = build_sql_executor();
+
+    // Step 1: Create table with single-column ORDER BY
+    executor
+        .execute("CREATE TABLE products (id TEXT, price TEXT) ORDER BY price")
+        .expect("create table");
+
+    // Step 2: Insert initial data
+    executor
+        .execute("INSERT INTO products (id, price) VALUES ('p1', '100'), ('p2', '50'), ('p3', '75')")
+        .expect("initial insert");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 3);
+    assert_rows_sorted(&rows, &[1]);
+    assert_metadata_for_columns(&store, "products", &["id", "price"], 3);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["p2", "50"],
+            vec!["p3", "75"],
+            vec!["p1", "100"],
+        ]
+    );
+
+    // Step 3: Insert more items (various positions)
+    executor
+        .execute("INSERT INTO products (id, price) VALUES ('p4', '25')")
+        .expect("insert at beginning");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 4);
+    assert_rows_sorted(&rows, &[1]);
+    assert_eq!(rows[0], vec!["p4", "25"]);
+
+    executor
+        .execute("INSERT INTO products (id, price) VALUES ('p5', '200')")
+        .expect("insert at end");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 5);
+    assert_rows_sorted(&rows, &[1]);
+    assert_eq!(rows[4], vec!["p5", "200"]);
+
+    executor
+        .execute("INSERT INTO products (id, price) VALUES ('p6', '60')")
+        .expect("insert in middle");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 6);
+    assert_rows_sorted(&rows, &[1]);
+    assert_metadata_for_columns(&store, "products", &["id", "price"], 6);
+
+    // Step 4: Update non-ORDER BY column (should be in-place)
+    executor
+        .execute("UPDATE products SET id = 'p2_updated' WHERE price = '50'")
+        .expect("update non-sort column");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 6);
+    assert_rows_sorted(&rows, &[1]);
+    assert_eq!(rows[1], vec!["p2_updated", "50"]);
+    assert_metadata_for_columns(&store, "products", &["id", "price"], 6);
+
+    // Step 5: Update ORDER BY column (should delete+reinsert)
+    executor
+        .execute("UPDATE products SET price = '5' WHERE price = '25'")
+        .expect("update sort column to smaller value");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 6);
+    assert_rows_sorted(&rows, &[1]);
+    assert_eq!(rows[0], vec!["p4", "5"]);
+    assert_metadata_for_columns(&store, "products", &["id", "price"], 6);
+
+    executor
+        .execute("UPDATE products SET price = '300' WHERE price = '200'")
+        .expect("update sort column to larger value");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 6);
+    assert_rows_sorted(&rows, &[1]);
+    assert_eq!(rows[5], vec!["p5", "300"]);
+    assert_metadata_for_columns(&store, "products", &["id", "price"], 6);
+
+    // Step 6: Delete from various positions
+    executor
+        .execute("DELETE FROM products WHERE price = '5'")
+        .expect("delete first item");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 5);
+    assert_rows_sorted(&rows, &[1]);
+    assert_eq!(rows[0], vec!["p2_updated", "50"]);
+    assert_metadata_for_columns(&store, "products", &["id", "price"], 5);
+
+    executor
+        .execute("DELETE FROM products WHERE price = '300'")
+        .expect("delete last item");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 4);
+    assert_rows_sorted(&rows, &[1]);
+    assert_metadata_for_columns(&store, "products", &["id", "price"], 4);
+
+    executor
+        .execute("DELETE FROM products WHERE price = '75'")
+        .expect("delete middle item");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 3);
+    assert_rows_sorted(&rows, &[1]);
+    assert_metadata_for_columns(&store, "products", &["id", "price"], 3);
+
+    // Step 7: Insert duplicates
+    executor
+        .execute("INSERT INTO products (id, price) VALUES ('p7', '50')")
+        .expect("insert duplicate price");
+
+    let rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_eq!(rows.len(), 4);
+    assert_rows_sorted(&rows, &[1]);
+    assert_metadata_for_columns(&store, "products", &["id", "price"], 4);
+
+    // Final verification
+    let final_rows = collect_table_rows(&handler, &directory, "products", &["id", "price"]);
+    assert_rows_sorted(&final_rows, &[1]);
+    for (i, row) in final_rows.iter().enumerate() {
+        if i > 0 {
+            let prev_price: f64 = final_rows[i - 1][1].parse().expect("numeric price");
+            let curr_price: f64 = row[1].parse().expect("numeric price");
+            assert!(prev_price <= curr_price, "prices not sorted at index {i}");
+        }
+    }
+}
+
+#[test]
+fn long_end_to_end_multi_column_order_by_complex_operations() {
+    let (executor, handler, directory, store) = build_sql_executor();
+
+    // Step 1: Create table with multi-column ORDER BY
+    executor
+        .execute("CREATE TABLE orders (order_id TEXT, customer TEXT, region TEXT, amount TEXT) ORDER BY (region, amount)")
+        .expect("create table");
+
+    // Step 2: Insert initial dataset
+    executor
+        .execute(
+            "INSERT INTO orders (order_id, customer, region, amount) VALUES \
+            ('o1', 'Alice', 'US', '100'), \
+            ('o2', 'Bob', 'EU', '200'), \
+            ('o3', 'Charlie', 'US', '50'), \
+            ('o4', 'David', 'APAC', '150'), \
+            ('o5', 'Eve', 'EU', '75')"
+        )
+        .expect("initial batch insert");
+
+    let rows = collect_table_rows(&handler, &directory, "orders", &["order_id", "customer", "region", "amount"]);
+    assert_eq!(rows.len(), 5);
+    assert_rows_sorted(&rows, &[2, 3]); // region index=2, amount index=3
+    assert_metadata_for_columns(&store, "orders", &["order_id", "customer", "region", "amount"], 5);
+
+    // Verify initial order: APAC < EU < US, and within each region by amount
+    assert_eq!(rows[0][2], "APAC"); // David
+    assert_eq!(rows[1][2], "EU");   // Eve (75)
+    assert_eq!(rows[2][2], "EU");   // Bob (200)
+    assert_eq!(rows[3][2], "US");   // Charlie (50)
+    assert_eq!(rows[4][2], "US");   // Alice (100)
+
+    // Step 3: Insert items that go to different positions
+    executor
+        .execute("INSERT INTO orders (order_id, customer, region, amount) VALUES ('o6', 'Frank', 'APAC', '50')")
+        .expect("insert APAC (first region)");
+
+    let rows = collect_table_rows(&handler, &directory, "orders", &["order_id", "customer", "region", "amount"]);
+    assert_eq!(rows.len(), 6);
+    assert_rows_sorted(&rows, &[2, 3]);
+    assert_eq!(rows[0][0], "o6"); // Frank, APAC, 50 - smallest in APAC
+    assert_eq!(rows[1][0], "o4"); // David, APAC, 150
+
+    executor
+        .execute("INSERT INTO orders (order_id, customer, region, amount) VALUES ('o7', 'Grace', 'US', '60')")
+        .expect("insert US middle");
+
+    let rows = collect_table_rows(&handler, &directory, "orders", &["order_id", "customer", "region", "amount"]);
+    assert_eq!(rows.len(), 7);
+    assert_rows_sorted(&rows, &[2, 3]);
+    assert_metadata_for_columns(&store, "orders", &["order_id", "customer", "region", "amount"], 7);
+
+    // Step 4: Update non-ORDER BY columns (must provide all ORDER BY columns in WHERE)
+    executor
+        .execute("UPDATE orders SET customer = 'Alice_Updated' WHERE region = 'US' AND amount = '100'")
+        .expect("update non-sort column");
+
+    let rows = collect_table_rows(&handler, &directory, "orders", &["order_id", "customer", "region", "amount"]);
+    assert_rows_sorted(&rows, &[2, 3]);
+    let alice_row = rows.iter().find(|r| r[0] == "o1").expect("find alice");
+    assert_eq!(alice_row[1], "Alice_Updated");
+    assert_metadata_for_columns(&store, "orders", &["order_id", "customer", "region", "amount"], 7);
+
+    // Step 5: Update ORDER BY column (region) - should reposition
+    executor
+        .execute("UPDATE orders SET region = 'EU' WHERE region = 'APAC' AND amount = '150'")
+        .expect("update region - changes sort position");
+
+    let rows = collect_table_rows(&handler, &directory, "orders", &["order_id", "customer", "region", "amount"]);
+    assert_eq!(rows.len(), 7);
+    assert_rows_sorted(&rows, &[2, 3]);
+
+    // David (o4) should now be in EU section with amount 150
+    let david_row = rows.iter().find(|r| r[0] == "o4").expect("find david");
+    assert_eq!(david_row[2], "EU");
+    assert_eq!(david_row[3], "150");
+
+    // Only Frank should be in APAC now
+    let apac_rows: Vec<_> = rows.iter().filter(|r| r[2] == "APAC").collect();
+    assert_eq!(apac_rows.len(), 1);
+    assert_eq!(apac_rows[0][0], "o6"); // Frank
+    assert_metadata_for_columns(&store, "orders", &["order_id", "customer", "region", "amount"], 7);
+
+    // Step 6: Update both ORDER BY columns
+    executor
+        .execute("UPDATE orders SET region = 'APAC', amount = '300' WHERE region = 'EU' AND amount = '200'")
+        .expect("update both sort columns");
+
+    let rows = collect_table_rows(&handler, &directory, "orders", &["order_id", "customer", "region", "amount"]);
+    assert_eq!(rows.len(), 7);
+    assert_rows_sorted(&rows, &[2, 3]);
+
+    let bob_row = rows.iter().find(|r| r[0] == "o2").expect("find bob");
+    assert_eq!(bob_row[2], "APAC");
+    assert_eq!(bob_row[3], "300");
+
+    // Bob should be last in APAC (highest amount)
+    let apac_rows: Vec<_> = rows.iter().filter(|r| r[2] == "APAC").collect();
+    assert_eq!(apac_rows.len(), 2);
+    assert_eq!(apac_rows[1][0], "o2"); // Bob last in APAC
+    assert_metadata_for_columns(&store, "orders", &["order_id", "customer", "region", "amount"], 7);
+
+    // Step 7: Delete items from different regions (must provide all ORDER BY columns)
+    executor
+        .execute("DELETE FROM orders WHERE region = 'APAC' AND amount = '50'")
+        .expect("delete from APAC");
+
+    let rows = collect_table_rows(&handler, &directory, "orders", &["order_id", "customer", "region", "amount"]);
+    assert_eq!(rows.len(), 6);
+    assert_rows_sorted(&rows, &[2, 3]);
+    assert_metadata_for_columns(&store, "orders", &["order_id", "customer", "region", "amount"], 6);
+
+    executor
+        .execute("DELETE FROM orders WHERE region = 'EU' AND amount = '75'")
+        .expect("delete from EU");
+
+    let rows = collect_table_rows(&handler, &directory, "orders", &["order_id", "customer", "region", "amount"]);
+    assert_eq!(rows.len(), 5);
+    assert_rows_sorted(&rows, &[2, 3]);
+    assert_metadata_for_columns(&store, "orders", &["order_id", "customer", "region", "amount"], 5);
+
+    // Step 8: Insert more items with duplicates
+    executor
+        .execute(
+            "INSERT INTO orders (order_id, customer, region, amount) VALUES \
+            ('o8', 'Henry', 'US', '50'), \
+            ('o9', 'Iris', 'US', '50'), \
+            ('o10', 'Jack', 'EU', '150')"
+        )
+        .expect("insert duplicates");
+
+    let rows = collect_table_rows(&handler, &directory, "orders", &["order_id", "customer", "region", "amount"]);
+    assert_eq!(rows.len(), 8);
+    assert_rows_sorted(&rows, &[2, 3]);
+    assert_metadata_for_columns(&store, "orders", &["order_id", "customer", "region", "amount"], 8);
+
+    // Final verification: check region grouping and amount ordering within regions
+    let mut last_region = "";
+    let mut last_amount_in_region = -1.0;
+
+    for row in &rows {
+        let region = &row[2];
+        let amount: f64 = row[3].parse().expect("numeric amount");
+
+        if region != last_region {
+            last_region = region;
+            last_amount_in_region = -1.0;
+        }
+
+        assert!(
+            amount >= last_amount_in_region,
+            "amounts not sorted within region {region}: {amount} < {last_amount_in_region}"
+        );
+        last_amount_in_region = amount;
+    }
+}
+
+#[test]
+fn long_end_to_end_empty_strings_and_mixed_types() {
+    let (executor, handler, directory, store) = build_sql_executor();
+
+    executor
+        .execute("CREATE TABLE mixed (id TEXT, val1 TEXT, val2 TEXT) ORDER BY (val1, val2)")
+        .expect("create table");
+
+    // Insert with some empty strings
+    executor
+        .execute("INSERT INTO mixed (id, val1, val2) VALUES ('r1', '10', 'apple')")
+        .expect("insert");
+
+    executor
+        .execute("INSERT INTO mixed (id, val1, val2) VALUES ('r2', '10', 'banana')")
+        .expect("insert");
+
+    executor
+        .execute("INSERT INTO mixed (id, val1) VALUES ('r3', '5')")
+        .expect("insert with missing val2 - defaults to empty");
+
+    let rows = collect_table_rows(&handler, &directory, "mixed", &["id", "val1", "val2"]);
+    assert_eq!(rows.len(), 3);
+    assert_rows_sorted(&rows, &[1, 2]);
+
+    // r3 should be first (val1=5 < 10)
+    assert_eq!(rows[0][0], "r3");
+    assert_eq!(rows[0][2], ""); // empty val2
+
+    // r1 and r2 both have val1=10, sorted by val2
+    assert_eq!(rows[1][0], "r1"); // apple < banana
+    assert_eq!(rows[2][0], "r2");
+
+    // Insert item with empty val1 (should sort first)
+    executor
+        .execute("INSERT INTO mixed (id, val2) VALUES ('r4', 'zebra')")
+        .expect("insert with empty val1");
+
+    let rows = collect_table_rows(&handler, &directory, "mixed", &["id", "val1", "val2"]);
+    assert_eq!(rows.len(), 4);
+    assert_rows_sorted(&rows, &[1, 2]);
+    assert_eq!(rows[0][0], "r4"); // empty val1 sorts first
+    assert_eq!(rows[0][1], "");
+    assert_metadata_for_columns(&store, "mixed", &["id", "val1", "val2"], 4);
+
+    // Insert numeric-looking strings
+    executor
+        .execute("INSERT INTO mixed (id, val1, val2) VALUES ('r5', '2', 'delta')")
+        .expect("insert");
+
+    executor
+        .execute("INSERT INTO mixed (id, val1, val2) VALUES ('r6', '100', 'echo')")
+        .expect("insert");
+
+    let rows = collect_table_rows(&handler, &directory, "mixed", &["id", "val1", "val2"]);
+    assert_eq!(rows.len(), 6);
+    assert_rows_sorted(&rows, &[1, 2]);
+
+    // Verify numeric comparison works: 2 < 5 < 10 < 100
+    let numeric_rows: Vec<_> = rows.iter().filter(|r| !r[1].is_empty()).collect();
+    let vals: Vec<f64> = numeric_rows.iter().map(|r| r[1].parse().unwrap()).collect();
+    assert_eq!(vals, vec![2.0, 5.0, 10.0, 10.0, 100.0]);
+
+    // Update to create more empty scenarios (must provide all ORDER BY columns in WHERE)
+    executor
+        .execute("UPDATE mixed SET val2 = '' WHERE val1 = '10' AND val2 = 'apple'")
+        .expect("clear val2");
+
+    let rows = collect_table_rows(&handler, &directory, "mixed", &["id", "val1", "val2"]);
+    assert_rows_sorted(&rows, &[1, 2]);
+    assert_metadata_for_columns(&store, "mixed", &["id", "val1", "val2"], 6);
+
+    // Delete items with empty values (must provide all ORDER BY columns)
+    executor
+        .execute("DELETE FROM mixed WHERE val1 = '' AND val2 = 'zebra'")
+        .expect("delete empty val1");
+
+    let rows = collect_table_rows(&handler, &directory, "mixed", &["id", "val1", "val2"]);
+    assert_eq!(rows.len(), 5);
+    assert_rows_sorted(&rows, &[1, 2]);
+    assert_metadata_for_columns(&store, "mixed", &["id", "val1", "val2"], 5);
+}
+
+#[test]
+fn long_end_to_end_stress_many_inserts_updates_deletes() {
+    let (executor, handler, directory, store) = build_sql_executor();
+
+    executor
+        .execute("CREATE TABLE stress (id TEXT, value TEXT) ORDER BY value")
+        .expect("create table");
+
+    // Insert 50 items
+    for i in 0..50 {
+        let value = (i * 2) % 100; // Create some duplicates
+        executor
+            .execute(&format!("INSERT INTO stress (id, value) VALUES ('id{i}', '{value}')"))
+            .expect(&format!("insert {i}"));
+
+        if i % 10 == 9 {
+            // Verify order every 10 inserts
+            let rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);
+            assert_rows_sorted(&rows, &[1]);
+            assert_metadata_for_columns(&store, "stress", &["id", "value"], rows.len());
+        }
+    }
+
+    let rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);
+    assert_eq!(rows.len(), 50);
+    assert_rows_sorted(&rows, &[1]);
+
+    // Update 20 items to change their sort position (must provide ORDER BY column in WHERE)
+    for i in 0..20 {
+        let new_value = 1000 + i; // Move to end
+        let old_value = (i * 2) % 100; // Original value calculation
+        executor
+            .execute(&format!("UPDATE stress SET value = '{new_value}' WHERE value = '{old_value}'"))
+            .expect(&format!("update {i}"));
+
+        if i % 5 == 4 {
+            let rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);
+            assert_rows_sorted(&rows, &[1]);
+            assert_metadata_for_columns(&store, "stress", &["id", "value"], 50);
+        }
+    }
+
+    let rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);
+    assert_eq!(rows.len(), 50);
+    assert_rows_sorted(&rows, &[1]);
+
+    // Delete 30 items (must provide ORDER BY column in WHERE)
+    for i in 10..40 {
+        let value = if i < 20 {
+            1000 + i // These were updated earlier
+        } else {
+            (i * 2) % 100 // Original value
+        };
+        executor
+            .execute(&format!("DELETE FROM stress WHERE value = '{value}'"))
+            .expect(&format!("delete {i}"));
+
+        if i % 5 == 4 {
+            let rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);
+            assert_rows_sorted(&rows, &[1]);
+            assert_metadata_for_columns(&store, "stress", &["id", "value"], rows.len());
+        }
+    }
+
+    let final_rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);
+    assert_eq!(final_rows.len(), 20);
+    assert_rows_sorted(&final_rows, &[1]);
+    assert_metadata_for_columns(&store, "stress", &["id", "value"], 20);
+
+    // Insert more items in the middle
+    for i in 0..10 {
+        executor
+            .execute(&format!("INSERT INTO stress (id, value) VALUES ('new{i}', '{}')", i * 5))
+            .expect(&format!("new insert {i}"));
+    }
+
+    let final_rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);
+    assert_eq!(final_rows.len(), 30);
+    assert_rows_sorted(&final_rows, &[1]);
+    assert_metadata_for_columns(&store, "stress", &["id", "value"], 30);
+}
+
+#[test]
+fn long_end_to_end_three_column_order_by() {
+    let (executor, handler, directory, store) = build_sql_executor();
+
+    executor
+        .execute("CREATE TABLE events (id TEXT, year TEXT, month TEXT, day TEXT, event TEXT) ORDER BY (year, month, day)")
+        .expect("create table");
+
+    // Insert events in various orders
+    let events = vec![
+        ("e1", "2024", "03", "15", "Spring"),
+        ("e2", "2023", "12", "25", "Christmas"),
+        ("e3", "2024", "01", "01", "New Year"),
+        ("e4", "2024", "03", "10", "Early March"),
+        ("e5", "2023", "12", "31", "NYE"),
+        ("e6", "2024", "03", "10", "Also Early March"),
+    ];
+
+    for (id, year, month, day, event) in events {
+        executor
+            .execute(&format!(
+                "INSERT INTO events (id, year, month, day, event) VALUES ('{id}', '{year}', '{month}', '{day}', '{event}')"
+            ))
+            .expect("insert event");
+    }
+
+    let rows = collect_table_rows(&handler, &directory, "events", &["id", "year", "month", "day", "event"]);
+    assert_eq!(rows.len(), 6);
+    assert_rows_sorted(&rows, &[1, 2, 3]); // year, month, day
+    assert_metadata_for_columns(&store, "events", &["id", "year", "month", "day", "event"], 6);
+
+    // Verify sort order
+    assert_eq!(rows[0][0], "e2"); // 2023-12-25
+    assert_eq!(rows[1][0], "e5"); // 2023-12-31
+    assert_eq!(rows[2][0], "e3"); // 2024-01-01
+    // e4 and e6 both 2024-03-10 (stable order)
+    assert_eq!(rows[5][0], "e1"); // 2024-03-15
+
+    // Update year - moves to different year group (must provide all ORDER BY columns in WHERE)
+    executor
+        .execute("UPDATE events SET year = '2025' WHERE year = '2024' AND month = '03' AND day = '15'")
+        .expect("update year");
+
+    let rows = collect_table_rows(&handler, &directory, "events", &["id", "year", "month", "day", "event"]);
+    assert_rows_sorted(&rows, &[1, 2, 3]);
+    assert_eq!(rows[5][0], "e1"); // Now last (2025)
+
+    // Update month within same year (must provide all ORDER BY columns in WHERE)
+    executor
+        .execute("UPDATE events SET month = '02' WHERE year = '2024' AND month = '01' AND day = '01'")
+        .expect("update month");
+
+    let rows = collect_table_rows(&handler, &directory, "events", &["id", "year", "month", "day", "event"]);
+    assert_rows_sorted(&rows, &[1, 2, 3]);
+    assert_metadata_for_columns(&store, "events", &["id", "year", "month", "day", "event"], 6);
+
+    // Delete and verify (must provide all ORDER BY columns - delete each 2023 event individually)
+    executor
+        .execute("DELETE FROM events WHERE year = '2023' AND month = '12' AND day = '25'")
+        .expect("delete 2023 event 1");
+    executor
+        .execute("DELETE FROM events WHERE year = '2023' AND month = '12' AND day = '31'")
+        .expect("delete 2023 event 2");
+
+    let rows = collect_table_rows(&handler, &directory, "events", &["id", "year", "month", "day", "event"]);
+    assert_eq!(rows.len(), 4);
+    assert_rows_sorted(&rows, &[1, 2, 3]);
+    assert_metadata_for_columns(&store, "events", &["id", "year", "month", "day", "event"], 4);
+
+    // All remaining should be 2024 or 2025
+    for row in &rows {
+        let year: i32 = row[1].parse().unwrap();
+        assert!(year >= 2024);
+    }
+}
