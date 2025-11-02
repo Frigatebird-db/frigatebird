@@ -352,10 +352,7 @@ fn sql_executor_query_handles_nulls() {
     let null_marker = "\u{0001}";
     let (handler, directory, _store) = build_table_with_rows(
         "users",
-        &[
-            ("id", vec!["1", "1"]),
-            ("name", vec![null_marker, "Bob"]),
-        ],
+        &[("id", vec!["1", "1"]), ("name", vec![null_marker, "Bob"])],
         vec!["id".to_string()],
     );
     let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
@@ -364,10 +361,7 @@ fn sql_executor_query_handles_nulls() {
         .query("SELECT name FROM users WHERE id = 1")
         .expect("null handling");
     assert_eq!(result.columns, vec!["name".to_string()]);
-    assert_eq!(
-        result.rows,
-        vec![vec![None], vec![Some("Bob".to_string())]]
-    );
+    assert_eq!(result.rows, vec![vec![None], vec![Some("Bob".to_string())]]);
 }
 
 #[test]
@@ -386,10 +380,21 @@ fn sql_executor_numeric_aggregates() {
     let counts = executor
         .query("SELECT COUNT(*), COUNT(value), COUNT(DISTINCT value) FROM numbers WHERE id = 1")
         .expect("count aggregates");
-    assert_eq!(counts.columns, vec!["COUNT(*)".to_string(), "COUNT(value)".to_string(), "COUNT(DISTINCT value)".to_string()]);
+    assert_eq!(
+        counts.columns,
+        vec![
+            "COUNT(*)".to_string(),
+            "COUNT(value)".to_string(),
+            "COUNT(DISTINCT value)".to_string()
+        ]
+    );
     assert_eq!(
         counts.rows,
-        vec![vec![Some("5".to_string()), Some("4".to_string()), Some("4".to_string())]]
+        vec![vec![
+            Some("5".to_string()),
+            Some("4".to_string()),
+            Some("4".to_string())
+        ]]
     );
 
     let sums = executor
@@ -419,9 +424,7 @@ fn sql_executor_numeric_aggregates() {
     assert_eq!(percentile.rows, vec![vec![Some("25".to_string())]]);
 
     let filtered = executor
-        .query(
-            "SELECT SUM(CASE WHEN value > 20 THEN 1 ELSE 0 END) FROM numbers WHERE id = 1",
-        )
+        .query("SELECT SUM(CASE WHEN value > 20 THEN 1 ELSE 0 END) FROM numbers WHERE id = 1")
         .expect("filtered sum");
     println!("filtered rows: {:?}", filtered.rows);
     assert_eq!(filtered.rows, vec![vec![Some("2".to_string())]]);

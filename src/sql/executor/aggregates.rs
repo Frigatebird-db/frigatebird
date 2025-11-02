@@ -1,7 +1,7 @@
+use super::SqlExecutionError;
 use super::expressions::evaluate_row_expr;
 use super::helpers::collect_expr_column_ordinals;
 use super::values::{CachedValue, ScalarValue, scalar_from_f64};
-use super::SqlExecutionError;
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, SelectItem};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -433,7 +433,7 @@ fn evaluate_percentile_cont(
         _ => {
             return Err(SqlExecutionError::Unsupported(
                 "percentile_cont requires literal percentile argument".into(),
-            ))
+            ));
         }
     };
 
@@ -460,7 +460,7 @@ fn evaluate_percentile_cont(
             _ => {
                 return Err(SqlExecutionError::Unsupported(
                     "percentile_cont requires an expression to order".into(),
-                ))
+                ));
             }
         }
     } else {
@@ -498,7 +498,9 @@ fn evaluate_percentile_cont(
     }
 }
 
-pub(super) fn extract_single_argument<'a>(function: &'a Function) -> Result<&'a Expr, SqlExecutionError> {
+pub(super) fn extract_single_argument<'a>(
+    function: &'a Function,
+) -> Result<&'a Expr, SqlExecutionError> {
     if function.args.len() != 1 {
         return Err(SqlExecutionError::Unsupported(format!(
             "function {} requires exactly one argument",

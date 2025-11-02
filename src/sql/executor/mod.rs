@@ -15,8 +15,8 @@ use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
 use sqlparser::ast::{
-    Assignment, BinaryOperator, Expr, FromTable, GroupByExpr, ObjectName, OrderByExpr,
-    Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,
+    Assignment, BinaryOperator, Expr, FromTable, GroupByExpr, ObjectName, OrderByExpr, Query,
+    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
@@ -24,14 +24,14 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use aggregates::{
-    evaluate_aggregate_outputs, plan_aggregate_projection, select_item_contains_aggregate,
-    AggregateDataset, AggregateProjectionPlan, MaterializedColumns,
+    AggregateDataset, AggregateProjectionPlan, MaterializedColumns, evaluate_aggregate_outputs,
+    plan_aggregate_projection, select_item_contains_aggregate,
 };
-use expressions::{evaluate_selection_expr};
+use expressions::evaluate_selection_expr;
 use helpers::{
-    collect_expr_column_ordinals, column_name_from_expr, extract_equality_filters,
-    object_name_matches_table, object_name_to_string, parse_limit, parse_offset,
-    table_with_joins_to_name, wildcard_options_supported, expr_to_string,
+    collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
+    extract_equality_filters, object_name_matches_table, object_name_to_string, parse_limit,
+    parse_offset, table_with_joins_to_name, wildcard_options_supported,
 };
 use values::{CachedValue, compare_strs};
 
@@ -81,6 +81,8 @@ pub struct SelectResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
 }
+
+const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
 
 pub struct SqlExecutor {
     page_handler: Arc<PageHandler>,
@@ -261,9 +263,7 @@ impl SqlExecutor {
         let projection_items = projection;
 
         let selection = selection.ok_or_else(|| {
-            SqlExecutionError::Unsupported(
-                "SELECT requires WHERE with equality predicates on ORDER BY columns".into(),
-            )
+            SqlExecutionError::Unsupported("SELECT requires a WHERE clause for now".into())
         })?;
         let selection_expr = selection;
 
@@ -275,26 +275,11 @@ impl SqlExecutor {
         }
         let sort_columns: Vec<ColumnCatalog> = sort_columns_refs.into_iter().cloned().collect();
 
-        let sort_key_filters = collect_sort_key_filters(&selection_expr, &sort_columns)?;
         let mut key_values = Vec::with_capacity(sort_columns.len());
-        for column in &sort_columns {
-            key_values.push(sort_key_filters.get(&column.name).cloned().ok_or_else(|| {
-                SqlExecutionError::Unsupported(format!(
-                    "SELECT requires equality predicate for ORDER BY column {}",
-                    column.name
-                ))
-            })?);
-        }
 
         let aggregate_query = projection_items
             .iter()
             .any(|item| select_item_contains_aggregate(item));
-
-        if aggregate_query && (limit_expr.is_some() || offset_expr.is_some()) {
-            return Err(SqlExecutionError::Unsupported(
-                "aggregate SELECT does not support LIMIT/OFFSET".into(),
-            ));
-        }
 
         let mut aggregate_plan_opt: Option<AggregateProjectionPlan> = None;
         let mut projection_ordinals_opt: Option<Vec<usize>> = None;
@@ -327,10 +312,28 @@ impl SqlExecutor {
             collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
         required_ordinals.extend(predicate_ordinals);
 
-        println!("required ordinals: {:?}", required_ordinals);
+        let sort_key_filters = collect_sort_key_filters(&selection_expr, &sort_columns)?;
 
-        let mut candidate_rows =
-            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?;
+        let mut candidate_rows = if let Some(sort_key_filters) = sort_key_filters {
+            for column in &sort_columns {
+                key_values.push(sort_key_filters.get(&column.name).cloned().ok_or_else(|| {
+                    SqlExecutionError::Unsupported(format!(
+                        "SELECT requires equality predicate for ORDER BY column {}",
+                        column.name
+                    ))
+                })?);
+            }
+
+            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?
+        } else {
+            self.scan_rows_via_full_table(
+                &table_name,
+                &columns,
+                &required_ordinals,
+                &selection_expr,
+                &column_ordinals,
+            )?
+        };
         if candidate_rows.is_empty() && !aggregate_query {
             return Ok(SelectResult {
                 columns: result_columns,
@@ -921,6 +924,57 @@ impl SqlExecutor {
         Ok(refined)
     }
 
+    fn scan_rows_via_full_table(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        required_ordinals: &BTreeSet<usize>,
+        selection_expr: &Expr,
+        column_ordinals: &HashMap<String, usize>,
+    ) -> Result<Vec<u64>, SqlExecutionError> {
+        let total_rows = self.estimate_table_row_count(table, columns)?;
+        if total_rows == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut matching_rows: Vec<u64> = Vec::new();
+        let mut offset: u64 = 0;
+
+        while offset < total_rows {
+            let upper = (offset + FULL_SCAN_BATCH_SIZE).min(total_rows);
+            let rows: Vec<u64> = (offset..upper).collect();
+            let materialized =
+                materialize_columns(&self.page_handler, table, columns, required_ordinals, &rows)?;
+
+            for row_idx in rows.iter().copied() {
+                if evaluate_selection_expr(selection_expr, row_idx, column_ordinals, &materialized)?
+                {
+                    matching_rows.push(row_idx);
+                }
+            }
+
+            offset = upper;
+        }
+
+        Ok(matching_rows)
+    }
+
+    fn estimate_table_row_count(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+    ) -> Result<u64, SqlExecutionError> {
+        for column in columns {
+            if let Some(descriptor) = self
+                .page_handler
+                .locate_latest_in_table(table, &column.name)
+            {
+                return Ok(descriptor.entry_count);
+            }
+        }
+        Ok(0)
+    }
+
     fn row_matches_filters(
         &self,
         table: &str,
@@ -947,83 +1001,101 @@ impl SqlExecutor {
 fn collect_sort_key_filters(
     expr: &Expr,
     sort_columns: &[ColumnCatalog],
-) -> Result<HashMap<String, String>, SqlExecutionError> {
+) -> Result<Option<HashMap<String, String>>, SqlExecutionError> {
     if sort_columns.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(Some(HashMap::new()));
     }
 
-    let mut sort_names: HashSet<&str> = HashSet::with_capacity(sort_columns.len());
-    for column in sort_columns {
-        sort_names.insert(column.name.as_str());
-    }
-
+    let sort_names: HashSet<&str> = sort_columns.iter().map(|col| col.name.as_str()).collect();
     let mut filters = HashMap::with_capacity(sort_columns.len());
-    gather_sort_key_filters(expr, &sort_names, &mut filters)?;
+    let compatible = extract_sort_key_filters(expr, &sort_names, &mut filters)?;
+
+    if !compatible {
+        return Ok(None);
+    }
 
     for column in sort_columns {
         if !filters.contains_key(&column.name) {
-            return Err(SqlExecutionError::Unsupported(format!(
-                "SELECT requires equality predicate for ORDER BY column {}",
-                column.name
-            )));
+            return Ok(None);
         }
     }
 
-    Ok(filters)
+    Ok(Some(filters))
 }
 
-fn gather_sort_key_filters(
+fn extract_sort_key_filters(
     expr: &Expr,
     sort_names: &HashSet<&str>,
     filters: &mut HashMap<String, String>,
-) -> Result<(), SqlExecutionError> {
+) -> Result<bool, SqlExecutionError> {
     match expr {
         Expr::BinaryOp { left, op, right } => match op {
             BinaryOperator::And => {
-                gather_sort_key_filters(left, sort_names, filters)?;
-                gather_sort_key_filters(right, sort_names, filters)
+                let left_ok = extract_sort_key_filters(left, sort_names, filters)?;
+                let right_ok = extract_sort_key_filters(right, sort_names, filters)?;
+                Ok(left_ok && right_ok)
             }
             BinaryOperator::Eq => {
                 if let Some(column_name) = column_name_from_expr(left) {
                     if sort_names.contains(column_name.as_str()) {
-                        let value = expr_to_string(right)?;
+                        let value = match expr_to_string(right) {
+                            Ok(value) => value,
+                            Err(_) => return Ok(false),
+                        };
                         if let Some(existing) = filters.get(&column_name) {
                             if compare_strs(existing, &value) != Ordering::Equal {
-                                return Err(SqlExecutionError::Unsupported(format!(
-                                    "conflicting predicates for column {column_name}"
-                                )));
+                                return Ok(false);
                             }
                         } else {
-                            filters.insert(column_name, value);
+                            filters.insert(column_name.clone(), value);
                         }
-                        return Ok(());
+                        return Ok(true);
                     }
                 }
                 if let Some(column_name) = column_name_from_expr(right) {
                     if sort_names.contains(column_name.as_str()) {
-                        let value = expr_to_string(left)?;
+                        let value = match expr_to_string(left) {
+                            Ok(value) => value,
+                            Err(_) => return Ok(false),
+                        };
                         if let Some(existing) = filters.get(&column_name) {
                             if compare_strs(existing, &value) != Ordering::Equal {
-                                return Err(SqlExecutionError::Unsupported(format!(
-                                    "conflicting predicates for column {column_name}"
-                                )));
+                                return Ok(false);
                             }
                         } else {
-                            filters.insert(column_name, value);
+                            filters.insert(column_name.clone(), value);
                         }
-                        return Ok(());
+                        return Ok(true);
                     }
                 }
-                Ok(())
+                Ok(true)
             }
-            BinaryOperator::Or | BinaryOperator::Xor => Err(SqlExecutionError::Unsupported(
-                "SELECT filters with OR are not supported for ORDER BY lookups".into(),
-            )),
-            _ => Ok(()),
+            BinaryOperator::Or | BinaryOperator::Xor => Ok(false),
+            _ => {
+                if expression_touches_sort(expr, sort_names) {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
         },
-        Expr::Nested(inner) => gather_sort_key_filters(inner, sort_names, filters),
-        _ => Ok(()),
+        Expr::Nested(inner) => extract_sort_key_filters(inner, sort_names, filters),
+        _ => {
+            if expression_touches_sort(expr, sort_names) {
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        }
     }
+}
+
+fn expression_touches_sort(expr: &Expr, sort_names: &HashSet<&str>) -> bool {
+    let mut columns = BTreeSet::new();
+    collect_expr_column_names(expr, &mut columns);
+    columns
+        .iter()
+        .any(|name: &String| sort_names.contains(name.as_str()))
 }
 
 fn build_projection(

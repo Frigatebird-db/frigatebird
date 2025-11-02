@@ -5,7 +5,7 @@ use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SqlExecutor, SqlExecutionError};
+use idk_uwu_ig::sql::executor::{SqlExecutionError, SqlExecutor};
 use std::env;
 use std::error::Error;
 use std::sync::{Arc, RwLock};
@@ -48,10 +48,8 @@ fn setup_executor() -> SqlExecutor {
     let metadata_store = Arc::new(RwLock::new(TableMetaStore::new()));
     let page_directory = Arc::new(PageDirectory::new(Arc::clone(&metadata_store)));
 
-    let compressed_cache =
-        Arc::new(RwLock::new(PageCache::<PageCacheEntryCompressed>::new()));
-    let uncompressed_cache =
-        Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
+    let compressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryCompressed>::new()));
+    let uncompressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
     let page_io = Arc::new(PageIO {});
 
     let locator = Arc::new(PageLocator::new(Arc::clone(&page_directory)));
@@ -90,7 +88,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_insert_phase(executor: &SqlExecutor, config: &BenchmarkConfig) -> Result<(), SqlExecutionError> {
+fn run_insert_phase(
+    executor: &SqlExecutor,
+    config: &BenchmarkConfig,
+) -> Result<(), SqlExecutionError> {
     let payload = "x".repeat(config.payload_bytes);
     let mut rows_written: usize = 0;
     let mut batches: usize = 0;
@@ -136,9 +137,7 @@ fn run_insert_phase(executor: &SqlExecutor, config: &BenchmarkConfig) -> Result<
                 "Inserted {rows_written}/{total} rows (last batch: {batch_rows} rows in {batch_elapsed:?})",
                 total = config.rows
             );
-            println!(
-                "So far, that is {rows_written} shits lovingly stuffed into the table."
-            );
+            println!("So far, that is {rows_written} shits lovingly stuffed into the table.");
         }
     }
 
@@ -160,7 +159,10 @@ fn run_insert_phase(executor: &SqlExecutor, config: &BenchmarkConfig) -> Result<
     Ok(())
 }
 
-fn run_query_phase(executor: &SqlExecutor, config: &BenchmarkConfig) -> Result<(), SqlExecutionError> {
+fn run_query_phase(
+    executor: &SqlExecutor,
+    config: &BenchmarkConfig,
+) -> Result<(), SqlExecutionError> {
     println!("Running query benchmarks…");
 
     let rows_per_id = config.rows_per_id.max(1);
