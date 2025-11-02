@@ -2,7 +2,9 @@ pub mod page_io;
 
 use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
 use crate::helpers::compressor::Compressor;
-use crate::metadata_store::{PageDescriptor, PageDirectory, PageSlice};
+use crate::metadata_store::{
+    CatalogError, PageDescriptor, PageDirectory, PageSlice, TableCatalog,
+};
 use crate::page_handler::page_io::PageIO;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
@@ -82,6 +84,20 @@ impl PageLocator {
 
     pub fn lookup(&self, id: &str) -> Option<PageDescriptor> {
         self.directory.lookup(id)
+    }
+
+    pub fn table_catalog(&self, table: &str) -> Option<TableCatalog> {
+        self.directory.table_catalog(table)
+    }
+
+    pub fn update_latest_entry_count(
+        &self,
+        table: &str,
+        column: &str,
+        entry_count: u64,
+    ) -> Result<(), CatalogError> {
+        self.directory
+            .update_latest_entry_count(table, column, entry_count)
     }
 }
 
@@ -337,6 +353,20 @@ impl PageHandler {
     ) -> Vec<PageSlice> {
         self.locator
             .range_slices_for(table, column, start_row, end_row)
+    }
+
+    pub fn table_catalog(&self, table: &str) -> Option<TableCatalog> {
+        self.locator.table_catalog(table)
+    }
+
+    pub fn update_entry_count_in_table(
+        &self,
+        table: &str,
+        column: &str,
+        entry_count: u64,
+    ) -> Result<(), CatalogError> {
+        self.locator
+            .update_latest_entry_count(table, column, entry_count)
     }
 
     pub fn get_page(&self, page_meta: PageDescriptor) -> Option<Arc<PageCacheEntryUncompressed>> {

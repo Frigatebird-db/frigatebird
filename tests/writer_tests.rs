@@ -105,6 +105,48 @@ fn writer_submit_multiple_columns() {
 }
 
 #[test]
+fn writer_submit_insert_at_operation() {
+    let (writer, page_handler, directory) = setup_writer();
+
+    // Seed two entries so we can insert between them.
+    let seed_job = UpdateJob::new(
+        "users",
+        vec![ColumnUpdate::new(
+            "score",
+            vec![
+                UpdateOp::Append {
+                    entry: Entry::new("10"),
+                },
+                UpdateOp::Append {
+                    entry: Entry::new("30"),
+                },
+            ],
+        )],
+    );
+    writer.submit(seed_job).expect("submit seed failed");
+    thread::sleep(Duration::from_millis(100));
+
+    // Insert value that should land between the two existing entries.
+    let insert_job = UpdateJob::new(
+        "users",
+        vec![ColumnUpdate::new(
+            "score",
+            vec![UpdateOp::InsertAt {
+                row: 1,
+                entry: Entry::new("20"),
+            }],
+        )],
+    );
+    writer.submit(insert_job).expect("submit insert failed");
+    thread::sleep(Duration::from_millis(100));
+
+    let descriptor = directory.latest_in_table("users", "score").unwrap();
+    let page = page_handler.get_page(descriptor).unwrap();
+    let values: Vec<&str> = page.page.entries.iter().map(|e| e.get_data()).collect();
+    assert_eq!(values, vec!["10", "20", "30"]);
+}
+
+#[test]
 fn writer_submit_overwrite_operation() {
     let (writer, page_handler, directory) = setup_writer();
 

@@ -23,6 +23,8 @@ pub enum UpdateOp {
     Overwrite { row: u64, entry: Entry },
     /// Append a new entry to the end of the page.
     Append { entry: Entry },
+    /// Insert a new entry at the provided logical row, shifting existing entries.
+    InsertAt { row: u64, entry: Entry },
 }
 
 /// A unit of work handed to the Writer.
@@ -110,6 +112,23 @@ mod tests {
                 assert_eq!(e.get_data(), "updated_data");
             }
             _ => panic!("Expected Overwrite variant"),
+        }
+    }
+
+    #[test]
+    fn update_op_insert_at_stores_row_and_entry() {
+        let entry = Entry::new("inserted");
+        let op = UpdateOp::InsertAt {
+            row: 3,
+            entry: entry.clone(),
+        };
+
+        match op {
+            UpdateOp::InsertAt { row, entry: e } => {
+                assert_eq!(row, 3);
+                assert_eq!(e.get_data(), "inserted");
+            }
+            _ => panic!("Expected InsertAt variant"),
         }
     }
 

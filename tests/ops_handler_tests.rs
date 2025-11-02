@@ -1,11 +1,14 @@
-use idk_uwu_ig::cache::page_cache::PageCache;
+use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
+use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::ops_handler::{
     create_table_from_plan, range_scan_column_entry, update_column_entry, upsert_data_into_column,
+    upsert_data_into_table_column,
 };
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use idk_uwu_ig::page::Page;
 use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
 use std::sync::{Arc, RwLock};
 
@@ -349,4 +352,72 @@ fn ops_handler_whitespace_column_names() {
     assert!(result1.is_err() || result1.is_ok());
     assert!(result2.is_err() || result2.is_ok());
     assert!(result3.is_err() || result3.is_ok());
+}
+
+#[test]
+fn sorted_upsert_inserts_in_order() {
+    let store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = Arc::new(PageDirectory::new(Arc::clone(&store)));
+    let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
+    let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
+    let page_io = Arc::new(PageIO {});
+    let compressor = Arc::new(Compressor::new());
+
+    let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        compressor,
+    ));
+    let page_handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
+
+    let plan = CreateTablePlan::new(
+        "users",
+        vec![
+            ColumnSpec::new("id", "String"),
+            ColumnSpec::new("score", "String"),
+        ],
+        vec!["score".into()],
+        false,
+    );
+    create_table_from_plan(&directory, &plan).expect("create ordered table");
+
+    let descriptor = directory
+        .register_page_in_table_with_sizes(
+            "users",
+            "score",
+            "mem://users_score".into(),
+            0,
+            0,
+            0,
+            2,
+        )
+        .expect("register page");
+
+    let mut cached = PageCacheEntryUncompressed { page: Page::new() };
+    cached.page.page_metadata = descriptor.id.clone();
+    cached.page.entries.push(Entry::new("10"));
+    cached.page.entries.push(Entry::new("30"));
+    page_handler.write_back_uncompressed(&descriptor.id, cached);
+
+    let inserted = upsert_data_into_table_column(&page_handler, "users", "score", "20")
+        .expect("sorted insert succeeds");
+    assert!(inserted);
+
+    let latest = page_handler
+        .locate_latest_in_table("users", "score")
+        .expect("descriptor exists");
+    assert_eq!(latest.entry_count, 3);
+    let latest_from_directory = directory
+        .latest_in_table("users", "score")
+        .expect("directory descriptor");
+    assert_eq!(latest_from_directory.entry_count, 3);
+    let page = page_handler
+        .get_page(latest)
+        .expect("page loaded");
+    let values: Vec<&str> = page.page.entries.iter().map(|e| e.get_data()).collect();
+    assert_eq!(values, vec!["10", "20", "30"]);
 }
