@@ -1,9 +1,10 @@
 pub mod page_io;
 
 use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use crate::entry;
 use crate::helpers::compressor::Compressor;
 use crate::metadata_store::{
-    CatalogError, PageDescriptor, PageDirectory, PageSlice, TableCatalog,
+    CatalogError, PageDescriptor, PageDirectory, PageSlice, RowLocation, TableCatalog,
 };
 use crate::page_handler::page_io::PageIO;
 use crossbeam::channel::{self, Receiver, Sender};
@@ -88,6 +89,15 @@ impl PageLocator {
 
     pub fn table_catalog(&self, table: &str) -> Option<TableCatalog> {
         self.directory.table_catalog(table)
+    }
+
+    pub fn locate_row_in_table(
+        &self,
+        table: &str,
+        column: &str,
+        row: u64,
+    ) -> Option<RowLocation> {
+        self.directory.locate_row_in_table(table, column, row)
     }
 
     pub fn update_latest_entry_count(
@@ -357,6 +367,29 @@ impl PageHandler {
 
     pub fn table_catalog(&self, table: &str) -> Option<TableCatalog> {
         self.locator.table_catalog(table)
+    }
+
+    pub fn locate_row_in_table(
+        &self,
+        table: &str,
+        column: &str,
+        row: u64,
+    ) -> Option<RowLocation> {
+        self.locator.locate_row_in_table(table, column, row)
+    }
+
+    pub fn read_entry_at(
+        &self,
+        table: &str,
+        column: &str,
+        row: u64,
+    ) -> Option<entry::Entry> {
+        let location = self.locate_row_in_table(table, column, row)?;
+        let page = self.get_page(location.descriptor.clone())?;
+        page.page
+            .entries
+            .get(location.page_row_index as usize)
+            .cloned()
     }
 
     pub fn update_entry_count_in_table(
