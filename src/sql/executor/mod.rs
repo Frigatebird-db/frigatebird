@@ -33,7 +33,7 @@ use helpers::{
     object_name_matches_table, object_name_to_string, parse_limit, parse_offset,
     table_with_joins_to_name, wildcard_options_supported,
 };
-use values::{CachedValue, compare_strs};
+use values::{CachedValue, compare_strs, encode_null};
 
 #[derive(Debug)]
 pub enum SqlExecutionError {
@@ -278,7 +278,7 @@ impl SqlExecutor {
         }
         let sort_columns: Vec<ColumnCatalog> = sort_columns_refs.into_iter().cloned().collect();
 
-        validate_order_by(&order_by_clauses, &sort_columns, &table_name)?;
+        let order_specs = validate_order_by(&order_by_clauses, &sort_columns, &table_name)?;
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
 
@@ -367,14 +367,6 @@ impl SqlExecutor {
         candidate_rows.sort_unstable();
         candidate_rows.dedup();
 
-        let order_desc = order_by_clauses
-            .first()
-            .map(|clause| clause.asc == Some(false))
-            .unwrap_or(false);
-        if order_desc {
-            candidate_rows.reverse();
-        }
-
         let materialized = materialize_columns(
             &self.page_handler,
             &table_name,
@@ -395,6 +387,20 @@ impl SqlExecutor {
             {
                 matching_rows.push(row_idx);
             }
+        }
+
+        if !order_specs.is_empty() {
+            let table_name_order = table_name.clone();
+            matching_rows.sort_by(|left, right| {
+                self.compare_rows(
+                    &table_name_order,
+                    &columns,
+                    &order_specs,
+                    &materialized,
+                    *left,
+                    *right,
+                )
+            });
         }
 
         if aggregate_query {
@@ -694,7 +700,12 @@ impl SqlExecutor {
         let mut matching_rows = Vec::new();
         for &row_idx in &candidate_rows {
             if !has_selection
-                || evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)?
+                || evaluate_selection_expr(
+                    &selection_expr,
+                    row_idx,
+                    &column_ordinals,
+                    &materialized,
+                )?
             {
                 matching_rows.push(row_idx);
             }
@@ -714,9 +725,9 @@ impl SqlExecutor {
                 new_row[*ordinal] = value.clone();
             }
 
-            let sort_changed = sort_indices.iter().any(|&idx| {
-                compare_strs(&current_row[idx], &new_row[idx]) != Ordering::Equal
-            });
+            let sort_changed = sort_indices
+                .iter()
+                .any(|&idx| compare_strs(&current_row[idx], &new_row[idx]) != Ordering::Equal);
 
             if sort_changed {
                 delete_row(&self.page_handler, &table_name, row_idx)
@@ -869,7 +880,12 @@ impl SqlExecutor {
         let mut matching_rows = Vec::new();
         for &row_idx in &candidate_rows {
             if !has_selection
-                || evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)?
+                || evaluate_selection_expr(
+                    &selection_expr,
+                    row_idx,
+                    &column_ordinals,
+                    &materialized,
+                )?
             {
                 matching_rows.push(row_idx);
             }
@@ -1082,15 +1098,67 @@ impl SqlExecutor {
         }
         Ok(0)
     }
+
+    fn compare_rows(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        order_specs: &[OrderingSpec],
+        materialized: &MaterializedColumns,
+        left: u64,
+        right: u64,
+    ) -> std::cmp::Ordering {
+        for spec in order_specs {
+            let ordinal = spec.ordinal;
+            let column = &columns[ordinal];
+            let left_val = self.lookup_value(table, column, ordinal, left, materialized);
+            let right_val = self.lookup_value(table, column, ordinal, right, materialized);
+            let left_str = match &left_val {
+                CachedValue::Null => encode_null(),
+                CachedValue::Text(text) => text.clone(),
+            };
+            let right_str = match &right_val {
+                CachedValue::Null => encode_null(),
+                CachedValue::Text(text) => text.clone(),
+            };
+            let mut ord = compare_strs(&left_str, &right_str);
+            if spec.desc {
+                ord = ord.reverse();
+            }
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        Ordering::Equal
+    }
+
+    fn lookup_value(
+        &self,
+        table: &str,
+        column: &ColumnCatalog,
+        ordinal: usize,
+        row_idx: u64,
+        materialized: &MaterializedColumns,
+    ) -> CachedValue {
+        if let Some(map) = materialized.get(&ordinal) {
+            if let Some(value) = map.get(&row_idx) {
+                return value.clone();
+            }
+        }
+        self.page_handler
+            .read_entry_at(table, &column.name, row_idx)
+            .map(|entry| CachedValue::from_entry(&entry))
+            .unwrap_or(CachedValue::Null)
+    }
 }
 
 fn validate_order_by(
     clauses: &[OrderByExpr],
     sort_columns: &[ColumnCatalog],
     table_name: &str,
-) -> Result<(), SqlExecutionError> {
+) -> Result<Vec<OrderingSpec>, SqlExecutionError> {
     if clauses.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     if clauses.len() > sort_columns.len() {
@@ -1099,14 +1167,9 @@ fn validate_order_by(
         )));
     }
 
+    let mut specs = Vec::with_capacity(clauses.len());
+
     for (idx, clause) in clauses.iter().enumerate() {
-        if clause.asc == Some(false) {
-            if idx > 0 || clauses.len() > 1 {
-                return Err(SqlExecutionError::Unsupported(
-                    "ORDER BY DESC is only supported on the leading table ORDER BY column".into(),
-                ));
-            }
-        }
         if clause.nulls_first.is_some() {
             return Err(SqlExecutionError::Unsupported(
                 "ORDER BY with NULLS FIRST/LAST is not supported yet".into(),
@@ -1126,9 +1189,24 @@ fn validate_order_by(
                 column_name, expected
             )));
         }
+
+        specs.push(OrderingSpec {
+            ordinal: sort_columns[idx].ordinal,
+            desc: clause.asc == Some(false),
+        });
     }
 
-    Ok(())
+    // If only first clause specified and DESC, allow additional implicit ascending for trailing
+    // ORDER BY columns requested via table default? We'll append remaining columns as ASC to ensure
+    // deterministic ordering when LIMIT present.
+    for idx in clauses.len()..sort_columns.len() {
+        specs.push(OrderingSpec {
+            ordinal: sort_columns[idx].ordinal,
+            desc: false,
+        });
+    }
+
+    Ok(specs)
 }
 
 fn collect_sort_key_filters(
@@ -1442,4 +1520,9 @@ fn materialize_columns(
     }
 
     Ok(result)
+}
+#[derive(Clone)]
+struct OrderingSpec {
+    ordinal: usize,
+    desc: bool,
 }

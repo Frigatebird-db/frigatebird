@@ -35,6 +35,9 @@ pub(super) fn expr_to_string(expr: &Expr) -> Result<String, SqlExecutionError> {
         Expr::Value(Value::Number(n, _)) => Ok(n.clone()),
         Expr::Value(Value::Boolean(b)) => Ok(if *b { "true" } else { "false" }.into()),
         Expr::Value(Value::Null) => Ok(super::values::encode_null()),
+        Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("default") => {
+            Ok(super::values::encode_null())
+        }
         _ => Err(SqlExecutionError::Unsupported(format!(
             "unsupported literal expression: {expr:?}"
         ))),
