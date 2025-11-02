@@ -1,14 +1,37 @@
 use crossbeam::channel;
+use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
 use idk_uwu_ig::executor::PipelineExecutor;
+use idk_uwu_ig::helpers::compressor::Compressor;
+use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
+use idk_uwu_ig::page_handler::page_io::PageIO;
+use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use idk_uwu_ig::pipeline::{Job, PipelineBatch, PipelineStep};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
 use std::thread;
 use std::time::Duration;
+
+fn create_test_page_handler() -> Arc<PageHandler> {
+    let meta_store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = Arc::new(PageDirectory::new(meta_store));
+    let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
+
+    let compressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryCompressed>::new()));
+    let page_io = Arc::new(PageIO {});
+    let fetcher = Arc::new(PageFetcher::new(compressed_cache, page_io));
+
+    let uncompressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
+    let compressor = Arc::new(Compressor::new());
+    let materializer = Arc::new(PageMaterializer::new(uncompressed_cache, compressor));
+
+    Arc::new(PageHandler::new(locator, fetcher, materializer))
+}
 
 fn create_dummy_job(step_count: usize) -> Job {
     let (entry_tx, _entry_rx) = channel::unbounded::<PipelineBatch>();
     let mut steps = Vec::with_capacity(step_count);
+    let page_handler = create_test_page_handler();
 
     let mut prev_rx = {
         let (tx, rx) = channel::unbounded::<PipelineBatch>();
@@ -24,6 +47,8 @@ fn create_dummy_job(step_count: usize) -> Job {
             tx,
             prev_rx,
             idx == 0,
+            "test_table".to_string(),
+            Arc::clone(&page_handler),
         ));
         prev_rx = rx;
     }
@@ -65,8 +90,9 @@ fn executor_job_get_next_executes_steps() {
 
     let (entry_tx, _) = channel::unbounded::<PipelineBatch>();
     let (tx, rx) = channel::unbounded::<PipelineBatch>();
+    let page_handler = create_test_page_handler();
 
-    let step = PipelineStep::new("col1".to_string(), Vec::new(), tx.clone(), rx.clone(), true);
+    let step = PipelineStep::new("col1".to_string(), Vec::new(), tx.clone(), rx.clone(), true, "table".to_string(), page_handler);
 
     let job = Job::new("table".into(), vec![step], entry_tx);
 
@@ -217,8 +243,10 @@ fn executor_step_execution_sequence() {
     let _ = tx1.send(vec![]);
     let _ = tx2.send(vec![]);
 
-    let step1 = PipelineStep::new("col1".into(), vec![], tx1, rx1, true);
-    let step2 = PipelineStep::new("col2".into(), vec![], tx2, rx2, false);
+    let page_handler = create_test_page_handler();
+
+    let step1 = PipelineStep::new("col1".into(), vec![], tx1, rx1, true, "table".to_string(), Arc::clone(&page_handler));
+    let step2 = PipelineStep::new("col2".into(), vec![], tx2, rx2, false, "table".to_string(), page_handler);
 
     let job = Job::new("table".into(), vec![step1, step2], entry_tx);
     let job_arc = Arc::new(job);
