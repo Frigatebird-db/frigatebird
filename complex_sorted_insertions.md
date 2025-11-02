@@ -9,3 +9,5 @@ I think we need a darn comparator in such scenarios, something which realizes th
 I think once we have this one settled, everything is just a breeze
 
 this way we could also add support for the DELETE sql stuff lol
+
+wdyt about it
