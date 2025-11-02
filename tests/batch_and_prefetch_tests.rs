@@ -266,26 +266,29 @@ fn cache_concurrent_readers_single_writer() {
 }
 
 #[test]
-fn mvcc_version_overflow() {
+fn column_chain_handles_many_versions() {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
     let directory = Arc::new(PageDirectory::new(store));
 
-    // Add more than MAX_VERSIONS_PER_PAGE (8) versions
     for i in 0..20 {
-        directory.register_page("col1", format!("test{}.db", i), i * 1024);
-        thread::sleep(Duration::from_millis(1)); // Ensure different timestamps
+        directory
+            .register_page_with_size_and_entries(
+                "col1",
+                format!("test{}.db", i),
+                i * 1024,
+                256 * 1024,
+                (i + 1) as u64,
+            )
+            .unwrap();
     }
 
-    // Should still be able to query
-    let results = directory.range("col1", 0, 10, u64::MAX);
-    assert!(
-        results.len() > 0,
-        "Should find latest version even after overflow"
-    );
+    let latest = directory.latest("col1").unwrap();
+    assert_eq!(latest.disk_path, "test19.db");
+    assert_eq!(latest.offset, 19 * 1024);
+    assert_eq!(latest.entry_count, 20);
 
-    // Old versions should be pruned, verify by checking timestamp
-    let old_timestamp = idk_uwu_ig::entry::current_epoch_millis() - 1000;
-    let old_results = directory.range("col1", 0, 10, old_timestamp);
-    // Might not find very old versions if they were pruned
-    assert!(old_results.len() <= results.len());
+    let slices = directory.locate_range("col1", 0, 400);
+    assert_eq!(slices.len(), 20);
+    assert_eq!(slices[0].descriptor.entry_count, 1);
+    assert_eq!(slices[19].descriptor.entry_count, 20);
 }

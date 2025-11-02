@@ -1,4 +1,4 @@
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
+use idk_uwu_ig::metadata_store::{PageDirectory, PendingPage, TableMetaStore};
 use std::sync::{Arc, RwLock};
 
 #[test]
@@ -131,6 +131,49 @@ fn page_directory_overlapping_ranges() {
 
     let results = directory.range("col1", 75, 125, u64::MAX);
     assert!(results.len() >= 0);
+}
+
+#[test]
+fn register_batch_replaces_tail_and_updates_prefix() {
+    let mut store = TableMetaStore::new();
+
+    let first = vec![PendingPage {
+        column: "users".to_string(),
+        disk_path: "file0".to_string(),
+        offset: 0,
+        size: 256 * 1024,
+        entry_count: 8,
+        replace_last: false,
+    }];
+    store.register_batch(&first);
+
+    let second = vec![PendingPage {
+        column: "users".to_string(),
+        disk_path: "file0".to_string(),
+        offset: 256 * 1024,
+        size: 256 * 1024,
+        entry_count: 4,
+        replace_last: false,
+    }];
+    store.register_batch(&second);
+
+    let third = vec![PendingPage {
+        column: "users".to_string(),
+        disk_path: "file0".to_string(),
+        offset: 512 * 1024,
+        size: 64 * 1024,
+        entry_count: 16,
+        replace_last: true,
+    }];
+    store.register_batch(&third);
+
+    let slices = store.locate_range("users", 0, 31);
+    assert_eq!(slices.len(), 3);
+    assert_eq!(slices[1].descriptor.entry_count, 4);
+    assert_eq!(slices[2].descriptor.entry_count, 16);
+
+    let location = store.locate_row("users", 20).unwrap();
+    assert_eq!(location.descriptor.entry_count, 16);
 }
 
 #[test]
