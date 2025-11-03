@@ -27,7 +27,7 @@ use aggregates::{
     AggregateDataset, AggregateProjectionPlan, MaterializedColumns, evaluate_aggregate_outputs,
     plan_aggregate_projection, select_item_contains_aggregate,
 };
-use expressions::evaluate_selection_expr;
+use expressions::{evaluate_row_expr, evaluate_selection_expr};
 use helpers::{
     collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
     object_name_matches_table, object_name_to_string, parse_limit, parse_offset,
@@ -80,6 +80,33 @@ impl From<crate::sql::models::PlannerError> for SqlExecutionError {
 pub struct SelectResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
+}
+
+struct ProjectionPlan {
+    headers: Vec<String>,
+    items: Vec<ProjectionItem>,
+    required_ordinals: BTreeSet<usize>,
+}
+
+impl ProjectionPlan {
+    fn new() -> Self {
+        Self {
+            headers: Vec::new(),
+            items: Vec::new(),
+            required_ordinals: BTreeSet::new(),
+        }
+    }
+
+    fn needs_dataset(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item, ProjectionItem::Computed { .. }))
+    }
+}
+
+enum ProjectionItem {
+    Direct { ordinal: usize },
+    Computed { expr: Expr },
 }
 
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
@@ -286,7 +313,7 @@ impl SqlExecutor {
             .any(|item| select_item_contains_aggregate(item));
 
         let mut aggregate_plan_opt: Option<AggregateProjectionPlan> = None;
-        let mut projection_ordinals_opt: Option<Vec<usize>> = None;
+        let mut projection_plan_opt: Option<ProjectionPlan> = None;
         let mut required_ordinals: BTreeSet<usize>;
         let result_columns: Vec<String>;
 
@@ -301,16 +328,16 @@ impl SqlExecutor {
             result_columns = plan.headers.clone();
             aggregate_plan_opt = Some(plan);
         } else {
-            let (cols, projection_ordinals_vec) = build_projection(
+            let projection_plan = build_projection(
                 projection_items.clone(),
                 &columns,
                 &column_ordinals,
                 &table_name,
                 table_alias.as_deref(),
             )?;
-            required_ordinals = projection_ordinals_vec.iter().copied().collect();
-            result_columns = cols;
-            projection_ordinals_opt = Some(projection_ordinals_vec);
+            required_ordinals = projection_plan.required_ordinals.clone();
+            result_columns = projection_plan.headers.clone();
+            projection_plan_opt = Some(projection_plan);
         }
 
         for column in &sort_columns {
@@ -423,28 +450,49 @@ impl SqlExecutor {
             });
         }
 
-        let projection_ordinals = projection_ordinals_opt.expect("projection ordinals required");
-
+        let projection_plan = projection_plan_opt.expect("projection plan required");
         let mut rows = Vec::with_capacity(matching_rows.len());
+        let dataset_holder;
+        let dataset = if projection_plan.needs_dataset() {
+            dataset_holder = Some(AggregateDataset {
+                rows: matching_rows.as_slice(),
+                materialized: &materialized,
+                column_ordinals: &column_ordinals,
+            });
+            dataset_holder.as_ref()
+        } else {
+            dataset_holder = None;
+            None
+        };
+
         for &row_idx in &matching_rows {
-            let mut projected = Vec::with_capacity(projection_ordinals.len());
-            for &ordinal in &projection_ordinals {
-                let cached = materialized
-                    .get(&ordinal)
-                    .and_then(|column_map| column_map.get(&row_idx))
-                    .cloned()
-                    .or_else(|| {
-                        self.page_handler
-                            .read_entry_at(&table_name, &columns[ordinal].name, row_idx)
-                            .map(|entry| CachedValue::from_entry(&entry))
-                    })
-                    .ok_or_else(|| {
-                        SqlExecutionError::OperationFailed(format!(
-                            "missing value for {table_name}.{} at row {row_idx}",
-                            columns[ordinal].name
-                        ))
-                    })?;
-                projected.push(cached.into_option_string());
+            let mut projected = Vec::with_capacity(projection_plan.items.len());
+            for item in &projection_plan.items {
+                match item {
+                    ProjectionItem::Direct { ordinal } => {
+                        let cached = materialized
+                            .get(ordinal)
+                            .and_then(|column_map| column_map.get(&row_idx))
+                            .cloned()
+                            .or_else(|| {
+                                self.page_handler
+                                    .read_entry_at(&table_name, &columns[*ordinal].name, row_idx)
+                                    .map(|entry| CachedValue::from_entry(&entry))
+                            })
+                            .ok_or_else(|| {
+                                SqlExecutionError::OperationFailed(format!(
+                                    "missing value for {table_name}.{} at row {row_idx}",
+                                    columns[*ordinal].name
+                                ))
+                            })?;
+                        projected.push(cached.into_option_string());
+                    }
+                    ProjectionItem::Computed { expr } => {
+                        let dataset = dataset.expect("dataset required for computed projection");
+                        let value = evaluate_row_expr(expr, row_idx, dataset)?;
+                        projected.push(value.into_option_string());
+                    }
+                }
             }
             rows.push(projected);
         }
@@ -1319,7 +1367,7 @@ fn build_projection(
     column_ordinals: &HashMap<String, usize>,
     table_name: &str,
     table_alias: Option<&str>,
-) -> Result<(Vec<String>, Vec<usize>), SqlExecutionError> {
+) -> Result<ProjectionPlan, SqlExecutionError> {
     if projection.is_empty() {
         return Err(SqlExecutionError::Unsupported(
             "SELECT requires at least one projection item".into(),
@@ -1362,13 +1410,12 @@ fn build_projection(
             Ok(collect_all_columns(table_columns))
         }
         item => {
-            let mut names = Vec::new();
-            let mut ordinals = Vec::new();
-            push_projection_item(item, column_ordinals, table_name, &mut names, &mut ordinals)?;
+            let mut plan = ProjectionPlan::new();
+            push_projection_item(item, column_ordinals, table_name, &mut plan)?;
             for item in iter {
-                push_projection_item(item, column_ordinals, table_name, &mut names, &mut ordinals)?;
+                push_projection_item(item, column_ordinals, table_name, &mut plan)?;
             }
-            Ok((names, ordinals))
+            Ok(plan)
         }
     }
 }
@@ -1377,42 +1424,19 @@ fn push_projection_item(
     item: SelectItem,
     column_ordinals: &HashMap<String, usize>,
     table_name: &str,
-    result_names: &mut Vec<String>,
-    result_ordinals: &mut Vec<usize>,
+    plan: &mut ProjectionPlan,
 ) -> Result<(), SqlExecutionError> {
     match item {
         SelectItem::UnnamedExpr(expr) => {
-            let column_name = column_name_from_expr(&expr).ok_or_else(|| {
-                SqlExecutionError::Unsupported(
-                    "only simple column projections are supported".into(),
-                )
-            })?;
-            let ordinal = column_ordinals.get(&column_name).copied().ok_or_else(|| {
-                SqlExecutionError::ColumnMismatch {
-                    table: table_name.to_string(),
-                    column: column_name.clone(),
-                }
-            })?;
-            result_names.push(column_name);
-            result_ordinals.push(ordinal);
-            Ok(())
+            push_expression_item(expr, None, column_ordinals, table_name, plan)
         }
-        SelectItem::ExprWithAlias { expr, alias } => {
-            let column_name = column_name_from_expr(&expr).ok_or_else(|| {
-                SqlExecutionError::Unsupported(
-                    "only simple column projections are supported".into(),
-                )
-            })?;
-            let ordinal = column_ordinals.get(&column_name).copied().ok_or_else(|| {
-                SqlExecutionError::ColumnMismatch {
-                    table: table_name.to_string(),
-                    column: column_name.clone(),
-                }
-            })?;
-            result_names.push(alias.value.clone());
-            result_ordinals.push(ordinal);
-            Ok(())
-        }
+        SelectItem::ExprWithAlias { expr, alias } => push_expression_item(
+            expr,
+            Some(alias.value.clone()),
+            column_ordinals,
+            table_name,
+            plan,
+        ),
         SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => {
             Err(SqlExecutionError::Unsupported(
                 "wildcard projection must be the only projection item".into(),
@@ -1421,14 +1445,41 @@ fn push_projection_item(
     }
 }
 
-fn collect_all_columns(table_columns: &[ColumnCatalog]) -> (Vec<String>, Vec<usize>) {
-    let mut names = Vec::with_capacity(table_columns.len());
-    let mut ordinals = Vec::with_capacity(table_columns.len());
-    for column in table_columns {
-        names.push(column.name.clone());
-        ordinals.push(column.ordinal);
+fn push_expression_item(
+    expr: Expr,
+    alias: Option<String>,
+    column_ordinals: &HashMap<String, usize>,
+    table_name: &str,
+    plan: &mut ProjectionPlan,
+) -> Result<(), SqlExecutionError> {
+    if let Some(column_name) = column_name_from_expr(&expr) {
+        if let Some(&ordinal) = column_ordinals.get(&column_name) {
+            let header = alias.unwrap_or_else(|| column_name.clone());
+            plan.headers.push(header);
+            plan.items.push(ProjectionItem::Direct { ordinal });
+            plan.required_ordinals.insert(ordinal);
+            return Ok(());
+        }
     }
-    (names, ordinals)
+
+    let ordinals = collect_expr_column_ordinals(&expr, column_ordinals, table_name)?;
+    plan.required_ordinals.extend(ordinals.iter().copied());
+    let header = alias.unwrap_or_else(|| expr.to_string());
+    plan.headers.push(header);
+    plan.items.push(ProjectionItem::Computed { expr });
+    Ok(())
+}
+
+fn collect_all_columns(table_columns: &[ColumnCatalog]) -> ProjectionPlan {
+    let mut plan = ProjectionPlan::new();
+    for column in table_columns {
+        plan.headers.push(column.name.clone());
+        plan.items.push(ProjectionItem::Direct {
+            ordinal: column.ordinal,
+        });
+        plan.required_ordinals.insert(column.ordinal);
+    }
+    plan
 }
 
 fn materialize_columns(
