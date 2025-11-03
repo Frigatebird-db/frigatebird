@@ -806,7 +806,7 @@ impl PageDirectory {
         column: &str,
         l_bound: u64,
         r_bound: u64,
-        commit_time_upper_bound: u64,
+        _commit_time_upper_bound: u64,
     ) -> Vec<PageDescriptor> {
         if r_bound == 0 || l_bound >= r_bound {
             return Vec::new();

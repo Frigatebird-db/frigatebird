@@ -599,17 +599,31 @@ fn collect_expr_columns(expr: &Expr, columns: &mut BTreeSet<String>) -> PlannerR
             collect_expr_columns(filter, columns)?;
         }
         Function(function) => collect_function_columns(function, columns)?,
+        GroupingSets(sets) => {
+            for group in sets {
+                for expr in group {
+                    collect_expr_columns(expr, columns)?;
+                }
+            }
+        }
         Exists { .. }
         | Subquery(_)
         | ArraySubquery(_)
         | ListAgg(_)
         | ArrayAgg(_)
-        | GroupingSets(_)
-        | Cube(_)
-        | Rollup(_)
-        | OuterJoin(_) => {
+        | Cube(_) => {
             // These constructs either operate on nested queries or represent complex
             // read patterns; treat them as touching the full row set.
+            columns.insert("*".into());
+        }
+        Rollup(groups) => {
+            for group in groups {
+                for expr in group {
+                    collect_expr_columns(expr, columns)?;
+                }
+            }
+        }
+        OuterJoin(_) => {
             columns.insert("*".into());
         }
     }

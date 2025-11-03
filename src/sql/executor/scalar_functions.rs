@@ -1,6 +1,7 @@
 use super::SqlExecutionError;
 use super::aggregates::AggregateDataset;
 use super::expressions::evaluate_scalar_expression;
+use super::row_functions::{evaluate_date_trunc_row, evaluate_time_bucket_row};
 use super::values::{ScalarValue, scalar_from_f64};
 use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr};
 
@@ -14,6 +15,18 @@ pub(super) fn evaluate_scalar_function(
         .last()
         .map(|ident| ident.value.to_uppercase())
         .unwrap_or_default();
+
+    if matches!(name.as_str(), "TIME_BUCKET" | "DATE_TRUNC") {
+        if let Some(&row_idx) = dataset.rows.first() {
+            return if name == "TIME_BUCKET" {
+                evaluate_time_bucket_row(function, row_idx, dataset)
+            } else {
+                evaluate_date_trunc_row(function, row_idx, dataset)
+            };
+        } else {
+            return Ok(ScalarValue::Null);
+        }
+    }
 
     let mut args = Vec::with_capacity(function.args.len());
     for arg in &function.args {

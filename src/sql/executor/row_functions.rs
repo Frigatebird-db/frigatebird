@@ -1,8 +1,9 @@
 use super::SqlExecutionError;
 use super::aggregates::AggregateDataset;
 use super::expressions::evaluate_row_expr;
+use super::helpers::parse_interval_seconds;
 use super::values::{ScalarValue, scalar_from_f64};
-use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr};
+use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Value};
 
 pub(super) fn evaluate_row_function(
     function: &Function,
@@ -15,6 +16,12 @@ pub(super) fn evaluate_row_function(
         .last()
         .map(|ident| ident.value.to_uppercase())
         .unwrap_or_default();
+
+    match name.as_str() {
+        "TIME_BUCKET" => return evaluate_time_bucket_row(function, row_idx, dataset),
+        "DATE_TRUNC" => return evaluate_date_trunc_row(function, row_idx, dataset),
+        _ => {}
+    }
 
     let mut args = Vec::with_capacity(function.args.len());
     for arg in &function.args {
@@ -151,5 +158,141 @@ pub(super) fn evaluate_row_function(
         _ => Err(SqlExecutionError::Unsupported(format!(
             "unsupported row-level function {name}"
         ))),
+    }
+}
+
+pub(super) fn evaluate_time_bucket_row(
+    function: &Function,
+    row_idx: u64,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if function.args.len() < 2 {
+        return Err(SqlExecutionError::Unsupported(
+            "TIME_BUCKET requires at least interval and value arguments".into(),
+        ));
+    }
+
+    let interval_expr = match &function.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "TIME_BUCKET interval must be a literal".into(),
+            ));
+        }
+    };
+    let interval = parse_interval_seconds(interval_expr, "TIME_BUCKET interval")?;
+    if interval <= 0.0 {
+        return Err(SqlExecutionError::Unsupported(
+            "TIME_BUCKET interval must be positive".into(),
+        ));
+    }
+
+    let value_expr = match &function.args[1] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "TIME_BUCKET value must be an expression".into(),
+            ));
+        }
+    };
+
+    let value = evaluate_row_expr(value_expr, row_idx, dataset)?;
+    let numeric = match value.as_f64() {
+        Some(v) => v,
+        None => return Ok(ScalarValue::Null),
+    };
+
+    let origin = if function.args.len() >= 3 {
+        match &function.args[2] {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+            | FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(expr),
+                ..
+            } => evaluate_row_expr(expr, row_idx, dataset)?.as_f64().unwrap_or(0.0),
+            _ => 0.0,
+        }
+    } else {
+        0.0
+    };
+
+    let bucket = ((numeric - origin) / interval).floor() * interval + origin;
+    Ok(scalar_from_f64(bucket))
+}
+
+pub(super) fn evaluate_date_trunc_row(
+    function: &Function,
+    row_idx: u64,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if function.args.len() != 2 {
+        return Err(SqlExecutionError::Unsupported(
+            "DATE_TRUNC requires unit and value arguments".into(),
+        ));
+    }
+
+    let unit = match &function.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => extract_literal_string(expr).ok_or_else(|| {
+            SqlExecutionError::Unsupported("DATE_TRUNC unit must be a string literal".into())
+        })?,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "DATE_TRUNC unit must be a literal".into(),
+            ));
+        }
+    };
+
+    let value_expr = match &function.args[1] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "DATE_TRUNC value must be an expression".into(),
+            ));
+        }
+    };
+
+    let value = evaluate_row_expr(value_expr, row_idx, dataset)?;
+    let numeric = match value.as_f64() {
+        Some(v) => v,
+        None => return Ok(ScalarValue::Null),
+    };
+
+    let unit_seconds = match unit.to_lowercase().as_str() {
+        "second" | "seconds" | "sec" | "s" => 1.0,
+        "minute" | "minutes" | "min" | "mins" => 60.0,
+        "hour" | "hours" | "hr" | "hrs" => 3_600.0,
+        "day" | "days" => 86_400.0,
+        "week" | "weeks" => 604_800.0,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(format!(
+                "DATE_TRUNC unit '{unit}' is not supported"
+            )));
+        }
+    };
+
+    let truncated = (numeric / unit_seconds).floor() * unit_seconds;
+    Ok(scalar_from_f64(truncated))
+}
+
+fn extract_literal_string(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Value(Value::SingleQuotedString(text)) => Some(text.clone()),
+        Expr::Identifier(ident) => Some(ident.value.clone()),
+        _ => None,
     }
 }
