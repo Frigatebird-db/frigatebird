@@ -1,26 +1,19 @@
 use crate::page_handler::PageHandler;
 use crate::sql::models::FilterExpr;
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-pub struct PipelineBatch {
-    pub rows: Vec<u64>,
-}
+pub type PipelineBatch = Vec<usize>;
 
+#[derive(Clone)]
 pub struct PipelineStep {
-    /// Produces batches for the downstream step.
     pub current_producer: Sender<PipelineBatch>,
-    /// Receives batches produced by the previous step.
     pub previous_receiver: Receiver<PipelineBatch>,
-    /// The column this step filters on
     pub column: String,
-    /// The filter expressions to apply to this column
     pub filters: Vec<FilterExpr>,
-    /// Indicates whether this is the first step in the job chain
     pub is_root: bool,
-    /// The table this step operates on
     pub table: String,
-    /// Page handler for accessing column data
     pub page_handler: Arc<PageHandler>,
 }
 
@@ -72,13 +65,13 @@ impl PipelineStep {
         self.page_handler.ensure_pages_cached(&page_ids);
         let pages = self.page_handler.get_pages(descriptors);
 
-        let mut base_row = 0u64;
+        let mut base_row = 0usize;
         for page in pages {
             let entries = &page.page.entries;
             let mut passing_rows = Vec::new();
 
             for (i, entry) in entries.iter().enumerate() {
-                let row_id = base_row + i as u64;
+                let row_id = base_row + i;
                 let value = entry.get_data();
                 if self.filters.iter().all(|f| super::filters::eval_filter(f, value)) {
                     passing_rows.push(row_id);
@@ -86,23 +79,23 @@ impl PipelineStep {
             }
 
             if !passing_rows.is_empty() {
-                let batch = PipelineBatch { rows: passing_rows };
-                if self.current_producer.send(batch).is_err() {
+                if self.current_producer.send(passing_rows).is_err() {
                     return;
                 }
             }
 
-            base_row += entries.len() as u64;
+            base_row += entries.len();
         }
         drop(self.current_producer.clone());
     }
 
     fn execute_non_root(&self) {
         while let Ok(mut batch) = self.previous_receiver.recv() {
-            batch.rows.retain(|&row_id| {
+            batch.retain(|&row_id| {
+                let row_id_u64 = row_id as u64;
                 if let Some(entry) = self
                     .page_handler
-                    .read_entry_at(&self.table, &self.column, row_id)
+                    .read_entry_at(&self.table, &self.column, row_id_u64)
                 {
                     let value = entry.get_data();
                     self.filters.iter().all(|f| super::filters::eval_filter(f, value))
@@ -111,7 +104,7 @@ impl PipelineStep {
                 }
             });
 
-            if !batch.rows.is_empty() && self.current_producer.send(batch).is_err() {
+            if !batch.is_empty() && self.current_producer.send(batch).is_err() {
                 return;
             }
         }
@@ -119,57 +112,64 @@ impl PipelineStep {
 }
 
 pub struct Job {
-    pub pipeline_id: String,
+    pub table_name: String,
     pub steps: Vec<PipelineStep>,
-    pub final_receiver: Option<Receiver<PipelineBatch>>,
+    pub cost: usize,
+    pub next_free_slot: AtomicUsize,
+    pub id: String,
+    pub entry_producer: Sender<PipelineBatch>,
 }
 
 impl Job {
-    pub fn new(pipeline_id: String) -> Self {
-        Self {
-            pipeline_id,
-            steps: Vec::new(),
-            final_receiver: None,
+    pub fn new(
+        table_name: String,
+        steps: Vec<PipelineStep>,
+        entry_producer: Sender<PipelineBatch>,
+    ) -> Self {
+        let cost = steps.len();
+        Job {
+            table_name,
+            steps,
+            cost,
+            next_free_slot: AtomicUsize::new(0),
+            id: super::builder::generate_pipeline_id(),
+            entry_producer,
         }
     }
 
-    pub fn add_step(&mut self, step: PipelineStep) {
-        self.steps.push(step);
-    }
+    pub fn get_next(&self) {
+        let total = self.steps.len();
+        if total == 0 {
+            return;
+        }
 
-    pub fn set_final_receiver(&mut self, receiver: Receiver<PipelineBatch>) {
-        self.final_receiver = Some(receiver);
-    }
+        let mut slot = self.next_free_slot.load(AtomicOrdering::Relaxed);
+        loop {
+            if slot >= total {
+                return;
+            }
 
-    pub fn execute(self) -> Vec<u64> {
-        let handles: Vec<_> = self
-            .steps
-            .into_iter()
-            .map(|step| {
-                std::thread::spawn(move || {
-                    step.execute();
-                })
-            })
-            .collect();
-
-        let mut results = Vec::new();
-        if let Some(receiver) = self.final_receiver {
-            while let Ok(batch) = receiver.recv() {
-                results.extend(batch.rows);
+            match self.next_free_slot.compare_exchange_weak(
+                slot,
+                slot + 1,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.steps[slot].execute();
+                    return;
+                }
+                Err(current) => {
+                    slot = current;
+                }
             }
         }
-
-        for handle in handles {
-            let _ = handle.join();
-        }
-
-        results
     }
 }
 
 impl PartialEq for Job {
     fn eq(&self, other: &Self) -> bool {
-        self.pipeline_id == other.pipeline_id
+        self.table_name == other.table_name
     }
 }
 
