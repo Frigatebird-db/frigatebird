@@ -1,7 +1,7 @@
 use super::SqlExecutionError;
 use super::aggregates::{AggregateDataset, MaterializedColumns};
 use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
-use super::values::{ScalarValue, compare_scalar_values, compare_strs, encode_null, format_float};
+use super::values::{ScalarValue, compare_scalar_values, compare_strs, format_float};
 use sqlparser::ast::Expr;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -10,6 +10,14 @@ use std::collections::HashMap;
 pub(super) struct OrderClause {
     pub(super) expr: Expr,
     pub(super) descending: bool,
+    pub(super) nulls: NullsPlacement,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum NullsPlacement {
+    Default,
+    First,
+    Last,
 }
 
 pub(super) fn sort_rows_logical(
@@ -74,10 +82,7 @@ pub(super) fn compare_order_keys(
     for (idx, clause) in clauses.iter().enumerate() {
         let lhs = &left.values[idx];
         let rhs = &right.values[idx];
-        let mut ord = compare_scalar_for_order(lhs, rhs);
-        if clause.descending {
-            ord = ord.reverse();
-        }
+        let ord = compare_scalar_with_clause(lhs, rhs, clause);
         if ord != Ordering::Equal {
             return ord;
         }
@@ -101,25 +106,64 @@ pub(super) fn build_group_order_key(
     Ok(OrderKey { values })
 }
 
-fn compare_scalar_for_order(left: &ScalarValue, right: &ScalarValue) -> Ordering {
-    match (left.is_null(), right.is_null()) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        (false, false) => {
-            if let Some(ord) = compare_scalar_values(left, right) {
-                return ord;
-            }
-            let left_str = scalar_to_string(left);
-            let right_str = scalar_to_string(right);
-            compare_strs(&left_str, &right_str)
+fn compare_scalar_with_clause(
+    left: &ScalarValue,
+    right: &ScalarValue,
+    clause: &OrderClause,
+) -> Ordering {
+    let left_null = left.is_null();
+    let right_null = right.is_null();
+
+    if left_null || right_null {
+        if left_null && right_null {
+            return Ordering::Equal;
         }
+
+        return match clause.nulls {
+            NullsPlacement::First => {
+                if left_null {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            NullsPlacement::Last => {
+                if left_null {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            NullsPlacement::Default => {
+                if clause.descending {
+                    if left_null {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                } else if left_null {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+        };
     }
+
+    let mut ord = compare_scalar_values(left, right).unwrap_or_else(|| {
+        let left_str = scalar_to_string(left);
+        let right_str = scalar_to_string(right);
+        compare_strs(&left_str, &right_str)
+    });
+    if clause.descending {
+        ord = ord.reverse();
+    }
+    ord
 }
 
 fn scalar_to_string(value: &ScalarValue) -> String {
     match value {
-        ScalarValue::Null => encode_null(),
+        ScalarValue::Null => String::new(),
         ScalarValue::Int(value) => value.to_string(),
         ScalarValue::Float(value) => format_float(*value),
         ScalarValue::Text(text) => text.clone(),

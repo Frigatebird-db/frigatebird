@@ -4,6 +4,7 @@ use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use idk_uwu_ig::sql::executor::SqlExecutor;
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
@@ -35,7 +36,7 @@ struct MetricRow {
     category: String,
     region: String,
     value: i64,
-    score: i64,
+    score: Option<i64>,
 }
 
 #[test]
@@ -58,11 +59,20 @@ fn test_sql_feature_matrix_with_large_dataset() {
         let category = categories[(i as usize) % categories.len()].to_string();
         let region = regions[(i as usize) % regions.len()].to_string();
         let value = (i as i64 * 3) + ((i % 5) as i64) + 10;
-        let score = (i % 7) as i64;
+        let score = if i % 11 == 0 {
+            None
+        } else {
+            Some((i % 7) as i64)
+        };
+
+        let score_sql = match score {
+            Some(s) => format!("'{}'", s),
+            None => "NULL".to_string(),
+        };
 
         let insert = format!(
-            "INSERT INTO metrics (user_id, ts, category, value, region, score) VALUES ('{}', '{}', '{}', '{}', '{}', '{}')",
-            user_id, ts_text, category, value, region, score
+            "INSERT INTO metrics (user_id, ts, category, value, region, score) VALUES ('{}', '{}', '{}', '{}', '{}', {})",
+            user_id, ts_text, category, value, region, score_sql
         );
         executor.execute(&insert).expect("insert metric row");
 
@@ -86,12 +96,20 @@ fn test_sql_feature_matrix_with_large_dataset() {
     // ----- Arbitrary ORDER BY with Top-K -----
     let mut expected_order = rows.clone();
     expected_order.sort_by(|lhs, rhs| {
-        let lhs_key = lhs.value - lhs.score;
-        let rhs_key = rhs.value - rhs.score;
-        rhs_key
-            .cmp(&lhs_key)
-            .then_with(|| lhs.user_id.cmp(&rhs.user_id))
-            .then_with(|| lhs.ts_text.cmp(&rhs.ts_text))
+        let lhs_key = lhs.score.map(|s| lhs.value - s);
+        let rhs_key = rhs.score.map(|s| rhs.value - s);
+        match (lhs_key, rhs_key) {
+            (Some(lhs_val), Some(rhs_val)) => rhs_val
+                .cmp(&lhs_val)
+                .then_with(|| lhs.user_id.cmp(&rhs.user_id))
+                .then_with(|| lhs.ts_text.cmp(&rhs.ts_text)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => lhs
+                .user_id
+                .cmp(&rhs.user_id)
+                .then_with(|| lhs.ts_text.cmp(&rhs.ts_text)),
+        }
     });
     let expected_top_five: Vec<(String, String)> = expected_order
         .iter()
@@ -99,8 +117,9 @@ fn test_sql_feature_matrix_with_large_dataset() {
         .map(|row| (row.user_id.clone(), row.ts_text.clone()))
         .collect();
 
-    let order_query =
-        "SELECT user_id, ts FROM metrics ORDER BY (value - score) DESC, user_id, ts LIMIT 5";
+    let order_query = "SELECT user_id, ts FROM metrics \
+                       ORDER BY CASE WHEN score IS NULL THEN NULL ELSE (value - score) END \
+                       DESC NULLS LAST, user_id, ts LIMIT 5";
     let order_result = executor
         .query(order_query)
         .expect("order by expression query");
@@ -115,6 +134,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
     struct GroupAcc {
         sum_value: i64,
         sum_score: i64,
+        score_count: usize,
         count: usize,
     }
     let mut group_map: BTreeMap<(String, String), GroupAcc> = BTreeMap::new();
@@ -122,14 +142,21 @@ fn test_sql_feature_matrix_with_large_dataset() {
         let key = (row.category.clone(), row.region.clone());
         let entry = group_map.entry(key).or_default();
         entry.sum_value += row.value;
-        entry.sum_score += row.score;
+        if let Some(score) = row.score {
+            entry.sum_score += score;
+            entry.score_count += 1;
+        }
         entry.count += 1;
     }
 
-    let mut expected_groups: Vec<(String, String, i64, i64, f64)> = Vec::new();
+    let mut expected_groups: Vec<(String, String, i64, i64, Option<f64>)> = Vec::new();
     for ((category, region), acc) in group_map {
         if acc.sum_value > 1_000 {
-            let avg_score = acc.sum_score as f64 / acc.count as f64;
+            let avg_score = if acc.score_count > 0 {
+                Some(acc.sum_score as f64 / acc.score_count as f64)
+            } else {
+                None
+            };
             expected_groups.push((category, region, acc.sum_value, acc.count as i64, avg_score));
         }
     }
@@ -150,12 +177,22 @@ fn test_sql_feature_matrix_with_large_dataset() {
         assert_eq!(total_value, expected.2);
         let count: i64 = row[3].as_ref().unwrap().parse().unwrap();
         assert_eq!(count, expected.3);
-        let avg_score: f64 = row[4].as_ref().unwrap().parse().unwrap();
-        assert!(
-            (avg_score - expected.4).abs() < 1e-6,
-            "avg_score mismatch: got {avg_score}, expected {}",
-            expected.4
-        );
+        match expected.4 {
+            Some(expected_avg) => {
+                let avg_score: f64 = row[4].as_ref().unwrap().parse().unwrap();
+                assert!(
+                    (avg_score - expected_avg).abs() < 1e-6,
+                    "avg_score mismatch: got {avg_score}, expected {expected_avg}"
+                );
+            }
+            None => {
+                assert!(
+                    row[4].is_none(),
+                    "expected NULL avg_score for group but got {:?}",
+                    row[4]
+                );
+            }
+        }
     }
 
     // ----- Window functions -----
@@ -165,10 +202,18 @@ fn test_sql_feature_matrix_with_large_dataset() {
 
     let window_limit = 25;
     let mut running_sum = 0_i64;
-    let mut expected_window: Vec<(String, i64, i64)> = Vec::new();
+    let mut seen_non_null = false;
+    let mut expected_window: Vec<(String, i64, Option<i64>)> = Vec::new();
     for (idx, row) in alpha_rows.iter().take(window_limit).enumerate() {
-        running_sum += row.score;
-        expected_window.push((row.ts_text.clone(), (idx + 1) as i64, running_sum));
+        if let Some(score) = row.score {
+            running_sum += score;
+            seen_non_null = true;
+            expected_window.push((row.ts_text.clone(), (idx + 1) as i64, Some(running_sum)));
+        } else if seen_non_null {
+            expected_window.push((row.ts_text.clone(), (idx + 1) as i64, Some(running_sum)));
+        } else {
+            expected_window.push((row.ts_text.clone(), (idx + 1) as i64, None));
+        }
     }
 
     let window_query = format!(
@@ -187,12 +232,27 @@ fn test_sql_feature_matrix_with_large_dataset() {
         assert_eq!(row[0].as_ref().unwrap(), &expected.0);
         let rn: i64 = row[1].as_ref().unwrap().parse().unwrap();
         assert_eq!(rn, expected.1);
-        let running: i64 = row[2].as_ref().unwrap().parse().unwrap();
-        assert_eq!(running, expected.2);
+        match expected.2 {
+            Some(expected_running) => {
+                let running: i64 = row[2].as_ref().unwrap().parse().unwrap();
+                assert_eq!(running, expected_running);
+            }
+            None => {
+                assert!(
+                    row[2].is_none(),
+                    "expected NULL running sum but got {:?}",
+                    row[2]
+                );
+            }
+        }
     }
 
     // Spot-check that window results align with raw dataset for later positions (edge behaviour).
-    if let Some(last_expected) = expected_window.last() {
+    if let Some(last_expected) = expected_window
+        .iter()
+        .rev()
+        .find(|(_, _, value)| value.is_some())
+    {
         let last_ts = &last_expected.0;
         let confirm_query = format!(
             "SELECT SUM(score) OVER (PARTITION BY category ORDER BY ts ROWS UNBOUNDED PRECEDING) \
@@ -201,6 +261,6 @@ fn test_sql_feature_matrix_with_large_dataset() {
         let confirm_result = executor.query(&confirm_query).expect("confirm running sum");
         assert_eq!(confirm_result.rows.len(), 1);
         let running: i64 = confirm_result.rows[0][0].as_ref().unwrap().parse().unwrap();
-        assert_eq!(running, last_expected.2);
+        assert_eq!(running, last_expected.2.unwrap());
     }
 }
