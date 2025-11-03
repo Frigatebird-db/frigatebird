@@ -567,13 +567,13 @@ fn executor_stress_concurrent_submission() {
 
                 let table_name = format!("t{}j{}", thread_id, job_id);
                 let step = PipelineStep::new(
+                    table_name.clone(),
                     format!("t{}j{}c1", thread_id, job_id),
                     vec![],
+                    true,
+                    Arc::clone(&*ph),
                     tx,
                     rx,
-                    true,
-                    table_name.clone(),
-                    Arc::clone(&*ph),
                 );
                 let job = Job::new(table_name, vec![step], entry_tx);
                 exec.submit(job);
@@ -612,13 +612,13 @@ fn executor_stress_variable_job_sizes() {
             let (tx, rx) = channel::unbounded();
             let table_name = format!("table{}", i);
             steps.push(PipelineStep::new(
+                table_name,
                 format!("col{}_{}", i, j),
                 vec![],
+                j == 0,
+                Arc::clone(&page_handler),
                 tx,
                 prev_rx,
-                j == 0,
-                table_name,
-                Arc::clone(&page_handler),
             ));
             prev_rx = rx;
         }
@@ -790,13 +790,13 @@ fn chaos_test_everything_concurrent() {
                 let _ = tx.send(vec![]);
                 let table_name = format!("j{}", i);
                 let step = PipelineStep::new(
+                    table_name.clone(),
                     format!("c{}", i),
                     vec![],
+                    true,
+                    Arc::clone(&*ph),
                     tx,
                     rx,
-                    true,
-                    table_name.clone(),
-                    Arc::clone(&*ph),
                 );
                 let job = Job::new(table_name, vec![step], entry_tx);
                 exec.submit(job);
