@@ -44,13 +44,13 @@ fn create_dummy_job(step_count: usize) -> Job {
     for idx in 0..step_count {
         let (tx, rx) = channel::unbounded::<PipelineBatch>();
         steps.push(PipelineStep::new(
+            "test_table".to_string(),
             format!("col{}", idx),
             Vec::new(),
+            idx == 0,
+            Arc::clone(&page_handler),
             tx,
             prev_rx,
-            idx == 0,
-            "test_table".to_string(),
-            Arc::clone(&page_handler),
         ));
         prev_rx = rx;
     }
@@ -95,13 +95,13 @@ fn executor_job_get_next_executes_steps() {
     let page_handler = create_test_page_handler();
 
     let step = PipelineStep::new(
+        "table".to_string(),
         "col1".to_string(),
         Vec::new(),
+        true,
+        page_handler,
         tx.clone(),
         rx.clone(),
-        true,
-        "table".to_string(),
-        page_handler,
     );
 
     let job = Job::new("table".into(), vec![step], entry_tx);
@@ -256,22 +256,22 @@ fn executor_step_execution_sequence() {
     let page_handler = create_test_page_handler();
 
     let step1 = PipelineStep::new(
+        "table".to_string(),
         "col1".into(),
         vec![],
+        true,
+        Arc::clone(&page_handler),
         tx1,
         rx1,
-        true,
-        "table".to_string(),
-        Arc::clone(&page_handler),
     );
     let step2 = PipelineStep::new(
+        "table".to_string(),
         "col2".into(),
         vec![],
+        false,
+        page_handler,
         tx2,
         rx2,
-        false,
-        "table".to_string(),
-        page_handler,
     );
 
     let job = Job::new("table".into(), vec![step1, step2], entry_tx);
