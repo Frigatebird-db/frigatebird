@@ -243,9 +243,6 @@ pub(super) fn evaluate_scalar_expression(
             }
             Ok(ScalarValue::Bool(if *negated { !matches } else { matches }))
         }
-        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => Err(SqlExecutionError::Unsupported(
-            "aggregated SELECT cannot project plain columns".into(),
-        )),
         _ => Err(SqlExecutionError::Unsupported(format!(
             "unsupported expression in aggregate projection: {expr:?}"
         ))),
