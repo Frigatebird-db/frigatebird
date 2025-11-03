@@ -1,10 +1,12 @@
-use super::{GroupByInfo, GroupingSetPlan, GroupKey, SqlExecutionError};
 use super::aggregates::AggregateDataset;
 use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
 use super::values::ScalarValue;
+use super::{GroupByInfo, GroupKey, GroupingSetPlan, SqlExecutionError};
 use sqlparser::ast::{Expr, GroupByExpr};
 
-pub(super) fn validate_group_by(group_by: &GroupByExpr) -> Result<Option<GroupByInfo>, SqlExecutionError> {
+pub(super) fn validate_group_by(
+    group_by: &GroupByExpr,
+) -> Result<Option<GroupByInfo>, SqlExecutionError> {
     match group_by {
         GroupByExpr::All => Ok(None),
         GroupByExpr::Expressions(exprs) => {

@@ -216,7 +216,9 @@ pub(super) fn evaluate_time_bucket_row(
             | FunctionArg::Named {
                 arg: FunctionArgExpr::Expr(expr),
                 ..
-            } => evaluate_row_expr(expr, row_idx, dataset)?.as_f64().unwrap_or(0.0),
+            } => evaluate_row_expr(expr, row_idx, dataset)?
+                .as_f64()
+                .unwrap_or(0.0),
             _ => 0.0,
         }
     } else {

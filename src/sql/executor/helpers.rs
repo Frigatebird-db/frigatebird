@@ -82,15 +82,10 @@ pub(super) fn parse_usize_literal(expr: &Expr, context: &str) -> Result<usize, S
     }
 }
 
-pub(super) fn parse_interval_seconds(
-    expr: &Expr,
-    context: &str,
-) -> Result<f64, SqlExecutionError> {
+pub(super) fn parse_interval_seconds(expr: &Expr, context: &str) -> Result<f64, SqlExecutionError> {
     match expr {
         Expr::Value(Value::Number(value, _)) => value.parse::<f64>().map_err(|_| {
-            SqlExecutionError::Unsupported(format!(
-                "{context} requires numeric interval"
-            ))
+            SqlExecutionError::Unsupported(format!("{context} requires numeric interval"))
         }),
         Expr::Value(Value::SingleQuotedString(s)) => parse_interval_string(s).ok_or_else(|| {
             SqlExecutionError::Unsupported(format!(

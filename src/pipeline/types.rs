@@ -73,7 +73,11 @@ impl PipelineStep {
             for (i, entry) in entries.iter().enumerate() {
                 let row_id = base_row + i;
                 let value = entry.get_data();
-                if self.filters.iter().all(|f| super::filters::eval_filter(f, value)) {
+                if self
+                    .filters
+                    .iter()
+                    .all(|f| super::filters::eval_filter(f, value))
+                {
                     passing_rows.push(row_id);
                 }
             }
@@ -93,12 +97,14 @@ impl PipelineStep {
         while let Ok(mut batch) = self.previous_receiver.recv() {
             batch.retain(|&row_id| {
                 let row_id_u64 = row_id as u64;
-                if let Some(entry) = self
-                    .page_handler
-                    .read_entry_at(&self.table, &self.column, row_id_u64)
+                if let Some(entry) =
+                    self.page_handler
+                        .read_entry_at(&self.table, &self.column, row_id_u64)
                 {
                     let value = entry.get_data();
-                    self.filters.iter().all(|f| super::filters::eval_filter(f, value))
+                    self.filters
+                        .iter()
+                        .all(|f| super::filters::eval_filter(f, value))
                 } else {
                     false
                 }
@@ -185,6 +191,8 @@ impl Ord for Job {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Compare by cost first (fewer steps = higher priority)
         // Then by table name for deterministic ordering
-        self.cost.cmp(&other.cost).then_with(|| self.table_name.cmp(&other.table_name))
+        self.cost
+            .cmp(&other.cost)
+            .then_with(|| self.table_name.cmp(&other.table_name))
     }
 }

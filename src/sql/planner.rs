@@ -606,12 +606,7 @@ fn collect_expr_columns(expr: &Expr, columns: &mut BTreeSet<String>) -> PlannerR
                 }
             }
         }
-        Exists { .. }
-        | Subquery(_)
-        | ArraySubquery(_)
-        | ListAgg(_)
-        | ArrayAgg(_)
-        | Cube(_) => {
+        Exists { .. } | Subquery(_) | ArraySubquery(_) | ListAgg(_) | ArrayAgg(_) | Cube(_) => {
             // These constructs either operate on nested queries or represent complex
             // read patterns; treat them as touching the full row set.
             columns.insert("*".into());

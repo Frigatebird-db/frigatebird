@@ -150,12 +150,22 @@ pub fn eval_expr(expr: &Expr, value: &str) -> bool {
 fn eval_binary_op_string(value: &str, op: &BinaryOperator, pattern: &str) -> bool {
     use BinaryOperator::*;
     match op {
-        Eq => super::parsers::compare_values(value, pattern, |ord| ord == std::cmp::Ordering::Equal),
-        NotEq => super::parsers::compare_values(value, pattern, |ord| ord != std::cmp::Ordering::Equal),
+        Eq => {
+            super::parsers::compare_values(value, pattern, |ord| ord == std::cmp::Ordering::Equal)
+        }
+        NotEq => {
+            super::parsers::compare_values(value, pattern, |ord| ord != std::cmp::Ordering::Equal)
+        }
         Lt => super::parsers::compare_values(value, pattern, |ord| ord == std::cmp::Ordering::Less),
-        LtEq => super::parsers::compare_values(value, pattern, |ord| ord != std::cmp::Ordering::Greater),
-        Gt => super::parsers::compare_values(value, pattern, |ord| ord == std::cmp::Ordering::Greater),
-        GtEq => super::parsers::compare_values(value, pattern, |ord| ord != std::cmp::Ordering::Less),
+        LtEq => {
+            super::parsers::compare_values(value, pattern, |ord| ord != std::cmp::Ordering::Greater)
+        }
+        Gt => {
+            super::parsers::compare_values(value, pattern, |ord| ord == std::cmp::Ordering::Greater)
+        }
+        GtEq => {
+            super::parsers::compare_values(value, pattern, |ord| ord != std::cmp::Ordering::Less)
+        }
         _ => false,
     }
 }
@@ -216,7 +226,9 @@ fn eval_between(value: &str, low: &Expr, high: &Expr) -> bool {
         _ => return false,
     };
 
-    let ge_low = super::parsers::compare_values(value, low_str, |ord| ord != std::cmp::Ordering::Less);
-    let le_high = super::parsers::compare_values(value, high_str, |ord| ord != std::cmp::Ordering::Greater);
+    let ge_low =
+        super::parsers::compare_values(value, low_str, |ord| ord != std::cmp::Ordering::Less);
+    let le_high =
+        super::parsers::compare_values(value, high_str, |ord| ord != std::cmp::Ordering::Greater);
     ge_low && le_high
 }
