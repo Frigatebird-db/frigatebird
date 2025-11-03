@@ -216,6 +216,16 @@ pub(super) fn collect_expr_column_names(expr: &Expr, columns: &mut BTreeSet<Stri
             for order in &function.order_by {
                 collect_expr_column_names(&order.expr, columns);
             }
+            if let Some(over) = &function.over {
+                if let WindowType::WindowSpec(spec) = over {
+                    for expr in &spec.partition_by {
+                        collect_expr_column_names(expr, columns);
+                    }
+                    for order in &spec.order_by {
+                        collect_expr_column_names(&order.expr, columns);
+                    }
+                }
+            }
         }
         Expr::Case {
             operand,

@@ -1,6 +1,7 @@
 mod aggregates;
 mod expressions;
 mod helpers;
+mod ordering;
 mod row_functions;
 mod scalar_functions;
 mod values;
@@ -16,7 +17,8 @@ use crate::page_handler::PageHandler;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
 use sqlparser::ast::{
     Assignment, BinaryOperator, Expr, FromTable, GroupByExpr, ObjectName, OrderByExpr, Query,
-    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
+    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value, WindowFrame,
+    WindowFrameBound, WindowFrameUnits, WindowType,
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
@@ -24,16 +26,19 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use aggregates::{
-    AggregateDataset, AggregateProjectionPlan, MaterializedColumns, evaluate_aggregate_outputs,
-    plan_aggregate_projection, select_item_contains_aggregate,
+    AggregateDataset, AggregateProjectionPlan, MaterializedColumns, WindowResultMap,
+    evaluate_aggregate_outputs, plan_aggregate_projection, select_item_contains_aggregate,
 };
-use expressions::{evaluate_row_expr, evaluate_selection_expr};
+use expressions::{evaluate_row_expr, evaluate_scalar_expression, evaluate_selection_expr};
 use helpers::{
     collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
     object_name_matches_table, object_name_to_string, parse_limit, parse_offset,
     table_with_joins_to_name, wildcard_options_supported,
 };
-use values::{CachedValue, compare_strs, encode_null};
+use ordering::{
+    OrderClause, OrderKey, build_group_order_key, compare_order_keys, sort_rows_logical,
+};
+use values::{CachedValue, compare_strs};
 
 #[derive(Debug)]
 pub enum SqlExecutionError {
@@ -110,11 +115,33 @@ enum ProjectionItem {
 }
 
 struct GroupByInfo {
-    columns: Vec<GroupByColumn>,
+    expressions: Vec<Expr>,
 }
 
-struct GroupByColumn {
-    ordinal: usize,
+#[derive(Clone)]
+struct AggregatedRow {
+    order_key: OrderKey,
+    values: Vec<Option<String>>,
+}
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+struct GroupKey {
+    values: Vec<Option<String>>,
+}
+
+#[derive(Clone)]
+enum WindowFunctionKind {
+    RowNumber,
+    Sum,
+}
+
+#[derive(Clone)]
+struct WindowFunctionPlan {
+    key: String,
+    kind: WindowFunctionKind,
+    partition_by: Vec<Expr>,
+    order_by: Vec<OrderByExpr>,
+    arg: Option<Expr>,
 }
 
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
@@ -241,7 +268,6 @@ impl SqlExecutor {
             || !cluster_by.is_empty()
             || !distribute_by.is_empty()
             || !sort_by.is_empty()
-            || having.is_some()
             || !named_window.is_empty()
             || qualify.is_some()
             || value_table_mode.is_some()
@@ -286,6 +312,7 @@ impl SqlExecutor {
         }
 
         let projection_items = projection;
+        let window_plans = collect_window_function_plans(&projection_items)?;
 
         let selection_expr_opt = selection;
         let (selection_expr, has_selection) = match selection_expr_opt {
@@ -301,31 +328,38 @@ impl SqlExecutor {
         }
         let sort_columns: Vec<ColumnCatalog> = sort_columns_refs.into_iter().cloned().collect();
 
-        let order_specs = validate_order_by(&order_by_clauses, &sort_columns, &table_name)?;
-
         let mut key_values = Vec::with_capacity(sort_columns.len());
 
         let aggregate_query = projection_items
             .iter()
             .any(|item| select_item_contains_aggregate(item));
 
-        let group_by_info = validate_group_by(
-            &group_by,
-            aggregate_query,
-            &sort_columns,
-            &column_ordinals,
-            &table_name,
-        )?;
+        let order_clauses = plan_order_clauses(&order_by_clauses)?;
+
+        let group_by_info = validate_group_by(&group_by)?;
+
+        let needs_aggregation = aggregate_query
+            || group_by_info
+                .as_ref()
+                .map(|info| !info.expressions.is_empty())
+                .unwrap_or(false)
+            || having.is_some();
+
+        if needs_aggregation && !window_plans.is_empty() {
+            return Err(SqlExecutionError::Unsupported(
+                "window functions are not supported with aggregates or GROUP BY yet".into(),
+            ));
+        }
 
         let mut aggregate_plan_opt: Option<AggregateProjectionPlan> = None;
         let mut projection_plan_opt: Option<ProjectionPlan> = None;
         let mut required_ordinals: BTreeSet<usize>;
         let result_columns: Vec<String>;
 
-        if aggregate_query {
+        if needs_aggregation {
             if distinct_flag {
                 return Err(SqlExecutionError::Unsupported(
-                    "SELECT DISTINCT with aggregates is not supported yet".into(),
+                    "SELECT DISTINCT with aggregates or GROUP BY is not supported yet".into(),
                 ));
             }
             let plan = plan_aggregate_projection(&projection_items, &column_ordinals, &table_name)?;
@@ -349,16 +383,45 @@ impl SqlExecutor {
             required_ordinals.insert(column.ordinal);
         }
 
+        for clause in &order_clauses {
+            let ordinals =
+                collect_expr_column_ordinals(&clause.expr, &column_ordinals, &table_name)?;
+            required_ordinals.extend(ordinals);
+        }
+
+        if let Some(group_info) = &group_by_info {
+            for expr in &group_info.expressions {
+                let ordinals = collect_expr_column_ordinals(expr, &column_ordinals, &table_name)?;
+                required_ordinals.extend(ordinals);
+            }
+        }
+
+        if let Some(having_expr) = &having {
+            let ordinals =
+                collect_expr_column_ordinals(having_expr, &column_ordinals, &table_name)?;
+            required_ordinals.extend(ordinals);
+        }
+
+        for plan in &window_plans {
+            for expr in &plan.partition_by {
+                let ordinals =
+                    collect_expr_column_ordinals(expr, &column_ordinals, &table_name)?;
+                required_ordinals.extend(ordinals);
+            }
+            for order in &plan.order_by {
+                let ordinals = collect_expr_column_ordinals(&order.expr, &column_ordinals, &table_name)?;
+                required_ordinals.extend(ordinals);
+            }
+            if let Some(arg) = &plan.arg {
+                let ordinals = collect_expr_column_ordinals(arg, &column_ordinals, &table_name)?;
+                required_ordinals.extend(ordinals);
+            }
+        }
+
         if has_selection {
             let predicate_ordinals =
                 collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
             required_ordinals.extend(predicate_ordinals);
-        }
-
-        if let Some(group_info) = &group_by_info {
-            for column in &group_info.columns {
-                required_ordinals.insert(column.ordinal);
-            }
         }
 
         let sort_key_filters = collect_sort_key_filters(
@@ -394,7 +457,7 @@ impl SqlExecutor {
                 &column_ordinals,
             )?
         };
-        if candidate_rows.is_empty() && !aggregate_query {
+        if candidate_rows.is_empty() && !needs_aggregation {
             return Ok(SelectResult {
                 columns: result_columns,
                 rows: Vec::new(),
@@ -425,85 +488,117 @@ impl SqlExecutor {
                 matching_rows.push(row_idx);
             }
         }
-
-        if !order_specs.is_empty() {
-            let table_name_order = table_name.clone();
-            matching_rows.sort_by(|left, right| {
-                self.compare_rows(
-                    &table_name_order,
-                    &columns,
-                    &order_specs,
-                    &materialized,
-                    *left,
-                    *right,
-                )
-            });
+        if !needs_aggregation {
+            sort_rows_logical(
+                &order_clauses,
+                &materialized,
+                &column_ordinals,
+                &mut matching_rows,
+            )?;
         }
 
-        if aggregate_query {
+        if needs_aggregation {
             let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");
+            let mut aggregated_rows: Vec<AggregatedRow> = Vec::new();
+
+            let full_dataset = AggregateDataset {
+                rows: matching_rows.as_slice(),
+                materialized: &materialized,
+                column_ordinals: &column_ordinals,
+                row_positions: None,
+                window_results: None,
+            };
+
             if let Some(group_info) = &group_by_info {
-                if matching_rows.is_empty() {
-                    return Ok(SelectResult {
-                        columns: result_columns,
-                        rows: Vec::new(),
-                    });
+                let mut groups: HashMap<GroupKey, Vec<u64>> = HashMap::new();
+                let mut key_order: Vec<GroupKey> = Vec::new();
+
+                for &row_idx in &matching_rows {
+                    let key = evaluate_group_key(&group_info.expressions, row_idx, &full_dataset)?;
+                    match groups.entry(key.clone()) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().push(row_idx);
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(vec![row_idx]);
+                            key_order.push(key);
+                        }
+                    }
                 }
 
-                let mut grouped_rows = Vec::new();
-                let mut start = 0;
-                while start < matching_rows.len() {
-                    let mut end = start + 1;
-                    while end < matching_rows.len()
-                        && self.rows_share_group(
-                            &table_name,
-                            &columns,
-                            &materialized,
-                            group_info,
-                            matching_rows[start],
-                            matching_rows[end],
-                        )?
-                    {
-                        end += 1;
-                    }
-
-                    let group_slice = &matching_rows[start..end];
+                for key in key_order {
+                    let rows = groups.get(&key).expect("group rows must exist");
                     let dataset = AggregateDataset {
-                        rows: group_slice,
+                        rows: rows.as_slice(),
                         materialized: &materialized,
                         column_ordinals: &column_ordinals,
+                        row_positions: None,
+                        window_results: None,
                     };
+
+                    if !evaluate_having(&having, &dataset)? {
+                        continue;
+                    }
+
+                    let order_key = if order_clauses.is_empty() {
+                        OrderKey { values: Vec::new() }
+                    } else {
+                        build_group_order_key(&order_clauses, &dataset)?
+                    };
+
                     let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
-                    grouped_rows.push(output_row);
-                    start = end;
+                    aggregated_rows.push(AggregatedRow {
+                        order_key,
+                        values: output_row,
+                    });
                 }
-
-                let offset = parse_offset(offset_expr)?;
-                let limit = parse_limit(limit_expr)?;
-                let start_idx = offset.min(grouped_rows.len());
-                let end_idx = if let Some(limit) = limit {
-                    start_idx.saturating_add(limit).min(grouped_rows.len())
-                } else {
-                    grouped_rows.len()
-                };
-                let final_rows = grouped_rows[start_idx..end_idx].to_vec();
-
-                return Ok(SelectResult {
-                    columns: result_columns,
-                    rows: final_rows,
-                });
             } else {
                 let dataset = AggregateDataset {
                     rows: matching_rows.as_slice(),
                     materialized: &materialized,
                     column_ordinals: &column_ordinals,
+                    row_positions: None,
+                    window_results: None,
                 };
-                let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
-                return Ok(SelectResult {
-                    columns: result_columns,
-                    rows: vec![output_row],
+
+                if evaluate_having(&having, &dataset)? {
+                    let order_key = if order_clauses.is_empty() {
+                        OrderKey { values: Vec::new() }
+                    } else {
+                        build_group_order_key(&order_clauses, &dataset)?
+                    };
+                    let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
+                    aggregated_rows.push(AggregatedRow {
+                        order_key,
+                        values: output_row,
+                    });
+                }
+            }
+
+            if !order_clauses.is_empty() {
+                aggregated_rows.sort_unstable_by(|left, right| {
+                    compare_order_keys(&left.order_key, &right.order_key, &order_clauses)
                 });
             }
+
+            let offset = parse_offset(offset_expr)?;
+            let limit = parse_limit(limit_expr)?;
+            let start_idx = offset.min(aggregated_rows.len());
+            let end_idx = if let Some(limit) = limit {
+                start_idx.saturating_add(limit).min(aggregated_rows.len())
+            } else {
+                aggregated_rows.len()
+            };
+
+            let final_rows: Vec<Vec<Option<String>>> = aggregated_rows[start_idx..end_idx]
+                .iter()
+                .map(|row| row.values.clone())
+                .collect();
+
+            return Ok(SelectResult {
+                columns: result_columns,
+                rows: final_rows,
+            });
         }
 
         if matching_rows.is_empty() {
@@ -1206,162 +1301,6 @@ impl SqlExecutor {
         }
         Ok(0)
     }
-
-    fn compare_rows(
-        &self,
-        table: &str,
-        columns: &[ColumnCatalog],
-        order_specs: &[OrderingSpec],
-        materialized: &MaterializedColumns,
-        left: u64,
-        right: u64,
-    ) -> std::cmp::Ordering {
-        for spec in order_specs {
-            let ordinal = spec.ordinal;
-            let column = &columns[ordinal];
-            let left_val = self.lookup_value(table, column, ordinal, left, materialized);
-            let right_val = self.lookup_value(table, column, ordinal, right, materialized);
-            let left_str = match &left_val {
-                CachedValue::Null => encode_null(),
-                CachedValue::Text(text) => text.clone(),
-            };
-            let right_str = match &right_val {
-                CachedValue::Null => encode_null(),
-                CachedValue::Text(text) => text.clone(),
-            };
-            let mut ord = compare_strs(&left_str, &right_str);
-            if spec.desc {
-                ord = ord.reverse();
-            }
-            if ord != Ordering::Equal {
-                return ord;
-            }
-        }
-        Ordering::Equal
-    }
-
-    fn lookup_value(
-        &self,
-        table: &str,
-        column: &ColumnCatalog,
-        ordinal: usize,
-        row_idx: u64,
-        materialized: &MaterializedColumns,
-    ) -> CachedValue {
-        if let Some(map) = materialized.get(&ordinal) {
-            if let Some(value) = map.get(&row_idx) {
-                return value.clone();
-            }
-        }
-        self.page_handler
-            .read_entry_at(table, &column.name, row_idx)
-            .map(|entry| CachedValue::from_entry(&entry))
-            .unwrap_or(CachedValue::Null)
-    }
-
-    fn value_for_row(
-        &self,
-        table: &str,
-        columns: &[ColumnCatalog],
-        materialized: &MaterializedColumns,
-        ordinal: usize,
-        row_idx: u64,
-    ) -> Result<Option<String>, SqlExecutionError> {
-        let cached = materialized
-            .get(&ordinal)
-            .and_then(|column_map| column_map.get(&row_idx))
-            .cloned()
-            .or_else(|| {
-                self.page_handler
-                    .read_entry_at(table, &columns[ordinal].name, row_idx)
-                    .map(|entry| CachedValue::from_entry(&entry))
-            })
-            .ok_or_else(|| {
-                SqlExecutionError::OperationFailed(format!(
-                    "missing value for {table}.{} at row {row_idx}",
-                    columns[ordinal].name
-                ))
-            })?;
-        Ok(cached.into_option_string())
-    }
-
-    fn rows_share_group(
-        &self,
-        table: &str,
-        columns: &[ColumnCatalog],
-        materialized: &MaterializedColumns,
-        group_info: &GroupByInfo,
-        left: u64,
-        right: u64,
-    ) -> Result<bool, SqlExecutionError> {
-        for column in &group_info.columns {
-            let left_value =
-                self.value_for_row(table, columns, materialized, column.ordinal, left)?;
-            let right_value =
-                self.value_for_row(table, columns, materialized, column.ordinal, right)?;
-            if left_value != right_value {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-}
-
-fn validate_order_by(
-    clauses: &[OrderByExpr],
-    sort_columns: &[ColumnCatalog],
-    table_name: &str,
-) -> Result<Vec<OrderingSpec>, SqlExecutionError> {
-    if clauses.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    if clauses.len() > sort_columns.len() {
-        return Err(SqlExecutionError::Unsupported(format!(
-            "ORDER BY on table {table_name} must match the table ORDER BY prefix",
-        )));
-    }
-
-    let mut specs = Vec::with_capacity(clauses.len());
-
-    for (idx, clause) in clauses.iter().enumerate() {
-        if clause.nulls_first.is_some() {
-            return Err(SqlExecutionError::Unsupported(
-                "ORDER BY with NULLS FIRST/LAST is not supported yet".into(),
-            ));
-        }
-
-        let column_name = column_name_from_expr(&clause.expr).ok_or_else(|| {
-            SqlExecutionError::Unsupported(
-                "ORDER BY expressions must be simple column references".into(),
-            )
-        })?;
-
-        let expected = &sort_columns[idx].name;
-        if column_name != *expected {
-            return Err(SqlExecutionError::Unsupported(format!(
-                "ORDER BY column {} does not match table ORDER BY column {}",
-                column_name, expected
-            )));
-        }
-
-        specs.push(OrderingSpec {
-            ordinal: sort_columns[idx].ordinal,
-            desc: clause.asc == Some(false),
-        });
-    }
-
-    // If only first clause specified and DESC, allow additional implicit ascending for trailing
-    // ORDER BY columns requested via table default? We'll append remaining columns as ASC to ensure
-    // deterministic ordering when LIMIT present.
-    for idx in clauses.len()..sort_columns.len() {
-        specs.push(OrderingSpec {
-            ordinal: sort_columns[idx].ordinal,
-            desc: false,
-        });
-    }
-
-    Ok(specs)
 }
 
 fn collect_sort_key_filters(
@@ -1680,60 +1619,59 @@ fn materialize_columns(
     Ok(result)
 }
 
-fn validate_group_by(
-    group_by: &GroupByExpr,
-    aggregate_query: bool,
-    sort_columns: &[ColumnCatalog],
-    column_ordinals: &HashMap<String, usize>,
-    table_name: &str,
-) -> Result<Option<GroupByInfo>, SqlExecutionError> {
-    let GroupByExpr::Expressions(exprs) = group_by else {
-        return Ok(None);
-    };
-
-    if exprs.is_empty() {
-        return Ok(None);
+fn validate_group_by(group_by: &GroupByExpr) -> Result<Option<GroupByInfo>, SqlExecutionError> {
+    match group_by {
+        GroupByExpr::All => Ok(None),
+        GroupByExpr::Expressions(exprs) => {
+            if exprs.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(GroupByInfo {
+                    expressions: exprs.clone(),
+                }))
+            }
+        }
     }
+}
 
-    if !aggregate_query {
-        return Err(SqlExecutionError::Unsupported(
-            "GROUP BY requires aggregate projections".into(),
-        ));
-    }
-
-    if exprs.len() > sort_columns.len() {
-        return Err(SqlExecutionError::Unsupported(format!(
-            "GROUP BY columns must be a prefix of the ORDER BY columns on table {table_name}",
-        )));
-    }
-
-    let mut columns = Vec::with_capacity(exprs.len());
-    for (idx, expr) in exprs.iter().enumerate() {
-        let column_name = column_name_from_expr(expr).ok_or_else(|| {
-            SqlExecutionError::Unsupported("GROUP BY requires simple column references".into())
-        })?;
-
-        let expected = &sort_columns[idx].name;
-        if column_name != *expected {
+fn plan_order_clauses(order_by: &[OrderByExpr]) -> Result<Vec<OrderClause>, SqlExecutionError> {
+    let mut clauses = Vec::with_capacity(order_by.len());
+    for clause in order_by {
+        if clause.nulls_first.is_some() {
             return Err(SqlExecutionError::Unsupported(
-                "GROUP BY columns must match the leading ORDER BY columns".into(),
+                "ORDER BY with NULLS FIRST/LAST is not supported yet".into(),
             ));
         }
 
-        let ordinal = column_ordinals.get(&column_name).copied().ok_or_else(|| {
-            SqlExecutionError::ColumnMismatch {
-                table: table_name.to_string(),
-                column: column_name.clone(),
-            }
-        })?;
-
-        columns.push(GroupByColumn { ordinal });
+        clauses.push(OrderClause {
+            expr: clause.expr.clone(),
+            descending: clause.asc == Some(false),
+        });
     }
-
-    Ok(Some(GroupByInfo { columns }))
+    Ok(clauses)
 }
-#[derive(Clone)]
-struct OrderingSpec {
-    ordinal: usize,
-    desc: bool,
+
+fn evaluate_group_key(
+    expressions: &[Expr],
+    row_idx: u64,
+    dataset: &AggregateDataset,
+) -> Result<GroupKey, SqlExecutionError> {
+    let mut values = Vec::with_capacity(expressions.len());
+    for expr in expressions {
+        let scalar = evaluate_row_expr(expr, row_idx, dataset)?;
+        values.push(scalar.into_option_string());
+    }
+    Ok(GroupKey { values })
+}
+
+fn evaluate_having(
+    having: &Option<Expr>,
+    dataset: &AggregateDataset,
+) -> Result<bool, SqlExecutionError> {
+    if let Some(expr) = having {
+        let scalar = evaluate_scalar_expression(expr, dataset)?;
+        Ok(scalar.as_bool().unwrap_or(false))
+    } else {
+        Ok(true)
+    }
 }

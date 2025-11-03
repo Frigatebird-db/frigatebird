@@ -150,11 +150,13 @@ fn print_separator() {
 
 fn main() {
     let config = parse_args();
-    let total_data_gb = (config.total_rows * config.row_size_bytes) as f64 / (1024.0 * 1024.0 * 1024.0);
+    let total_data_gb =
+        (config.total_rows * config.row_size_bytes) as f64 / (1024.0 * 1024.0 * 1024.0);
 
     println!("╔══════════════════════════════════════════════════════════════════════════════╗");
     println!("║                    SATORI HIGH-VOLUME BENCHMARK                              ║");
-    println!("║                    {} Rows × {}KB = ~{:.1}GB Dataset                           ║",
+    println!(
+        "║                    {} Rows × {}KB = ~{:.1}GB Dataset                           ║",
         format_number(config.total_rows),
         config.row_size_bytes / 1024,
         total_data_gb
@@ -176,16 +178,23 @@ fn main() {
                 event_type TEXT,
                 payload TEXT,
                 metadata TEXT
-            ) ORDER BY id"
+            ) ORDER BY id",
         )
         .expect("Failed to create table");
 
     let duration = start.elapsed();
-    println!("✓ Table created successfully in {}", format_duration(duration));
+    println!(
+        "✓ Table created successfully in {}",
+        format_duration(duration)
+    );
 
     // STEP 2: Insert rows
     print_separator();
-    println!("\nSTEP 2: Inserting {} rows in batches of {}...", format_number(config.total_rows), BATCH_SIZE);
+    println!(
+        "\nSTEP 2: Inserting {} rows in batches of {}...",
+        format_number(config.total_rows),
+        BATCH_SIZE
+    );
     let start = Instant::now();
     let mut total_inserted = 0;
     const LOG_INTERVAL: usize = 2000;
@@ -218,8 +227,10 @@ fn main() {
             values.join(", ")
         );
 
-        executor.execute(&insert_sql)
-            .expect(&format!("Failed to insert batch starting at {}", batch_start));
+        executor.execute(&insert_sql).expect(&format!(
+            "Failed to insert batch starting at {}",
+            batch_start
+        ));
 
         total_inserted += batch_end - batch_start;
 
@@ -230,14 +241,22 @@ fn main() {
             let progress = (total_inserted as f64 / config.total_rows as f64) * 100.0;
             println!(
                 "  Progress: {}/{} ({:.1}%) - {:.0} rows/sec - {}",
-                format_number(total_inserted), format_number(config.total_rows), progress, rate, format_duration(elapsed)
+                format_number(total_inserted),
+                format_number(config.total_rows),
+                progress,
+                rate,
+                format_duration(elapsed)
             );
         }
     }
 
     let insert_duration = start.elapsed();
     let insert_rate = config.total_rows as f64 / insert_duration.as_secs_f64();
-    println!("\n✓ Inserted {} rows in {}", format_number(config.total_rows), format_duration(insert_duration));
+    println!(
+        "\n✓ Inserted {} rows in {}",
+        format_number(config.total_rows),
+        format_duration(insert_duration)
+    );
     println!("  Average rate: {:.0} rows/sec", insert_rate);
     println!("  Estimated data size: ~{:.1}GB", total_data_gb);
 
@@ -255,24 +274,37 @@ fn main() {
     let point_id = format!("{:010}", mid_point);
     println!("Benchmark 1: Point Query (WHERE id = '{}')", point_id);
     let start = Instant::now();
-    let query = format!("SELECT id, user_id, event_type FROM benchmark_data WHERE id = '{}'", point_id);
-    let result = executor
-        .query(&query)
-        .expect("Point query failed");
+    let query = format!(
+        "SELECT id, user_id, event_type FROM benchmark_data WHERE id = '{}'",
+        point_id
+    );
+    let result = executor.query(&query).expect("Point query failed");
     let duration = start.elapsed();
-    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+    println!(
+        "  ✓ Returned {} rows in {}",
+        result.rows.len(),
+        format_duration(duration)
+    );
 
     // Benchmark 2: Range query with BETWEEN
     let range_start_id = format!("{:010}", range_start);
     let range_end_id = format!("{:010}", range_end);
-    println!("\nBenchmark 2: Range Query (BETWEEN '{}' AND '{}')", range_start_id, range_end_id);
+    println!(
+        "\nBenchmark 2: Range Query (BETWEEN '{}' AND '{}')",
+        range_start_id, range_end_id
+    );
     let start = Instant::now();
-    let query = format!("SELECT id, event_type FROM benchmark_data WHERE id BETWEEN '{}' AND '{}'", range_start_id, range_end_id);
-    let result = executor
-        .query(&query)
-        .expect("Range query failed");
+    let query = format!(
+        "SELECT id, event_type FROM benchmark_data WHERE id BETWEEN '{}' AND '{}'",
+        range_start_id, range_end_id
+    );
+    let result = executor.query(&query).expect("Range query failed");
     let duration = start.elapsed();
-    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+    println!(
+        "  ✓ Returned {} rows in {}",
+        result.rows.len(),
+        format_duration(duration)
+    );
 
     // Benchmark 3: LIKE query
     println!("\nBenchmark 3: LIKE Query (user_id LIKE 'user_123%')");
@@ -281,7 +313,11 @@ fn main() {
         .query("SELECT id, user_id FROM benchmark_data WHERE user_id LIKE 'user_123%' LIMIT 100")
         .expect("LIKE query failed");
     let duration = start.elapsed();
-    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+    println!(
+        "  ✓ Returned {} rows in {}",
+        result.rows.len(),
+        format_duration(duration)
+    );
 
     // Benchmark 4: Filter by event type
     println!("\nBenchmark 4: Event Type Filter (event_type = 'purchase')");
@@ -290,7 +326,11 @@ fn main() {
         .query("SELECT id, user_id FROM benchmark_data WHERE event_type = 'purchase' LIMIT 1000")
         .expect("Event type query failed");
     let duration = start.elapsed();
-    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+    println!(
+        "  ✓ Returned {} rows in {}",
+        result.rows.len(),
+        format_duration(duration)
+    );
 
     // Benchmark 5: COUNT aggregate
     println!("\nBenchmark 5: COUNT Aggregate (total rows)");
@@ -299,7 +339,11 @@ fn main() {
         .query("SELECT COUNT(*) FROM benchmark_data")
         .expect("COUNT query failed");
     let duration = start.elapsed();
-    println!("  ✓ Count: {} in {}", result.rows[0][0].as_ref().unwrap(), format_duration(duration));
+    println!(
+        "  ✓ Count: {} in {}",
+        result.rows[0][0].as_ref().unwrap(),
+        format_duration(duration)
+    );
 
     // Benchmark 6: COUNT with filter
     println!("\nBenchmark 6: COUNT with Filter (event_type = 'login')");
@@ -308,7 +352,11 @@ fn main() {
         .query("SELECT COUNT(*) FROM benchmark_data WHERE event_type = 'login'")
         .expect("COUNT with filter failed");
     let duration = start.elapsed();
-    println!("  ✓ Count: {} in {}", result.rows[0][0].as_ref().unwrap(), format_duration(duration));
+    println!(
+        "  ✓ Count: {} in {}",
+        result.rows[0][0].as_ref().unwrap(),
+        format_duration(duration)
+    );
 
     // Benchmark 7: ORDER BY with LIMIT
     println!("\nBenchmark 7: ORDER BY with LIMIT (first 100 rows)");
@@ -317,18 +365,31 @@ fn main() {
         .query("SELECT id, user_id, event_type FROM benchmark_data ORDER BY id LIMIT 100")
         .expect("ORDER BY query failed");
     let duration = start.elapsed();
-    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+    println!(
+        "  ✓ Returned {} rows in {}",
+        result.rows.len(),
+        format_duration(duration)
+    );
 
     // Benchmark 8: OFFSET + LIMIT (pagination)
     let limit = 100.min(config.total_rows / 100);
-    println!("\nBenchmark 8: Pagination (OFFSET {} LIMIT {})", format_number(offset_point), limit);
+    println!(
+        "\nBenchmark 8: Pagination (OFFSET {} LIMIT {})",
+        format_number(offset_point),
+        limit
+    );
     let start = Instant::now();
-    let query = format!("SELECT id, user_id FROM benchmark_data ORDER BY id OFFSET {} LIMIT {}", offset_point, limit);
-    let result = executor
-        .query(&query)
-        .expect("Pagination query failed");
+    let query = format!(
+        "SELECT id, user_id FROM benchmark_data ORDER BY id OFFSET {} LIMIT {}",
+        offset_point, limit
+    );
+    let result = executor.query(&query).expect("Pagination query failed");
     let duration = start.elapsed();
-    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+    println!(
+        "  ✓ Returned {} rows in {}",
+        result.rows.len(),
+        format_duration(duration)
+    );
 
     // Benchmark 9: DISTINCT
     println!("\nBenchmark 9: DISTINCT event_type");
@@ -337,21 +398,33 @@ fn main() {
         .query("SELECT DISTINCT event_type FROM benchmark_data")
         .expect("DISTINCT query failed");
     let duration = start.elapsed();
-    println!("  ✓ Returned {} distinct values in {}", result.rows.len(), format_duration(duration));
+    println!(
+        "  ✓ Returned {} distinct values in {}",
+        result.rows.len(),
+        format_duration(duration)
+    );
 
     // Benchmark 10: Complex WHERE with multiple conditions
     let complex_start = config.total_rows / 2;
     let complex_end = complex_start + 10000.min(config.total_rows / 100);
     let complex_start_id = format!("{:010}", complex_start);
     let complex_end_id = format!("{:010}", complex_end);
-    println!("\nBenchmark 10: Complex WHERE (event_type = 'purchase' AND id BETWEEN '{}' AND '{}')", complex_start_id, complex_end_id);
+    println!(
+        "\nBenchmark 10: Complex WHERE (event_type = 'purchase' AND id BETWEEN '{}' AND '{}')",
+        complex_start_id, complex_end_id
+    );
     let start = Instant::now();
-    let query = format!("SELECT id, user_id, event_type FROM benchmark_data WHERE event_type = 'purchase' AND id BETWEEN '{}' AND '{}'", complex_start_id, complex_end_id);
-    let result = executor
-        .query(&query)
-        .expect("Complex WHERE query failed");
+    let query = format!(
+        "SELECT id, user_id, event_type FROM benchmark_data WHERE event_type = 'purchase' AND id BETWEEN '{}' AND '{}'",
+        complex_start_id, complex_end_id
+    );
+    let result = executor.query(&query).expect("Complex WHERE query failed");
     let duration = start.elapsed();
-    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+    println!(
+        "  ✓ Returned {} rows in {}",
+        result.rows.len(),
+        format_duration(duration)
+    );
 
     // STEP 4: Update Benchmark
     print_separator();
@@ -361,10 +434,11 @@ fn main() {
     let update_start_id = format!("{:010}", 0);
     let update_end_id = format!("{:010}", update_end);
     let start = Instant::now();
-    let update_query = format!("UPDATE benchmark_data SET event_type = 'updated' WHERE id BETWEEN '{}' AND '{}'", update_start_id, update_end_id);
-    executor
-        .execute(&update_query)
-        .expect("Update failed");
+    let update_query = format!(
+        "UPDATE benchmark_data SET event_type = 'updated' WHERE id BETWEEN '{}' AND '{}'",
+        update_start_id, update_end_id
+    );
+    executor.execute(&update_query).expect("Update failed");
     let duration = start.elapsed();
     println!("  ✓ Updated rows in {}", format_duration(duration));
 
@@ -372,7 +446,10 @@ fn main() {
     let result = executor
         .query("SELECT COUNT(*) FROM benchmark_data WHERE event_type = 'updated'")
         .expect("Verify update failed");
-    println!("  ✓ Verified {} rows updated", result.rows[0][0].as_ref().unwrap());
+    println!(
+        "  ✓ Verified {} rows updated",
+        result.rows[0][0].as_ref().unwrap()
+    );
 
     // STEP 5: Delete Benchmark
     print_separator();
@@ -382,10 +459,11 @@ fn main() {
     let delete_start_id = format!("{:010}", 0);
     let delete_end_id = format!("{:010}", delete_end);
     let start = Instant::now();
-    let delete_query = format!("DELETE FROM benchmark_data WHERE id BETWEEN '{}' AND '{}'", delete_start_id, delete_end_id);
-    executor
-        .execute(&delete_query)
-        .expect("Delete failed");
+    let delete_query = format!(
+        "DELETE FROM benchmark_data WHERE id BETWEEN '{}' AND '{}'",
+        delete_start_id, delete_end_id
+    );
+    executor.execute(&delete_query).expect("Delete failed");
     let duration = start.elapsed();
     println!("  ✓ Deleted rows in {}", format_duration(duration));
 
@@ -393,7 +471,10 @@ fn main() {
     let result = executor
         .query("SELECT COUNT(*) FROM benchmark_data")
         .expect("Count after delete failed");
-    println!("  ✓ Total rows after delete: {}", result.rows[0][0].as_ref().unwrap());
+    println!(
+        "  ✓ Total rows after delete: {}",
+        result.rows[0][0].as_ref().unwrap()
+    );
 
     // Final Summary
     print_separator();
@@ -401,7 +482,10 @@ fn main() {
     println!("║                           BENCHMARK COMPLETE                                 ║");
     println!("╚══════════════════════════════════════════════════════════════════════════════╝");
     println!("\nSummary:");
-    println!("  • Total rows inserted: {}", format_number(config.total_rows));
+    println!(
+        "  • Total rows inserted: {}",
+        format_number(config.total_rows)
+    );
     println!("  • Row size: {}KB", config.row_size_bytes / 1024);
     println!("  • Insert time: {}", format_duration(insert_duration));
     println!("  • Insert rate: {:.0} rows/sec", insert_rate);

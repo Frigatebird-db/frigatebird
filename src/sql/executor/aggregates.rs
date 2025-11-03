@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub(super) type MaterializedColumns = HashMap<usize, HashMap<u64, CachedValue>>;
+pub(super) type WindowResultMap = HashMap<String, Vec<ScalarValue>>;
 
 pub(super) struct AggregateProjectionPlan {
     pub(super) outputs: Vec<AggregateProjection>,
@@ -22,6 +23,8 @@ pub(super) struct AggregateDataset<'a> {
     pub(super) rows: &'a [u64],
     pub(super) materialized: &'a MaterializedColumns,
     pub(super) column_ordinals: &'a HashMap<String, usize>,
+    pub(super) row_positions: Option<&'a HashMap<u64, usize>>,
+    pub(super) window_results: Option<&'a WindowResultMap>,
 }
 
 impl<'a> AggregateDataset<'a> {
@@ -30,6 +33,21 @@ impl<'a> AggregateDataset<'a> {
             .get(column)
             .and_then(|ordinal| self.materialized.get(ordinal))
             .and_then(|map| map.get(&row_idx))
+    }
+
+    pub(super) fn row_position(&self, row_idx: u64) -> Option<usize> {
+        self.row_positions
+            .and_then(|positions| positions.get(&row_idx).copied())
+    }
+
+    pub(super) fn window_value(
+        &self,
+        key: &str,
+        position: usize,
+    ) -> Option<&ScalarValue> {
+        self.window_results
+            .and_then(|map| map.get(key))
+            .and_then(|values| values.get(position))
     }
 }
 
