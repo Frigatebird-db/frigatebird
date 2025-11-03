@@ -26,3 +26,7 @@ path = "benchmarks/high_volume.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
+
+[[test]]
+name = "sql_massive_correctness"
+path = "tests/sql_massive_correctness/mod.rs"
