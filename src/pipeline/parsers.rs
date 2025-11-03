@@ -6,11 +6,7 @@ where
 {
     // Try number comparison first
     if let (Ok(left_num), Ok(right_num)) = (left.parse::<f64>(), right.parse::<f64>()) {
-        return predicate(
-            left_num
-                .partial_cmp(&right_num)
-                .unwrap_or(Ordering::Equal),
-        );
+        return predicate(left_num.partial_cmp(&right_num).unwrap_or(Ordering::Equal));
     }
 
     // Try datetime comparison
@@ -305,9 +301,5 @@ fn try_parse_compact_duration(s: &str) -> Option<i64> {
         }
     }
 
-    if total > 0 {
-        Some(total)
-    } else {
-        None
-    }
+    if total > 0 { Some(total) } else { None }
 }

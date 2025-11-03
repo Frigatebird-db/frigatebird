@@ -1,16 +1,26 @@
-use super::{GroupKey, RangePreceding, SqlExecutionError, SumWindowFrame, WindowFunctionKind, WindowFunctionPlan};
 use super::aggregates::{AggregateDataset, MaterializedColumns, WindowResultMap};
 use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
 use super::grouping_helpers::evaluate_group_key;
 use super::helpers::{collect_expr_column_ordinals, parse_interval_seconds};
-use super::ordering::{NullsPlacement, OrderClause, OrderKey, build_row_order_key, compare_order_keys};
+use super::ordering::{
+    NullsPlacement, OrderClause, OrderKey, build_row_order_key, compare_order_keys,
+};
 use super::values::{ScalarValue, scalar_from_f64};
+use super::{
+    GroupKey, RangePreceding, SqlExecutionError, SumWindowFrame, WindowFunctionKind,
+    WindowFunctionPlan,
+};
 use crate::metadata_store::ColumnCatalog;
-use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, OrderByExpr, SelectItem, Value, WindowType, WindowFrameUnits, WindowFrameBound};
+use sqlparser::ast::{
+    Expr, FunctionArg, FunctionArgExpr, OrderByExpr, SelectItem, Value, WindowFrameBound,
+    WindowFrameUnits, WindowType,
+};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-pub(super) fn plan_order_clauses(order_by: &[OrderByExpr]) -> Result<Vec<OrderClause>, SqlExecutionError> {
+pub(super) fn plan_order_clauses(
+    order_by: &[OrderByExpr],
+) -> Result<Vec<OrderClause>, SqlExecutionError> {
     let mut clauses = Vec::with_capacity(order_by.len());
     for clause in order_by {
         let nulls = match clause.nulls_first {
@@ -162,7 +172,9 @@ pub(super) fn parse_usize_literal(expr: &Expr) -> Option<usize> {
     }
 }
 
-pub(super) fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExecutionError> {
+pub(super) fn extract_window_plan(
+    expr: &Expr,
+) -> Result<Option<WindowFunctionPlan>, SqlExecutionError> {
     let Expr::Function(function) = expr else {
         return Ok(None);
     };
@@ -697,7 +709,8 @@ pub(super) fn compute_window_results(
 
                                 if let Some(span) = span {
                                     let current_order = order_values[idx];
-                                    while let Some(&(front_idx, front_value)) = indexed_window.front()
+                                    while let Some(&(front_idx, front_value)) =
+                                        indexed_window.front()
                                     {
                                         let front_order = order_values[front_idx];
                                         if current_order - front_order > span {
@@ -778,10 +791,7 @@ pub(super) fn compute_window_results(
                         let row_idx = rows[*position];
                         evaluated.push(evaluate_row_expr(arg_expr, row_idx, &base_dataset)?);
                     }
-                    let last_value = evaluated
-                        .last()
-                        .cloned()
-                        .unwrap_or(ScalarValue::Null);
+                    let last_value = evaluated.last().cloned().unwrap_or(ScalarValue::Null);
                     for position in sorted_positions.iter() {
                         values[*position] = last_value.clone();
                     }
@@ -794,4 +804,3 @@ pub(super) fn compute_window_results(
 
     Ok(results)
 }
-

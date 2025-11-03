@@ -1,12 +1,15 @@
-use super::{ProjectionItem, ProjectionPlan, SqlExecutionError};
 use super::aggregates::MaterializedColumns;
-use super::helpers::{collect_expr_column_ordinals, column_name_from_expr, object_name_matches_table, wildcard_options_supported};
+use super::helpers::{
+    collect_expr_column_ordinals, column_name_from_expr, object_name_matches_table,
+    wildcard_options_supported,
+};
 use super::values::CachedValue;
+use super::{ProjectionItem, ProjectionPlan, SqlExecutionError};
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::metadata_store::ColumnCatalog;
 use crate::page_handler::PageHandler;
-use sqlparser::ast::SelectItem;
 use sqlparser::ast::Expr;
+use sqlparser::ast::SelectItem;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 

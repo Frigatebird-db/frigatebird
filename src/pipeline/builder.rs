@@ -3,7 +3,7 @@ use types::{Job, PipelineBatch, PipelineStep};
 
 use crate::page_handler::PageHandler;
 use crate::sql::models::{FilterExpr, QueryPlan};
-use crossbeam::channel::{unbounded, Sender};
+use crossbeam::channel::{Sender, unbounded};
 use rand::{Rng, distributions::Alphanumeric};
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
@@ -136,7 +136,6 @@ pub(super) fn generate_pipeline_id() -> String {
         .collect();
     format!("pipe-{suffix}")
 }
-
 
 #[cfg(test)]
 mod tests {

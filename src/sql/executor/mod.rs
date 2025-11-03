@@ -5,8 +5,8 @@ mod helpers;
 mod ordering;
 mod projection_helpers;
 mod row_functions;
-mod scan_helpers;
 mod scalar_functions;
+mod scan_helpers;
 mod values;
 mod window_helpers;
 
@@ -31,17 +31,15 @@ use std::sync::Arc;
 
 use aggregates::{
     AggregateDataset, AggregateProjectionPlan, MaterializedColumns, WindowResultMap,
-    evaluate_aggregate_outputs, plan_aggregate_projection,
-    select_item_contains_aggregate,
+    evaluate_aggregate_outputs, plan_aggregate_projection, select_item_contains_aggregate,
 };
 use expressions::{evaluate_row_expr, evaluate_scalar_expression, evaluate_selection_expr};
+use grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
 use helpers::{
     collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
     object_name_matches_table, object_name_to_string, parse_interval_seconds, parse_limit,
-    parse_offset,
-    table_with_joins_to_name, wildcard_options_supported,
+    parse_offset, table_with_joins_to_name, wildcard_options_supported,
 };
-use grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
 use ordering::{
     NullsPlacement, OrderClause, OrderKey, build_group_order_key, build_row_order_key,
     compare_order_keys, sort_rows_logical,
@@ -49,7 +47,10 @@ use ordering::{
 use projection_helpers::{build_projection, materialize_columns};
 use scan_helpers::collect_sort_key_filters;
 use values::{CachedValue, ScalarValue, compare_strs, scalar_from_f64};
-use window_helpers::{collect_window_function_plans, collect_window_plans_from_expr, compute_window_results, plan_order_clauses};
+use window_helpers::{
+    collect_window_function_plans, collect_window_plans_from_expr, compute_window_results,
+    plan_order_clauses,
+};
 
 #[derive(Debug)]
 pub enum SqlExecutionError {
@@ -558,7 +559,8 @@ impl SqlExecutor {
                     let mut key_order: Vec<GroupKey> = Vec::new();
 
                     for &row_idx in &matching_rows {
-                        let key = evaluate_group_key(&grouping.expressions, row_idx, &full_dataset)?;
+                        let key =
+                            evaluate_group_key(&grouping.expressions, row_idx, &full_dataset)?;
                         match groups.entry(key.clone()) {
                             std::collections::hash_map::Entry::Occupied(mut entry) => {
                                 entry.get_mut().push(row_idx);
