@@ -1,6 +1,6 @@
 use super::*;
 use rand::seq::SliceRandom;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 struct RandomQuery {
     sql: String,
@@ -66,7 +66,8 @@ fn random_simple_select(table: &str, row_count: i64, rng: &mut StdRng) -> Random
         projection.push("quantity * price AS gross_value".into());
     }
     if rng.gen_bool(0.15) {
-        projection.push("CASE WHEN discount > 0.2 THEN 'high' ELSE 'low' END AS discount_band".into());
+        projection
+            .push("CASE WHEN discount > 0.2 THEN 'high' ELSE 'low' END AS discount_band".into());
     }
 
     let distinct = rng.gen_bool(0.1);
@@ -169,10 +170,7 @@ fn random_grouped_select(table: &str, row_count: i64, rng: &mut StdRng) -> Rando
     }
 
     sql.push_str(" ORDER BY ");
-    let mut order_parts: Vec<String> = group_cols
-        .iter()
-        .map(|col| format!("{col} ASC"))
-        .collect();
+    let mut order_parts: Vec<String> = group_cols.iter().map(|col| format!("{col} ASC")).collect();
     if rng.gen_bool(0.5) {
         order_parts.push("sum_net DESC".into());
     }
@@ -267,9 +265,15 @@ fn glue_predicates(predicates: &[String], rng: &mut StdRng) -> String {
         2 => format!("({} AND {})", predicates[0], predicates[1]),
         _ => {
             if rng.gen_bool(0.5) {
-                format!("({} AND {}) OR {}", predicates[0], predicates[1], predicates[2])
+                format!(
+                    "({} AND {}) OR {}",
+                    predicates[0], predicates[1], predicates[2]
+                )
             } else {
-                format!("({} OR {}) AND {}", predicates[0], predicates[1], predicates[2])
+                format!(
+                    "({} OR {}) AND {}",
+                    predicates[0], predicates[1], predicates[2]
+                )
             }
         }
     }
@@ -298,25 +302,35 @@ fn random_predicate(row_count: i64, rng: &mut StdRng) -> String {
             }
         }
         ("segment", ColumnKind::Text) => {
-            let segments = ["consumer", "enterprise", "public_sector", "startup", "partner"];
+            let segments = [
+                "consumer",
+                "enterprise",
+                "public_sector",
+                "startup",
+                "partner",
+            ];
             if rng.gen_bool(0.5) {
                 format!("segment = '{}'", segments.choose(rng).unwrap())
             } else {
                 format!("segment ILIKE '%{}%'", segments.choose(rng).unwrap())
             }
         }
-        ("nullable_text", ColumnKind::Text) => {
-            match rng.gen_range(0..3) {
-                0 => "nullable_text IS NULL".into(),
-                1 => "nullable_text = ''".into(),
-                _ => format!("nullable_text LIKE 'note-%'"),
-            }
-        }
+        ("nullable_text", ColumnKind::Text) => match rng.gen_range(0..3) {
+            0 => "nullable_text IS NULL".into(),
+            1 => "nullable_text = ''".into(),
+            _ => format!("nullable_text LIKE 'note-%'"),
+        },
         ("description", ColumnKind::Text) => {
             if rng.gen_bool(0.5) {
-                format!("description LIKE '%{}%'", ["consumer", "enterprise", "startup"].choose(rng).unwrap())
+                format!(
+                    "description LIKE '%{}%'",
+                    ["consumer", "enterprise", "startup"].choose(rng).unwrap()
+                )
             } else {
-                format!("description ILIKE '%{}%'", ["A__", "B__", "C__", "D__"].choose(rng).unwrap())
+                format!(
+                    "description ILIKE '%{}%'",
+                    ["A__", "B__", "C__", "D__"].choose(rng).unwrap()
+                )
             }
         }
         ("active", ColumnKind::Bool) => {
@@ -330,13 +344,12 @@ fn random_predicate(row_count: i64, rng: &mut StdRng) -> String {
             let base = rng.gen_range(100..=5000);
             match rng.gen_range(0..3) {
                 0 => format!("quantity > {}", base),
-                1 => format!("quantity BETWEEN {} AND {}", base, base + rng.gen_range(100..=1000)),
-                _ => format!(
-                    "quantity IN ({}, {}, {})",
+                1 => format!(
+                    "quantity BETWEEN {} AND {}",
                     base,
-                    base + 7,
-                    base + 11
+                    base + rng.gen_range(100..=1000)
                 ),
+                _ => format!("quantity IN ({}, {}, {})", base, base + 7, base + 11),
             }
         }
         ("id", ColumnKind::Int) => {

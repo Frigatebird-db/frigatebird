@@ -3,8 +3,8 @@ mod shared;
 
 pub(crate) use shared::*;
 
-mod filters;
 mod aggregates;
+mod filters;
 mod ordering;
-mod windows;
 mod randomized;
+mod windows;

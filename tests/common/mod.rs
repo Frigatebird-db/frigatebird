@@ -1,5 +1,5 @@
 use duckdb::Connection;
-use float_cmp::approx_eq_f64;
+use float_cmp::{F64Margin, approx_eq_f64};
 use idk_uwu_ig::cache::page_cache::PageCache;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
@@ -8,7 +8,7 @@ use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMateri
 use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutor};
 use once_cell::sync::OnceCell;
 use rand::distributions::{Alphanumeric, DistString};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::cmp::Ordering;
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -115,7 +115,11 @@ impl BigFixtureRow {
             format_float(self.discount),
             format_float(self.net_amount),
             quoted(&self.created_at),
-            if self.active { "TRUE".into() } else { "FALSE".into() },
+            if self.active {
+                "TRUE".into()
+            } else {
+                "FALSE".into()
+            },
             quoted(&self.description),
             match &self.nullable_text {
                 Some(value) => quoted(value),
@@ -164,14 +168,7 @@ fn dataset() -> &'static BigFixtureDataset {
 fn build_dataset() -> BigFixtureDataset {
     let mut rng = StdRng::seed_from_u64(0x5A7A_5015_2024);
     let tenants = ["alpha", "beta", "gamma", "delta", "omega"];
-    let regions = [
-        "americas",
-        "emea",
-        "apac",
-        "africa",
-        "antarctica",
-        "orbit",
-    ];
+    let regions = ["americas", "emea", "apac", "africa", "antarctica", "orbit"];
     let segments = [
         "consumer",
         "enterprise",
@@ -301,7 +298,8 @@ fn synthetic_timestamp(index: usize) -> String {
 
 fn random_code(index: usize, rng: &mut StdRng) -> String {
     let mut alphabet = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
-    alphabet.rotate_left(index % alphabet.len());
+    let len = alphabet.len();
+    alphabet.rotate_left(index % len);
     let mut buf = String::with_capacity(6);
     for ch in alphabet.iter().take(3) {
         buf.push(*ch);
@@ -394,7 +392,7 @@ impl fmt::Display for QueryComparisonError {
 
 impl std::error::Error for QueryComparisonError {}
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 enum NormalizedValue {
     Null,
     Bool(bool),
@@ -432,8 +430,8 @@ impl NormalizedValue {
                     approx_eq_f64(
                         *lhs,
                         *rhs,
-                        float_cmp::F64Margin {
-                            ulps: None,
+                        F64Margin {
+                            ulps: 0,
                             epsilon: abs_tol.max(rel_tol * rhs.abs()),
                         },
                     )
@@ -509,7 +507,10 @@ fn normalize_value(raw: Option<&str>) -> NormalizedValue {
     }
 }
 
-fn query_duckdb(conn: &Connection, sql: &str) -> duckdb::Result<(Vec<String>, Vec<Vec<Option<String>>>)> {
+fn query_duckdb(
+    conn: &Connection,
+    sql: &str,
+) -> duckdb::Result<(Vec<String>, Vec<Vec<Option<String>>>)> {
     let mut stmt = conn.prepare(sql)?;
     let column_count = stmt.column_count();
     let mut column_names = Vec::with_capacity(column_count);
@@ -517,7 +518,7 @@ fn query_duckdb(conn: &Connection, sql: &str) -> duckdb::Result<(Vec<String>, Ve
         let name = stmt
             .column_name(idx)
             .map(|value| value.to_string())
-            .unwrap_or_else(|| format!("column_{idx}"));
+            .unwrap_or_else(|_| format!("column_{idx}"));
         column_names.push(name);
     }
 
