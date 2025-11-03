@@ -515,18 +515,16 @@ impl SqlExecutor {
 
         let projection_plan = projection_plan_opt.expect("projection plan required");
         let mut rows = Vec::with_capacity(matching_rows.len());
-        let dataset_holder;
-        let dataset = if projection_plan.needs_dataset() {
-            dataset_holder = Some(AggregateDataset {
+        let dataset_holder = if projection_plan.needs_dataset() {
+            Some(AggregateDataset {
                 rows: matching_rows.as_slice(),
                 materialized: &materialized,
                 column_ordinals: &column_ordinals,
-            });
-            dataset_holder.as_ref()
+            })
         } else {
-            dataset_holder = None;
             None
         };
+        let dataset = dataset_holder.as_ref();
 
         for &row_idx in &matching_rows {
             let mut projected = Vec::with_capacity(projection_plan.items.len());
