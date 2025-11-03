@@ -16,9 +16,9 @@ use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
 use sqlparser::ast::{
-    Assignment, BinaryOperator, Expr, FromTable, GroupByExpr, ObjectName, OrderByExpr, Query,
-    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value, WindowFrame,
-    WindowFrameBound, WindowFrameUnits, WindowType,
+    Assignment, BinaryOperator, Expr, FromTable, FunctionArg, FunctionArgExpr, GroupByExpr,
+    ObjectName, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    TableWithJoins, Value, WindowFrameBound, WindowFrameUnits, WindowType,
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
@@ -36,9 +36,10 @@ use helpers::{
     table_with_joins_to_name, wildcard_options_supported,
 };
 use ordering::{
-    OrderClause, OrderKey, build_group_order_key, compare_order_keys, sort_rows_logical,
+    OrderClause, OrderKey, build_group_order_key, build_row_order_key, compare_order_keys,
+    sort_rows_logical,
 };
-use values::{CachedValue, compare_strs};
+use values::{CachedValue, ScalarValue, compare_strs, scalar_from_f64};
 
 #[derive(Debug)]
 pub enum SqlExecutionError {
@@ -404,12 +405,12 @@ impl SqlExecutor {
 
         for plan in &window_plans {
             for expr in &plan.partition_by {
-                let ordinals =
-                    collect_expr_column_ordinals(expr, &column_ordinals, &table_name)?;
+                let ordinals = collect_expr_column_ordinals(expr, &column_ordinals, &table_name)?;
                 required_ordinals.extend(ordinals);
             }
             for order in &plan.order_by {
-                let ordinals = collect_expr_column_ordinals(&order.expr, &column_ordinals, &table_name)?;
+                let ordinals =
+                    collect_expr_column_ordinals(&order.expr, &column_ordinals, &table_name)?;
                 required_ordinals.extend(ordinals);
             }
             if let Some(arg) = &plan.arg {
@@ -601,6 +602,24 @@ impl SqlExecutor {
             });
         }
 
+        let mut window_results_map: Option<WindowResultMap> = None;
+        let mut row_positions_map: Option<HashMap<u64, usize>> = None;
+        if !window_plans.is_empty() {
+            let results = compute_window_results(
+                &window_plans,
+                matching_rows.as_slice(),
+                &materialized,
+                &column_ordinals,
+            )?;
+            let positions = matching_rows
+                .iter()
+                .enumerate()
+                .map(|(idx, row)| (*row, idx))
+                .collect::<HashMap<u64, usize>>();
+            row_positions_map = Some(positions);
+            window_results_map = Some(results);
+        }
+
         if matching_rows.is_empty() {
             return Ok(SelectResult {
                 columns: result_columns,
@@ -615,6 +634,8 @@ impl SqlExecutor {
                 rows: matching_rows.as_slice(),
                 materialized: &materialized,
                 column_ordinals: &column_ordinals,
+                row_positions: row_positions_map.as_ref(),
+                window_results: window_results_map.as_ref(),
             })
         } else {
             None
@@ -1649,6 +1670,237 @@ fn plan_order_clauses(order_by: &[OrderByExpr]) -> Result<Vec<OrderClause>, SqlE
         });
     }
     Ok(clauses)
+}
+
+fn collect_window_function_plans(
+    items: &[SelectItem],
+) -> Result<Vec<WindowFunctionPlan>, SqlExecutionError> {
+    let mut plans = Vec::new();
+    for item in items {
+        let expr = match item {
+            SelectItem::UnnamedExpr(expr) => expr,
+            SelectItem::ExprWithAlias { expr, .. } => expr,
+            _ => continue,
+        };
+
+        if let Some(plan) = extract_window_plan(expr)? {
+            plans.push(plan);
+        }
+    }
+    Ok(plans)
+}
+
+fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExecutionError> {
+    let Expr::Function(function) = expr else {
+        return Ok(None);
+    };
+
+    let over = match &function.over {
+        Some(WindowType::WindowSpec(spec)) => spec,
+        Some(WindowType::NamedWindow(_)) => {
+            return Err(SqlExecutionError::Unsupported(
+                "named windows are not supported yet".into(),
+            ));
+        }
+        None => return Ok(None),
+    };
+
+    if function.filter.is_some() || function.distinct || !function.order_by.is_empty() {
+        return Err(SqlExecutionError::Unsupported(
+            "window functions with FILTER, DISTINCT, or inner ORDER BY are not supported yet"
+                .into(),
+        ));
+    }
+
+    let key = expr.to_string();
+    let function_name = function
+        .name
+        .0
+        .last()
+        .map(|ident| ident.value.to_uppercase())
+        .unwrap_or_default();
+
+    match function_name.as_str() {
+        "ROW_NUMBER" => {
+            if !function.args.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "ROW_NUMBER() does not accept arguments".into(),
+                ));
+            }
+            if over.window_frame.is_some() {
+                return Err(SqlExecutionError::Unsupported(
+                    "ROW_NUMBER() does not support explicit window frames yet".into(),
+                ));
+            }
+            Ok(Some(WindowFunctionPlan {
+                key,
+                kind: WindowFunctionKind::RowNumber,
+                partition_by: over.partition_by.clone(),
+                order_by: over.order_by.clone(),
+                arg: None,
+            }))
+        }
+        "SUM" => {
+            if function.args.len() != 1 {
+                return Err(SqlExecutionError::Unsupported(
+                    "SUM window function expects exactly one argument".into(),
+                ));
+            }
+            let arg_expr = match &function.args[0] {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => (*expr).clone(),
+                FunctionArg::Named {
+                    arg: FunctionArgExpr::Expr(expr),
+                    ..
+                } => (*expr).clone(),
+                _ => {
+                    return Err(SqlExecutionError::Unsupported(
+                        "SUM window function expects expression argument".into(),
+                    ));
+                }
+            };
+
+            let frame = over.window_frame.as_ref().ok_or_else(|| {
+                SqlExecutionError::Unsupported(
+                    "SUM window function requires ROWS frame specification".into(),
+                )
+            })?;
+            if frame.units != WindowFrameUnits::Rows {
+                return Err(SqlExecutionError::Unsupported(
+                    "SUM window function currently supports only ROWS frames".into(),
+                ));
+            }
+            match frame.start_bound {
+                WindowFrameBound::Preceding(None) => {}
+                _ => {
+                    return Err(SqlExecutionError::Unsupported(
+                        "SUM window frame must start at UNBOUNDED PRECEDING".into(),
+                    ));
+                }
+            }
+            if let Some(end_bound) = &frame.end_bound {
+                match end_bound {
+                    WindowFrameBound::CurrentRow => {}
+                    _ => {
+                        return Err(SqlExecutionError::Unsupported(
+                            "SUM window frame must end at CURRENT ROW".into(),
+                        ));
+                    }
+                }
+            }
+
+            if over.order_by.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "SUM window function requires ORDER BY clause".into(),
+                ));
+            }
+
+            Ok(Some(WindowFunctionPlan {
+                key,
+                kind: WindowFunctionKind::Sum,
+                partition_by: over.partition_by.clone(),
+                order_by: over.order_by.clone(),
+                arg: Some(arg_expr),
+            }))
+        }
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "window function {function_name} is not supported yet"
+        ))),
+    }
+}
+
+fn compute_window_results(
+    plans: &[WindowFunctionPlan],
+    rows: &[u64],
+    materialized: &MaterializedColumns,
+    column_ordinals: &HashMap<String, usize>,
+) -> Result<WindowResultMap, SqlExecutionError> {
+    let mut results: WindowResultMap = WindowResultMap::new();
+    let mut processed: HashSet<String> = HashSet::new();
+    let base_dataset = AggregateDataset {
+        rows,
+        materialized,
+        column_ordinals,
+        row_positions: None,
+        window_results: None,
+    };
+
+    for plan in plans {
+        if !processed.insert(plan.key.clone()) {
+            continue;
+        }
+
+        let mut partitions: HashMap<GroupKey, Vec<usize>> = HashMap::new();
+        let mut key_order: Vec<GroupKey> = Vec::new();
+
+        for (idx, &row_idx) in rows.iter().enumerate() {
+            let key = if plan.partition_by.is_empty() {
+                GroupKey { values: Vec::new() }
+            } else {
+                evaluate_group_key(&plan.partition_by, row_idx, &base_dataset)?
+            };
+
+            match partitions.entry(key.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().push(idx);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(vec![idx]);
+                    key_order.push(key);
+                }
+            }
+        }
+
+        let mut values: Vec<ScalarValue> = vec![ScalarValue::Null; rows.len()];
+        let order_clauses = plan_order_clauses(&plan.order_by)?;
+
+        for key in key_order {
+            let indices = partitions.get(&key).expect("partition entries must exist");
+
+            let mut sorted_positions: Vec<usize> = indices.clone();
+            if !order_clauses.is_empty() {
+                let mut keyed: Vec<(OrderKey, usize)> = Vec::with_capacity(indices.len());
+                for &position in indices {
+                    let row_idx = rows[position];
+                    let key = build_row_order_key(&order_clauses, row_idx, &base_dataset)?;
+                    keyed.push((key, position));
+                }
+                keyed.sort_unstable_by(|left, right| {
+                    compare_order_keys(&left.0, &right.0, &order_clauses)
+                });
+                sorted_positions = keyed.into_iter().map(|(_, pos)| pos).collect();
+            }
+
+            match plan.kind {
+                WindowFunctionKind::RowNumber => {
+                    for (rank, position) in sorted_positions.into_iter().enumerate() {
+                        values[position] = ScalarValue::Int((rank + 1) as i128);
+                    }
+                }
+                WindowFunctionKind::Sum => {
+                    let arg_expr = plan.arg.as_ref().expect("sum window must have argument");
+                    let mut running_sum = 0.0;
+                    let mut seen = false;
+                    for position in sorted_positions {
+                        let row_idx = rows[position];
+                        let value = evaluate_row_expr(arg_expr, row_idx, &base_dataset)?;
+                        if let Some(num) = value.as_f64() {
+                            running_sum += num;
+                            seen = true;
+                        }
+                        if seen {
+                            values[position] = scalar_from_f64(running_sum);
+                        } else {
+                            values[position] = ScalarValue::Null;
+                        }
+                    }
+                }
+            }
+        }
+
+        results.insert(plan.key.clone(), values);
+    }
+
+    Ok(results)
 }
 
 fn evaluate_group_key(

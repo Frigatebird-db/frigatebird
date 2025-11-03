@@ -49,12 +49,10 @@ pub(super) fn evaluate_scalar_expression(
         Expr::Value(Value::Boolean(b)) => Ok(ScalarValue::Bool(*b)),
         Expr::Value(Value::Null) => Ok(ScalarValue::Null),
         Expr::Function(function) => {
-            if function.over.is_some() {
-                evaluate_window_function(function, row_idx, dataset)
-            } else if is_aggregate_function(function) {
+            if is_aggregate_function(function) {
                 evaluate_aggregate_function(function, dataset)
             } else {
-                evaluate_row_function(function, row_idx, dataset)
+                evaluate_scalar_function(function, dataset)
             }
         }
         Expr::BinaryOp { left, op, right } => {
@@ -513,6 +511,13 @@ pub(super) fn evaluate_row_expr(
             row_idx,
             dataset,
         ),
+        Expr::Function(function) => {
+            if function.over.is_some() {
+                evaluate_window_function(function, row_idx, dataset)
+            } else {
+                evaluate_row_function(function, row_idx, dataset)
+            }
+        }
         Expr::Nested(inner) => evaluate_row_expr(inner, row_idx, dataset),
         Expr::Cast { expr, .. }
         | Expr::SafeCast { expr, .. }
@@ -573,26 +578,12 @@ fn evaluate_window_function(
     row_idx: u64,
     dataset: &AggregateDataset,
 ) -> Result<ScalarValue, SqlExecutionError> {
-    let window_results = dataset.window_results.ok_or_else(|| {
-        SqlExecutionError::Unsupported("window functions are not supported in this context".into())
-    })?;
-    let row_positions = dataset.row_positions.ok_or_else(|| {
-        SqlExecutionError::Unsupported("window functions are not supported in this context".into())
-    })?;
-
-    let position = row_positions.get(&row_idx).copied().ok_or_else(|| {
-        SqlExecutionError::OperationFailed("missing window position for row".into())
-    })?;
-
     let key = function.to_string();
-    let values = window_results.get(&key).ok_or_else(|| {
-        SqlExecutionError::OperationFailed(format!(
-            "missing precomputed window results for {key}"
-        ))
+    let position = dataset.row_position(row_idx).ok_or_else(|| {
+        SqlExecutionError::Unsupported("window functions are not supported in this context".into())
     })?;
-
-    values
-        .get(position)
+    dataset
+        .window_value(&key, position)
         .cloned()
         .ok_or_else(|| SqlExecutionError::OperationFailed("window result out of bounds".into()))
 }

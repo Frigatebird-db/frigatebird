@@ -40,11 +40,7 @@ impl<'a> AggregateDataset<'a> {
             .and_then(|positions| positions.get(&row_idx).copied())
     }
 
-    pub(super) fn window_value(
-        &self,
-        key: &str,
-        position: usize,
-    ) -> Option<&ScalarValue> {
+    pub(super) fn window_value(&self, key: &str, position: usize) -> Option<&ScalarValue> {
         self.window_results
             .and_then(|map| map.get(key))
             .and_then(|values| values.get(position))
