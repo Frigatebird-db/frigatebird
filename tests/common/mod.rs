@@ -1,5 +1,5 @@
 use duckdb::Connection;
-use float_cmp::{F64Margin, approx_eq_f64};
+use float_cmp::{ApproxEq, F64Margin};
 use idk_uwu_ig::cache::page_cache::PageCache;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
@@ -427,8 +427,7 @@ impl NormalizedValue {
                 } else if lhs.is_infinite() || rhs.is_infinite() {
                     lhs == rhs
                 } else {
-                    approx_eq_f64(
-                        *lhs,
+                    (*lhs).approx_eq(
                         *rhs,
                         F64Margin {
                             ulps: 0,
