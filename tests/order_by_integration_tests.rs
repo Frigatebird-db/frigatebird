@@ -8,7 +8,7 @@ use idk_uwu_ig::ops_handler::{
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::SqlExecutor;
+use idk_uwu_ig::sql::executor::{SqlExecutionError, SqlExecutor};
 use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
 use std::cmp::Ordering;
 use std::sync::{Arc, RwLock};
@@ -283,6 +283,72 @@ fn sql_executor_query_projects_expressions() {
         .expect("expression projection should work");
     assert_eq!(result.columns, vec!["id + 1"]);
     assert_eq!(result.rows, vec![vec![Some("2".to_string())]]);
+}
+
+#[test]
+fn sql_executor_query_group_by_table_prefix() {
+    let (handler, directory, _store) = build_table_with_rows(
+        "sales",
+        &[
+            ("region", vec!["east", "east", "west"]),
+            ("amount", vec!["10", "20", "15"]),
+        ],
+        vec!["region".to_string()],
+    );
+    let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
+
+    let result = executor
+        .query("SELECT region, SUM(amount) FROM sales GROUP BY region")
+        .expect("group by query");
+    assert_eq!(result.columns, vec!["region", "SUM(amount)"]);
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![Some("east".to_string()), Some("30".to_string())],
+            vec![Some("west".to_string()), Some("15".to_string())],
+        ]
+    );
+}
+
+#[test]
+fn sql_executor_query_group_by_requires_prefix() {
+    let (handler, directory, _store) = build_table_with_rows(
+        "sales",
+        &[("region", vec!["east"]), ("amount", vec!["10"])],
+        vec!["region".to_string()],
+    );
+    let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
+
+    let err = executor
+        .query("SELECT amount, SUM(amount) FROM sales GROUP BY amount")
+        .expect_err("invalid group by should fail");
+    assert!(matches!(
+        err,
+        SqlExecutionError::Unsupported(message)
+            if message.contains("GROUP BY columns must match")
+    ));
+}
+
+#[test]
+fn sql_executor_query_group_by_requires_aggregates() {
+    let (handler, directory, _store) = build_table_with_rows(
+        "sales",
+        &[
+            ("region", vec!["east", "west"]),
+            ("amount", vec!["10", "20"]),
+        ],
+        vec!["region".to_string()],
+    );
+    let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
+
+    let err = executor
+        .query("SELECT region FROM sales GROUP BY region")
+        .expect_err("group by without aggregate");
+    assert!(matches!(
+        err,
+        SqlExecutionError::Unsupported(message)
+            if message.contains("GROUP BY requires aggregate projections")
+    ));
 }
 
 #[test]

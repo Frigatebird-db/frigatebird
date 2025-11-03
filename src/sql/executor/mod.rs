@@ -109,6 +109,14 @@ enum ProjectionItem {
     Computed { expr: Expr },
 }
 
+struct GroupByInfo {
+    columns: Vec<GroupByColumn>,
+}
+
+struct GroupByColumn {
+    ordinal: usize,
+}
+
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
 
 pub struct SqlExecutor {
@@ -243,17 +251,6 @@ impl SqlExecutor {
             ));
         }
 
-        match group_by {
-            GroupByExpr::All => {}
-            GroupByExpr::Expressions(exprs) => {
-                if !exprs.is_empty() {
-                    return Err(SqlExecutionError::Unsupported(
-                        "GROUP BY is not supported".into(),
-                    ));
-                }
-            }
-        }
-
         if from.len() != 1 {
             return Err(SqlExecutionError::Unsupported(
                 "SELECT supports exactly one table".into(),
@@ -312,6 +309,14 @@ impl SqlExecutor {
             .iter()
             .any(|item| select_item_contains_aggregate(item));
 
+        let group_by_info = validate_group_by(
+            &group_by,
+            aggregate_query,
+            &sort_columns,
+            &column_ordinals,
+            &table_name,
+        )?;
+
         let mut aggregate_plan_opt: Option<AggregateProjectionPlan> = None;
         let mut projection_plan_opt: Option<ProjectionPlan> = None;
         let mut required_ordinals: BTreeSet<usize>;
@@ -348,6 +353,12 @@ impl SqlExecutor {
             let predicate_ordinals =
                 collect_expr_column_ordinals(&selection_expr, &column_ordinals, &table_name)?;
             required_ordinals.extend(predicate_ordinals);
+        }
+
+        if let Some(group_info) = &group_by_info {
+            for column in &group_info.columns {
+                required_ordinals.insert(column.ordinal);
+            }
         }
 
         let sort_key_filters = collect_sort_key_filters(
@@ -430,17 +441,69 @@ impl SqlExecutor {
         }
 
         if aggregate_query {
-            let dataset = AggregateDataset {
-                rows: matching_rows.as_slice(),
-                materialized: &materialized,
-                column_ordinals: &column_ordinals,
-            };
             let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");
-            let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
-            return Ok(SelectResult {
-                columns: result_columns,
-                rows: vec![output_row],
-            });
+            if let Some(group_info) = &group_by_info {
+                if matching_rows.is_empty() {
+                    return Ok(SelectResult {
+                        columns: result_columns,
+                        rows: Vec::new(),
+                    });
+                }
+
+                let mut grouped_rows = Vec::new();
+                let mut start = 0;
+                while start < matching_rows.len() {
+                    let mut end = start + 1;
+                    while end < matching_rows.len()
+                        && self.rows_share_group(
+                            &table_name,
+                            &columns,
+                            &materialized,
+                            group_info,
+                            matching_rows[start],
+                            matching_rows[end],
+                        )?
+                    {
+                        end += 1;
+                    }
+
+                    let group_slice = &matching_rows[start..end];
+                    let dataset = AggregateDataset {
+                        rows: group_slice,
+                        materialized: &materialized,
+                        column_ordinals: &column_ordinals,
+                    };
+                    let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
+                    grouped_rows.push(output_row);
+                    start = end;
+                }
+
+                let offset = parse_offset(offset_expr)?;
+                let limit = parse_limit(limit_expr)?;
+                let start_idx = offset.min(grouped_rows.len());
+                let end_idx = if let Some(limit) = limit {
+                    start_idx.saturating_add(limit).min(grouped_rows.len())
+                } else {
+                    grouped_rows.len()
+                };
+                let final_rows = grouped_rows[start_idx..end_idx].to_vec();
+
+                return Ok(SelectResult {
+                    columns: result_columns,
+                    rows: final_rows,
+                });
+            } else {
+                let dataset = AggregateDataset {
+                    rows: matching_rows.as_slice(),
+                    materialized: &materialized,
+                    column_ordinals: &column_ordinals,
+                };
+                let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
+                return Ok(SelectResult {
+                    columns: result_columns,
+                    rows: vec![output_row],
+                });
+            }
         }
 
         if matching_rows.is_empty() {
@@ -1197,6 +1260,53 @@ impl SqlExecutor {
             .map(|entry| CachedValue::from_entry(&entry))
             .unwrap_or(CachedValue::Null)
     }
+
+    fn value_for_row(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        materialized: &MaterializedColumns,
+        ordinal: usize,
+        row_idx: u64,
+    ) -> Result<Option<String>, SqlExecutionError> {
+        let cached = materialized
+            .get(&ordinal)
+            .and_then(|column_map| column_map.get(&row_idx))
+            .cloned()
+            .or_else(|| {
+                self.page_handler
+                    .read_entry_at(table, &columns[ordinal].name, row_idx)
+                    .map(|entry| CachedValue::from_entry(&entry))
+            })
+            .ok_or_else(|| {
+                SqlExecutionError::OperationFailed(format!(
+                    "missing value for {table}.{} at row {row_idx}",
+                    columns[ordinal].name
+                ))
+            })?;
+        Ok(cached.into_option_string())
+    }
+
+    fn rows_share_group(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        materialized: &MaterializedColumns,
+        group_info: &GroupByInfo,
+        left: u64,
+        right: u64,
+    ) -> Result<bool, SqlExecutionError> {
+        for column in &group_info.columns {
+            let left_value =
+                self.value_for_row(table, columns, materialized, column.ordinal, left)?;
+            let right_value =
+                self.value_for_row(table, columns, materialized, column.ordinal, right)?;
+            if left_value != right_value {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
 
 fn validate_order_by(
@@ -1570,6 +1680,59 @@ fn materialize_columns(
     }
 
     Ok(result)
+}
+
+fn validate_group_by(
+    group_by: &GroupByExpr,
+    aggregate_query: bool,
+    sort_columns: &[ColumnCatalog],
+    column_ordinals: &HashMap<String, usize>,
+    table_name: &str,
+) -> Result<Option<GroupByInfo>, SqlExecutionError> {
+    let GroupByExpr::Expressions(exprs) = group_by else {
+        return Ok(None);
+    };
+
+    if exprs.is_empty() {
+        return Ok(None);
+    }
+
+    if !aggregate_query {
+        return Err(SqlExecutionError::Unsupported(
+            "GROUP BY requires aggregate projections".into(),
+        ));
+    }
+
+    if exprs.len() > sort_columns.len() {
+        return Err(SqlExecutionError::Unsupported(format!(
+            "GROUP BY columns must be a prefix of the ORDER BY columns on table {table_name}",
+        )));
+    }
+
+    let mut columns = Vec::with_capacity(exprs.len());
+    for (idx, expr) in exprs.iter().enumerate() {
+        let column_name = column_name_from_expr(expr).ok_or_else(|| {
+            SqlExecutionError::Unsupported("GROUP BY requires simple column references".into())
+        })?;
+
+        let expected = &sort_columns[idx].name;
+        if column_name != *expected {
+            return Err(SqlExecutionError::Unsupported(
+                "GROUP BY columns must match the leading ORDER BY columns".into(),
+            ));
+        }
+
+        let ordinal = column_ordinals.get(&column_name).copied().ok_or_else(|| {
+            SqlExecutionError::ColumnMismatch {
+                table: table_name.to_string(),
+                column: column_name.clone(),
+            }
+        })?;
+
+        columns.push(GroupByColumn { ordinal });
+    }
+
+    Ok(Some(GroupByInfo { columns }))
 }
 #[derive(Clone)]
 struct OrderingSpec {
