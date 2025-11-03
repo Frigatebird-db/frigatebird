@@ -20,7 +20,7 @@ The `high_volume.rs` benchmark tests Satori's performance with large datasets.
    - ORDER BY with LIMIT
    - Pagination (OFFSET + LIMIT)
    - DISTINCT queries
-   - GROUP BY with aggregates
+   - Complex WHERE with multiple conditions (AND)
    - UPDATE with WHERE clause
    - DELETE with WHERE clause
 
