@@ -326,17 +326,14 @@ fn main() {
     let duration = start.elapsed();
     println!("  ✓ Returned {} distinct values in {}", result.rows.len(), format_duration(duration));
 
-    // Benchmark 10: GROUP BY with aggregate
-    println!("\nBenchmark 10: GROUP BY with COUNT");
+    // Benchmark 10: Complex WHERE with multiple conditions
+    println!("\nBenchmark 10: Complex WHERE (event_type = 'purchase' AND id BETWEEN '0005000000' AND '0005010000')");
     let start = Instant::now();
     let result = executor
-        .query("SELECT event_type, COUNT(*) FROM benchmark_data GROUP BY event_type")
-        .expect("GROUP BY query failed");
+        .query("SELECT id, user_id, event_type FROM benchmark_data WHERE event_type = 'purchase' AND id BETWEEN '0005000000' AND '0005010000'")
+        .expect("Complex WHERE query failed");
     let duration = start.elapsed();
-    println!("  ✓ Returned {} groups in {}", result.rows.len(), format_duration(duration));
-    for row in &result.rows {
-        println!("    {} -> {}", row[0].as_ref().unwrap(), row[1].as_ref().unwrap());
-    }
+    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
 
     // STEP 4: Update Benchmark
     print_separator();
