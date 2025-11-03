@@ -5,7 +5,7 @@ use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use idk_uwu_ig::sql::executor::SqlExecutor;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
 fn setup_executor() -> (SqlExecutor, Arc<PageHandler>, Arc<PageDirectory>) {
@@ -262,5 +262,126 @@ fn test_sql_feature_matrix_with_large_dataset() {
         assert_eq!(confirm_result.rows.len(), 1);
         let running: i64 = confirm_result.rows[0][0].as_ref().unwrap().parse().unwrap();
         assert_eq!(running, last_expected.2.unwrap());
+    }
+
+    // ----- QUALIFY with ROW_NUMBER -----
+    let mut beta_rows: Vec<&MetricRow> = rows.iter().filter(|row| row.category == "beta").collect();
+    beta_rows.sort_by(|lhs, rhs| {
+        rhs.value
+            .cmp(&lhs.value)
+            .then_with(|| lhs.ts_text.cmp(&rhs.ts_text))
+    });
+    let mut expected_beta: Vec<(String, String)> = beta_rows
+        .iter()
+        .take(3)
+        .map(|row| (row.user_id.clone(), row.ts_text.clone()))
+        .collect();
+    expected_beta.sort_by(|lhs, rhs| lhs.1.cmp(&rhs.1));
+
+    let qualify_query = "SELECT user_id, ts FROM metrics \
+                         WHERE category = 'beta' \
+                         QUALIFY ROW_NUMBER() OVER (PARTITION BY category ORDER BY value DESC) <= 3 \
+                         ORDER BY ts";
+    let qualify_result = executor.query(qualify_query).expect("qualify query");
+    assert_eq!(qualify_result.rows.len(), expected_beta.len());
+    for (row, expected) in qualify_result.rows.iter().zip(expected_beta.iter()) {
+        assert_eq!(row[0].as_ref().unwrap(), &expected.0);
+        assert_eq!(row[1].as_ref().unwrap(), &expected.1);
+    }
+
+    // ----- RANK and DENSE_RANK -----
+    let mut gamma_rows_ts: Vec<&MetricRow> =
+        rows.iter().filter(|row| row.category == "gamma").collect();
+    gamma_rows_ts.sort_by_key(|row| row.ts_numeric);
+
+    let mut gamma_by_value = gamma_rows_ts.clone();
+    gamma_by_value.sort_by(|lhs, rhs| {
+        rhs.value
+            .cmp(&lhs.value)
+            .then_with(|| lhs.ts_text.cmp(&rhs.ts_text))
+    });
+    let mut rank_map: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut current_rank = 1_i64;
+    let mut dense_rank = 1_i64;
+    for (idx, row) in gamma_by_value.iter().enumerate() {
+        if idx > 0 && gamma_by_value[idx - 1].value != row.value {
+            current_rank = (idx + 1) as i64;
+            dense_rank += 1;
+        }
+        rank_map.insert(row.ts_text.clone(), (current_rank, dense_rank));
+    }
+
+    let rank_query = "SELECT ts, RANK() OVER (PARTITION BY category ORDER BY value DESC) AS rnk, \
+                            DENSE_RANK() OVER (PARTITION BY category ORDER BY value DESC) AS drnk \
+                      FROM metrics WHERE category = 'gamma' ORDER BY ts LIMIT 8";
+    let rank_result = executor.query(rank_query).expect("rank window query");
+    assert_eq!(rank_result.rows.len(), 8);
+    for (row, metric) in rank_result.rows.iter().zip(gamma_rows_ts.iter().take(8)) {
+        let (expected_rank, expected_dense) = rank_map.get(&metric.ts_text).unwrap();
+        assert_eq!(row[1].as_ref().unwrap(), &expected_rank.to_string());
+        assert_eq!(row[2].as_ref().unwrap(), &expected_dense.to_string());
+    }
+
+    // ----- LAG / LEAD -----
+    let mut alpha_rows_ts: Vec<&MetricRow> =
+        rows.iter().filter(|row| row.category == "alpha").collect();
+    alpha_rows_ts.sort_by_key(|row| row.ts_numeric);
+
+    let lag_lead_query = "SELECT ts, value, \
+                                 LAG(value) OVER (PARTITION BY category ORDER BY ts) AS prev_value, \
+                                 LEAD(value, 2, 'missing') OVER (PARTITION BY category ORDER BY ts) AS next_value \
+                          FROM metrics WHERE category = 'alpha' ORDER BY ts LIMIT 6";
+    let lag_lead_result = executor
+        .query(lag_lead_query)
+        .expect("lag/lead window query");
+    assert_eq!(lag_lead_result.rows.len(), 6);
+    for (idx, row) in lag_lead_result.rows.iter().enumerate() {
+        let current = alpha_rows_ts[idx];
+        let expected_prev = if idx > 0 {
+            Some(alpha_rows_ts[idx - 1].value.to_string())
+        } else {
+            None
+        };
+        if let Some(prev) = expected_prev {
+            assert_eq!(row[2].as_ref().unwrap(), &prev);
+        } else {
+            assert!(row[2].is_none());
+        }
+
+        let next_index = idx + 2;
+        let expected_next = if next_index < alpha_rows_ts.len() {
+            alpha_rows_ts[next_index].value.to_string()
+        } else {
+            "missing".to_string()
+        };
+        assert_eq!(row[3].as_ref().unwrap(), &expected_next);
+        assert_eq!(row[0].as_ref().unwrap(), &current.ts_text);
+    }
+
+    // ----- Sliding SUM with bounded frame -----
+    let sliding_query = "SELECT ts, \
+        SUM(score) OVER (PARTITION BY category ORDER BY ts ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS running \
+        FROM metrics WHERE category = 'alpha' ORDER BY ts LIMIT 8";
+    let sliding_result = executor
+        .query(sliding_query)
+        .expect("sliding sum window query");
+    assert_eq!(sliding_result.rows.len(), 8);
+    for (idx, row) in sliding_result.rows.iter().enumerate() {
+        let current = alpha_rows_ts[idx];
+        let start = if idx >= 2 { idx - 2 } else { 0 };
+        let mut sum: i64 = 0;
+        let mut non_null = 0;
+        for candidate in &alpha_rows_ts[start..=idx] {
+            if let Some(score) = candidate.score {
+                sum += score;
+                non_null += 1;
+            }
+        }
+        if non_null > 0 {
+            assert_eq!(row[1].as_ref().unwrap(), &sum.to_string());
+        } else {
+            assert!(row[1].is_none());
+        }
+        assert_eq!(row[0].as_ref().unwrap(), &current.ts_text);
     }
 }
