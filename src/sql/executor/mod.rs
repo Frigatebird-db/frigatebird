@@ -1938,11 +1938,11 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
                 ));
             }
             let arg_expr = match &function.args[0] {
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => (*expr).clone(),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => expr.clone(),
                 FunctionArg::Named {
                     arg: FunctionArgExpr::Expr(expr),
                     ..
-                } => (*expr).clone(),
+                } => expr.clone(),
                 _ => {
                     return Err(SqlExecutionError::Unsupported(
                         "SUM window function expects expression argument".into(),
@@ -2019,11 +2019,11 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
             }
 
             let value_expr = match &function.args[0] {
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => (*expr).clone(),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => expr.clone(),
                 FunctionArg::Named {
                     arg: FunctionArgExpr::Expr(expr),
                     ..
-                } => (*expr).clone(),
+                } => expr.clone(),
                 _ => {
                     return Err(SqlExecutionError::Unsupported(
                         "LAG/LEAD argument must be an expression".into(),
@@ -2058,7 +2058,7 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
                     | FunctionArg::Named {
                         arg: FunctionArgExpr::Expr(expr),
                         ..
-                    } => Some((**expr).clone()),
+                    } => Some(expr.clone()),
                     _ => {
                         return Err(SqlExecutionError::Unsupported(
                             "LAG/LEAD default must be an expression".into(),
