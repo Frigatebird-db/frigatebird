@@ -1,5 +1,5 @@
 use super::SqlExecutionError;
-use super::expressions::evaluate_row_expr;
+use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
 use super::helpers::collect_expr_column_ordinals;
 use super::values::{CachedValue, ScalarValue, scalar_from_f64};
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, SelectItem};
@@ -25,6 +25,7 @@ pub(super) struct AggregateDataset<'a> {
     pub(super) column_ordinals: &'a HashMap<String, usize>,
     pub(super) row_positions: Option<&'a HashMap<u64, usize>>,
     pub(super) window_results: Option<&'a WindowResultMap>,
+    pub(super) masked_exprs: Option<&'a [Expr]>,
 }
 
 impl<'a> AggregateDataset<'a> {
@@ -44,6 +45,12 @@ impl<'a> AggregateDataset<'a> {
         self.window_results
             .and_then(|map| map.get(key))
             .and_then(|values| values.get(position))
+    }
+
+    pub(super) fn is_expr_masked(&self, expr: &Expr) -> bool {
+        self.masked_exprs
+            .map(|masked| masked.iter().any(|masked_expr| masked_expr == expr))
+            .unwrap_or(false)
     }
 }
 
@@ -142,6 +149,10 @@ pub(super) fn is_aggregate_function(function: &Function) -> bool {
             | "STDDEV_POP"
             | "STDDEV_SAMP"
             | "PERCENTILE_CONT"
+            | "APPROX_QUANTILE"
+            | "SUMIF"
+            | "AVGIF"
+            | "COUNTIF"
     )
 }
 
@@ -285,7 +296,7 @@ pub(super) fn evaluate_aggregate_outputs(
 ) -> Result<Vec<Option<String>>, SqlExecutionError> {
     let mut row = Vec::with_capacity(plan.outputs.len());
     for output in &plan.outputs {
-        let value = super::expressions::evaluate_scalar_expression(&output.expr, dataset)?;
+        let value = evaluate_scalar_expression(&output.expr, dataset)?;
         row.push(value.into_option_string());
     }
     Ok(row)
@@ -309,6 +320,10 @@ pub(super) fn evaluate_aggregate_function(
             evaluate_numeric_aggregate(name.as_str(), function, dataset)
         }
         "PERCENTILE_CONT" => evaluate_percentile_cont(function, dataset),
+        "APPROX_QUANTILE" => evaluate_approx_quantile(function, dataset),
+        "SUMIF" => evaluate_sum_if(function, dataset),
+        "AVGIF" => evaluate_avg_if(function, dataset),
+        "COUNTIF" => evaluate_count_if(function, dataset),
         _ => Err(SqlExecutionError::Unsupported(format!(
             "unsupported aggregate function {name}"
         ))),
@@ -319,19 +334,29 @@ fn evaluate_count(
     function: &Function,
     dataset: &AggregateDataset,
 ) -> Result<ScalarValue, SqlExecutionError> {
+    let filter = function.filter.as_deref();
     if function.args.is_empty()
         || matches!(
             function.args.get(0),
             Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard))
         )
     {
-        return Ok(ScalarValue::Int(dataset.rows.len() as i128));
+        let mut count: i128 = 0;
+        for &row in dataset.rows {
+            if row_passes_filter(filter, row, dataset)? {
+                count += 1;
+            }
+        }
+        return Ok(ScalarValue::Int(count));
     }
 
     let expr = extract_single_argument(function)?;
     if function.distinct {
         let mut set: HashSet<String> = HashSet::new();
         for &row in dataset.rows {
+            if !row_passes_filter(filter, row, dataset)? {
+                continue;
+            }
             let value = evaluate_row_expr(expr, row, dataset)?;
             if let Some(text) = value.into_option_string() {
                 set.insert(text);
@@ -341,6 +366,9 @@ fn evaluate_count(
     } else {
         let mut count: i128 = 0;
         for &row in dataset.rows {
+            if !row_passes_filter(filter, row, dataset)? {
+                continue;
+            }
             let value = evaluate_row_expr(expr, row, dataset)?;
             if !value.is_null() {
                 count += 1;
@@ -356,6 +384,7 @@ fn evaluate_numeric_aggregate(
     dataset: &AggregateDataset,
 ) -> Result<ScalarValue, SqlExecutionError> {
     let expr = extract_single_argument(function)?;
+    let filter = function.filter.as_deref();
     let mut count: i128 = 0;
     let mut sum = 0.0;
     let mut min_value: Option<f64> = None;
@@ -364,6 +393,9 @@ fn evaluate_numeric_aggregate(
     let mut m2 = 0.0;
 
     for &row in dataset.rows {
+        if !row_passes_filter(filter, row, dataset)? {
+            continue;
+        }
         let value = evaluate_row_expr(expr, row, dataset)?;
         if let Some(num) = value.as_f64() {
             min_value = Some(min_value.map(|m| m.min(num)).unwrap_or(num));
@@ -448,7 +480,7 @@ fn evaluate_percentile_cont(
         }
     };
 
-    let percent = super::expressions::evaluate_scalar_expression(percent_expr, dataset)?
+    let percent = evaluate_scalar_expression(percent_expr, dataset)?
         .as_f64()
         .ok_or_else(|| {
             SqlExecutionError::Unsupported("percentile_cont requires numeric percentile".into())
@@ -479,8 +511,12 @@ fn evaluate_percentile_cont(
             "percentile_cont requires an ORDER BY expression".into(),
         ));
     };
+    let filter = function.filter.as_deref();
     let mut values: Vec<f64> = Vec::with_capacity(dataset.rows.len());
     for &row in dataset.rows {
+        if !row_passes_filter(filter, row, dataset)? {
+            continue;
+        }
         let value = evaluate_row_expr(order_expr, row, dataset)?;
         if let Some(num) = value.as_f64() {
             values.push(num);
@@ -507,6 +543,256 @@ fn evaluate_percentile_cont(
             lower_value + (upper_value - lower_value) * fraction,
         ))
     }
+}
+
+fn evaluate_approx_quantile(
+    function: &Function,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if function.args.len() < 2 {
+        return Err(SqlExecutionError::Unsupported(
+            "approx_quantile requires at least two arguments".into(),
+        ));
+    }
+
+    let value_expr = match &function.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "approx_quantile requires an expression argument".into(),
+            ));
+        }
+    };
+
+    let quantile_expr = match &function.args[1] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "approx_quantile requires numeric quantile argument".into(),
+            ));
+        }
+    };
+
+    let quantile = evaluate_scalar_expression(quantile_expr, dataset)?
+        .as_f64()
+        .ok_or_else(|| {
+            SqlExecutionError::Unsupported("approx_quantile quantile must be numeric".into())
+        })?;
+    if !(0.0..=1.0).contains(&quantile) {
+        return Err(SqlExecutionError::Unsupported(
+            "approx_quantile quantile must be between 0 and 1".into(),
+        ));
+    }
+
+    let filter = function.filter.as_deref();
+    let mut values: Vec<f64> = Vec::with_capacity(dataset.rows.len());
+    for &row in dataset.rows {
+        if !row_passes_filter(filter, row, dataset)? {
+            continue;
+        }
+        let value = evaluate_row_expr(value_expr, row, dataset)?;
+        if let Some(num) = value.as_f64() {
+            values.push(num);
+        }
+    }
+
+    if values.is_empty() {
+        return Ok(ScalarValue::Null);
+    }
+
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let position = (values.len() - 1) as f64 * quantile;
+    let lower = position.floor() as usize;
+    Ok(scalar_from_f64(values[lower]))
+}
+
+fn evaluate_sum_if(
+    function: &Function,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if function.args.len() < 2 {
+        return Err(SqlExecutionError::Unsupported(
+            "sumIf requires a value and a condition".into(),
+        ));
+    }
+
+    let value_expr = match &function.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "sumIf value argument must be an expression".into(),
+            ));
+        }
+    };
+
+    let condition_expr = match &function.args[1] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "sumIf condition must be an expression".into(),
+            ));
+        }
+    };
+
+    let filter = function.filter.as_deref();
+    let mut sum = 0.0;
+    let mut matched = false;
+
+    for &row in dataset.rows {
+        if !row_passes_filter(filter, row, dataset)? {
+            continue;
+        }
+        if !evaluate_condition(condition_expr, row, dataset)? {
+            continue;
+        }
+        let value = evaluate_row_expr(value_expr, row, dataset)?;
+        if let Some(num) = value.as_f64() {
+            sum += num;
+            matched = true;
+        }
+    }
+
+    if matched {
+        Ok(scalar_from_f64(sum))
+    } else {
+        Ok(ScalarValue::Null)
+    }
+}
+
+fn evaluate_avg_if(
+    function: &Function,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if function.args.len() < 2 {
+        return Err(SqlExecutionError::Unsupported(
+            "avgIf requires a value and a condition".into(),
+        ));
+    }
+
+    let value_expr = match &function.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "avgIf value argument must be an expression".into(),
+            ));
+        }
+    };
+
+    let condition_expr = match &function.args[1] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "avgIf condition must be an expression".into(),
+            ));
+        }
+    };
+
+    let filter = function.filter.as_deref();
+    let mut sum = 0.0;
+    let mut count = 0i128;
+
+    for &row in dataset.rows {
+        if !row_passes_filter(filter, row, dataset)? {
+            continue;
+        }
+        if !evaluate_condition(condition_expr, row, dataset)? {
+            continue;
+        }
+        let value = evaluate_row_expr(value_expr, row, dataset)?;
+        if let Some(num) = value.as_f64() {
+            sum += num;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        Ok(ScalarValue::Null)
+    } else {
+        Ok(scalar_from_f64(sum / count as f64))
+    }
+}
+
+fn evaluate_count_if(
+    function: &Function,
+    dataset: &AggregateDataset,
+) -> Result<ScalarValue, SqlExecutionError> {
+    if function.args.is_empty() {
+        return Err(SqlExecutionError::Unsupported(
+            "countIf requires a condition expression".into(),
+        ));
+    }
+
+    let condition_expr = match &function.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+        | FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "countIf condition must be an expression".into(),
+            ));
+        }
+    };
+
+    let filter = function.filter.as_deref();
+    let mut count: i128 = 0;
+    for &row in dataset.rows {
+        if !row_passes_filter(filter, row, dataset)? {
+            continue;
+        }
+        if evaluate_condition(condition_expr, row, dataset)? {
+            count += 1;
+        }
+    }
+
+    Ok(ScalarValue::Int(count))
+}
+
+fn row_passes_filter(
+    filter: Option<&Expr>,
+    row_idx: u64,
+    dataset: &AggregateDataset,
+) -> Result<bool, SqlExecutionError> {
+    if let Some(expr) = filter {
+        let value = evaluate_row_expr(expr, row_idx, dataset)?;
+        Ok(value.as_bool().unwrap_or(false))
+    } else {
+        Ok(true)
+    }
+}
+
+fn evaluate_condition(
+    expr: &Expr,
+    row_idx: u64,
+    dataset: &AggregateDataset,
+) -> Result<bool, SqlExecutionError> {
+    let value = evaluate_row_expr(expr, row_idx, dataset)?;
+    Ok(value.as_bool().unwrap_or(false))
 }
 
 pub(super) fn extract_single_argument<'a>(
