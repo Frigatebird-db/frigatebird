@@ -498,13 +498,13 @@ fn executor_stress_many_small_jobs() {
         let _ = tx.send(vec![]);
 
         let step = PipelineStep::new(
+            "table".to_string(),
             "col1".to_string(),
             vec![],
+            true,
+            Arc::clone(&page_handler),
             tx,
             rx,
-            true,
-            "table".to_string(),
-            Arc::clone(&page_handler),
         );
         let job = Job::new("table".into(), vec![step], entry_tx);
         executor.submit(job);
@@ -531,13 +531,13 @@ fn executor_stress_few_large_jobs() {
             let (tx, rx) = channel::unbounded();
             let table_name = format!("table{}", job_id);
             steps.push(PipelineStep::new(
+                table_name,
                 format!("col{}_{}", job_id, i),
                 vec![],
+                i == 0,
+                Arc::clone(&page_handler),
                 tx,
                 prev_rx,
-                i == 0,
-                table_name,
-                Arc::clone(&page_handler),
             ));
             prev_rx = rx;
         }
