@@ -30,3 +30,6 @@ io-uring = "0.7"
 [[test]]
 name = "sql_massive_correctness"
 path = "tests/sql_massive_correctness/mod.rs"
+
+[patch.crates-io]
+chrono = "=0.4.31"
