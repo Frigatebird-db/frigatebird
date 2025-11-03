@@ -36,8 +36,8 @@ use helpers::{
     table_with_joins_to_name, wildcard_options_supported,
 };
 use ordering::{
-    OrderClause, OrderKey, build_group_order_key, build_row_order_key, compare_order_keys,
-    sort_rows_logical,
+    NullsPlacement, OrderClause, OrderKey, build_group_order_key, build_row_order_key,
+    compare_order_keys, sort_rows_logical,
 };
 use values::{CachedValue, ScalarValue, compare_strs, scalar_from_f64};
 
@@ -1658,15 +1658,15 @@ fn validate_group_by(group_by: &GroupByExpr) -> Result<Option<GroupByInfo>, SqlE
 fn plan_order_clauses(order_by: &[OrderByExpr]) -> Result<Vec<OrderClause>, SqlExecutionError> {
     let mut clauses = Vec::with_capacity(order_by.len());
     for clause in order_by {
-        if clause.nulls_first.is_some() {
-            return Err(SqlExecutionError::Unsupported(
-                "ORDER BY with NULLS FIRST/LAST is not supported yet".into(),
-            ));
-        }
-
+        let nulls = match clause.nulls_first {
+            Some(true) => NullsPlacement::First,
+            Some(false) => NullsPlacement::Last,
+            None => NullsPlacement::Default,
+        };
         clauses.push(OrderClause {
             expr: clause.expr.clone(),
             descending: clause.asc == Some(false),
+            nulls,
         });
     }
     Ok(clauses)
