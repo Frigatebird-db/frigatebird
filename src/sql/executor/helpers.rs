@@ -167,6 +167,7 @@ fn interval_unit_multiplier(field: DateTimeField) -> Result<f64, ()> {
         DateTimeField::Decade => Err(()),
         DateTimeField::Century => Err(()),
         DateTimeField::Millennium => Err(()),
+        _ => Err(()),
     }
 }
 
@@ -288,6 +289,20 @@ pub(super) fn collect_expr_column_names(expr: &Expr, columns: &mut BTreeSet<Stri
         Expr::JsonAccess { left, right, .. } => {
             collect_expr_column_names(left, columns);
             collect_expr_column_names(right, columns);
+        }
+        Expr::GroupingSets(sets) => {
+            for group in sets {
+                for expr in group {
+                    collect_expr_column_names(expr, columns);
+                }
+            }
+        }
+        Expr::Rollup(groups) => {
+            for group in groups {
+                for expr in group {
+                    collect_expr_column_names(expr, columns);
+                }
+            }
         }
         Expr::Function(function) => {
             for function_arg in &function.args {

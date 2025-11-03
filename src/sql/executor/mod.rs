@@ -27,7 +27,8 @@ use std::sync::Arc;
 
 use aggregates::{
     AggregateDataset, AggregateProjectionPlan, MaterializedColumns, WindowResultMap,
-    evaluate_aggregate_outputs, plan_aggregate_projection, select_item_contains_aggregate,
+    evaluate_aggregate_outputs, plan_aggregate_projection,
+    select_item_contains_aggregate,
 };
 use expressions::{evaluate_row_expr, evaluate_scalar_expression, evaluate_selection_expr};
 use helpers::{
@@ -370,7 +371,7 @@ impl SqlExecutor {
         let needs_aggregation = aggregate_query
             || group_by_info
                 .as_ref()
-                .map(|info| !info.expressions.is_empty())
+                .map(|info| !info.sets.is_empty())
                 .unwrap_or(false)
             || having.is_some();
 
@@ -2075,7 +2076,7 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
             let frame = if let Some(frame) = &over.window_frame {
                 match frame.units {
                     WindowFrameUnits::Rows => {
-                        let mut preceding = None;
+                        let preceding;
                         match &frame.start_bound {
                             WindowFrameBound::Preceding(None) => preceding = None,
                             WindowFrameBound::Preceding(Some(expr)) => {
