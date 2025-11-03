@@ -22,7 +22,7 @@ use sqlparser::ast::{
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use aggregates::{
@@ -133,7 +133,11 @@ struct GroupKey {
 #[derive(Clone)]
 enum WindowFunctionKind {
     RowNumber,
-    Sum,
+    Rank,
+    DenseRank,
+    Sum { preceding: Option<usize> },
+    Lag { offset: usize },
+    Lead { offset: usize },
 }
 
 #[derive(Clone)]
@@ -143,6 +147,7 @@ struct WindowFunctionPlan {
     partition_by: Vec<Expr>,
     order_by: Vec<OrderByExpr>,
     arg: Option<Expr>,
+    default_expr: Option<Expr>,
 }
 
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
@@ -270,7 +275,6 @@ impl SqlExecutor {
             || !distribute_by.is_empty()
             || !sort_by.is_empty()
             || !named_window.is_empty()
-            || qualify.is_some()
             || value_table_mode.is_some()
         {
             return Err(SqlExecutionError::Unsupported(
@@ -313,7 +317,10 @@ impl SqlExecutor {
         }
 
         let projection_items = projection;
-        let window_plans = collect_window_function_plans(&projection_items)?;
+        let mut window_plans = collect_window_function_plans(&projection_items)?;
+        if let Some(expr) = &qualify {
+            collect_window_plans_from_expr(expr, &mut window_plans)?;
+        }
 
         let selection_expr_opt = selection;
         let (selection_expr, has_selection) = match selection_expr_opt {
@@ -346,6 +353,12 @@ impl SqlExecutor {
                 .unwrap_or(false)
             || having.is_some();
 
+        if needs_aggregation && qualify.is_some() {
+            return Err(SqlExecutionError::Unsupported(
+                "QUALIFY with aggregates is not supported yet".into(),
+            ));
+        }
+
         if needs_aggregation && !window_plans.is_empty() {
             return Err(SqlExecutionError::Unsupported(
                 "window functions are not supported with aggregates or GROUP BY yet".into(),
@@ -358,11 +371,6 @@ impl SqlExecutor {
         let result_columns: Vec<String>;
 
         if needs_aggregation {
-            if distinct_flag {
-                return Err(SqlExecutionError::Unsupported(
-                    "SELECT DISTINCT with aggregates or GROUP BY is not supported yet".into(),
-                ));
-            }
             let plan = plan_aggregate_projection(&projection_items, &column_ordinals, &table_name)?;
             required_ordinals = plan.required_ordinals.clone();
             result_columns = plan.headers.clone();
@@ -576,6 +584,11 @@ impl SqlExecutor {
                 }
             }
 
+            if distinct_flag {
+                let mut seen: HashSet<Vec<Option<String>>> = HashSet::new();
+                aggregated_rows.retain(|row| seen.insert(row.values.clone()));
+            }
+
             if !order_clauses.is_empty() {
                 aggregated_rows.sort_unstable_by(|left, right| {
                     compare_order_keys(&left.order_key, &right.order_key, &order_clauses)
@@ -629,7 +642,9 @@ impl SqlExecutor {
 
         let projection_plan = projection_plan_opt.expect("projection plan required");
         let mut rows = Vec::with_capacity(matching_rows.len());
-        let dataset_holder = if projection_plan.needs_dataset() {
+        let dataset_required =
+            projection_plan.needs_dataset() || qualify.is_some() || !window_plans.is_empty();
+        let dataset_holder = if dataset_required {
             Some(AggregateDataset {
                 rows: matching_rows.as_slice(),
                 materialized: &materialized,
@@ -643,6 +658,14 @@ impl SqlExecutor {
         let dataset = dataset_holder.as_ref();
 
         for &row_idx in &matching_rows {
+            if let Some(qualify_expr) = &qualify {
+                let dataset = dataset.expect("dataset required for QUALIFY evaluation");
+                let value = evaluate_row_expr(qualify_expr, row_idx, dataset)?;
+                if !value.as_bool().unwrap_or(false) {
+                    continue;
+                }
+            }
+
             let mut projected = Vec::with_capacity(projection_plan.items.len());
             for item in &projection_plan.items {
                 match item {
@@ -1683,11 +1706,128 @@ fn collect_window_function_plans(
             _ => continue,
         };
 
-        if let Some(plan) = extract_window_plan(expr)? {
-            plans.push(plan);
-        }
+        collect_window_plans_from_expr(expr, &mut plans)?;
     }
     Ok(plans)
+}
+
+fn collect_window_plans_from_expr(
+    expr: &Expr,
+    plans: &mut Vec<WindowFunctionPlan>,
+) -> Result<(), SqlExecutionError> {
+    if let Some(plan) = extract_window_plan(expr)? {
+        plans.push(plan);
+    }
+
+    use Expr::*;
+    match expr {
+        BinaryOp { left, right, .. } => {
+            collect_window_plans_from_expr(left, plans)?;
+            collect_window_plans_from_expr(right, plans)?;
+        }
+        UnaryOp { expr, .. } => collect_window_plans_from_expr(expr, plans)?,
+        Nested(inner) => collect_window_plans_from_expr(inner, plans)?,
+        Between {
+            expr, low, high, ..
+        } => {
+            collect_window_plans_from_expr(expr, plans)?;
+            collect_window_plans_from_expr(low, plans)?;
+            collect_window_plans_from_expr(high, plans)?;
+        }
+        InList { expr, list, .. } => {
+            collect_window_plans_from_expr(expr, plans)?;
+            for item in list {
+                collect_window_plans_from_expr(item, plans)?;
+            }
+        }
+        Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(op) = operand {
+                collect_window_plans_from_expr(op, plans)?;
+            }
+            for cond in conditions {
+                collect_window_plans_from_expr(cond, plans)?;
+            }
+            for res in results {
+                collect_window_plans_from_expr(res, plans)?;
+            }
+            if let Some(else_expr) = else_result {
+                collect_window_plans_from_expr(else_expr, plans)?;
+            }
+        }
+        Function(function) => {
+            for function_arg in &function.args {
+                match function_arg {
+                    FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+                        if let FunctionArgExpr::Expr(inner) = arg {
+                            collect_window_plans_from_expr(inner, plans)?;
+                        }
+                    }
+                }
+            }
+            if let Some(filter) = &function.filter {
+                collect_window_plans_from_expr(filter, plans)?;
+            }
+            for order in &function.order_by {
+                collect_window_plans_from_expr(&order.expr, plans)?;
+            }
+        }
+        Cast { expr, .. }
+        | SafeCast { expr, .. }
+        | TryCast { expr, .. }
+        | Convert { expr, .. }
+        | Extract { expr, .. }
+        | Collate { expr, .. }
+        | Ceil { expr, .. }
+        | Floor { expr, .. }
+        | AtTimeZone {
+            timestamp: expr, ..
+        } => collect_window_plans_from_expr(expr, plans)?,
+        Trim {
+            expr,
+            trim_what,
+            trim_characters,
+            ..
+        } => {
+            collect_window_plans_from_expr(expr, plans)?;
+            if let Some(item) = trim_what {
+                collect_window_plans_from_expr(item, plans)?;
+            }
+            if let Some(chars) = trim_characters {
+                for item in chars {
+                    collect_window_plans_from_expr(item, plans)?;
+                }
+            }
+        }
+        Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            collect_window_plans_from_expr(expr, plans)?;
+            if let Some(item) = substring_from {
+                collect_window_plans_from_expr(item, plans)?;
+            }
+            if let Some(item) = substring_for {
+                collect_window_plans_from_expr(item, plans)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn parse_usize_literal(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Value(Value::Number(n, _)) => n.parse::<usize>().ok(),
+        _ => None,
+    }
 }
 
 fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExecutionError> {
@@ -1738,6 +1878,57 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
                 partition_by: over.partition_by.clone(),
                 order_by: over.order_by.clone(),
                 arg: None,
+                default_expr: None,
+            }))
+        }
+        "RANK" => {
+            if !function.args.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "RANK() does not accept arguments".into(),
+                ));
+            }
+            if over.order_by.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "RANK() requires ORDER BY clause".into(),
+                ));
+            }
+            if over.window_frame.is_some() {
+                return Err(SqlExecutionError::Unsupported(
+                    "RANK() does not support custom window frames yet".into(),
+                ));
+            }
+            Ok(Some(WindowFunctionPlan {
+                key,
+                kind: WindowFunctionKind::Rank,
+                partition_by: over.partition_by.clone(),
+                order_by: over.order_by.clone(),
+                arg: None,
+                default_expr: None,
+            }))
+        }
+        "DENSE_RANK" => {
+            if !function.args.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "DENSE_RANK() does not accept arguments".into(),
+                ));
+            }
+            if over.order_by.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "DENSE_RANK() requires ORDER BY clause".into(),
+                ));
+            }
+            if over.window_frame.is_some() {
+                return Err(SqlExecutionError::Unsupported(
+                    "DENSE_RANK() does not support custom window frames yet".into(),
+                ));
+            }
+            Ok(Some(WindowFunctionPlan {
+                key,
+                kind: WindowFunctionKind::DenseRank,
+                partition_by: over.partition_by.clone(),
+                order_by: over.order_by.clone(),
+                arg: None,
+                default_expr: None,
             }))
         }
         "SUM" => {
@@ -1759,31 +1950,38 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
                 }
             };
 
-            let frame = over.window_frame.as_ref().ok_or_else(|| {
-                SqlExecutionError::Unsupported(
-                    "SUM window function requires ROWS frame specification".into(),
-                )
-            })?;
-            if frame.units != WindowFrameUnits::Rows {
-                return Err(SqlExecutionError::Unsupported(
-                    "SUM window function currently supports only ROWS frames".into(),
-                ));
-            }
-            match frame.start_bound {
-                WindowFrameBound::Preceding(None) => {}
-                _ => {
+            let mut preceding = None;
+            if let Some(frame) = &over.window_frame {
+                if frame.units != WindowFrameUnits::Rows {
                     return Err(SqlExecutionError::Unsupported(
-                        "SUM window frame must start at UNBOUNDED PRECEDING".into(),
+                        "SUM window function currently supports only ROWS frames".into(),
                     ));
                 }
-            }
-            if let Some(end_bound) = &frame.end_bound {
-                match end_bound {
-                    WindowFrameBound::CurrentRow => {}
+                match &frame.start_bound {
+                    WindowFrameBound::Preceding(None) => preceding = None,
+                    WindowFrameBound::Preceding(Some(expr)) => {
+                        let value = parse_usize_literal(expr).ok_or_else(|| {
+                            SqlExecutionError::Unsupported(
+                                "SUM window frame PRECEDING must be a non-negative integer literal"
+                                    .into(),
+                            )
+                        })?;
+                        preceding = Some(value as usize);
+                    }
                     _ => {
                         return Err(SqlExecutionError::Unsupported(
-                            "SUM window frame must end at CURRENT ROW".into(),
+                            "SUM window frame must start at UNBOUNDED or N PRECEDING".into(),
                         ));
+                    }
+                }
+                if let Some(end_bound) = &frame.end_bound {
+                    match end_bound {
+                        WindowFrameBound::CurrentRow => {}
+                        _ => {
+                            return Err(SqlExecutionError::Unsupported(
+                                "SUM window frame must end at CURRENT ROW".into(),
+                            ));
+                        }
                     }
                 }
             }
@@ -1796,10 +1994,100 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
 
             Ok(Some(WindowFunctionPlan {
                 key,
-                kind: WindowFunctionKind::Sum,
+                kind: WindowFunctionKind::Sum { preceding },
                 partition_by: over.partition_by.clone(),
                 order_by: over.order_by.clone(),
                 arg: Some(arg_expr),
+                default_expr: None,
+            }))
+        }
+        "LAG" | "LEAD" => {
+            if over.order_by.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "LAG/LEAD require ORDER BY clause".into(),
+                ));
+            }
+            if over.window_frame.is_some() {
+                return Err(SqlExecutionError::Unsupported(
+                    "LAG/LEAD do not support explicit window frames".into(),
+                ));
+            }
+            if function.args.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "LAG/LEAD require at least one argument".into(),
+                ));
+            }
+
+            let value_expr = match &function.args[0] {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => (*expr).clone(),
+                FunctionArg::Named {
+                    arg: FunctionArgExpr::Expr(expr),
+                    ..
+                } => (*expr).clone(),
+                _ => {
+                    return Err(SqlExecutionError::Unsupported(
+                        "LAG/LEAD argument must be an expression".into(),
+                    ));
+                }
+            };
+
+            let offset = if function.args.len() >= 2 {
+                match &function.args[1] {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                    | FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(expr),
+                        ..
+                    } => parse_usize_literal(expr).ok_or_else(|| {
+                        SqlExecutionError::Unsupported(
+                            "LAG/LEAD offset must be a non-negative integer literal".into(),
+                        )
+                    })?,
+                    _ => {
+                        return Err(SqlExecutionError::Unsupported(
+                            "LAG/LEAD offset must be a literal".into(),
+                        ));
+                    }
+                }
+            } else {
+                1
+            };
+
+            let default_expr = if function.args.len() >= 3 {
+                match &function.args[2] {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                    | FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(expr),
+                        ..
+                    } => Some((**expr).clone()),
+                    _ => {
+                        return Err(SqlExecutionError::Unsupported(
+                            "LAG/LEAD default must be an expression".into(),
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
+
+            if function.args.len() > 3 {
+                return Err(SqlExecutionError::Unsupported(
+                    "LAG/LEAD support at most three arguments".into(),
+                ));
+            }
+
+            let kind = if function_name == "LAG" {
+                WindowFunctionKind::Lag { offset }
+            } else {
+                WindowFunctionKind::Lead { offset }
+            };
+
+            Ok(Some(WindowFunctionPlan {
+                key,
+                kind,
+                partition_by: over.partition_by.clone(),
+                order_by: over.order_by.clone(),
+                arg: Some(value_expr),
+                default_expr,
             }))
         }
         _ => Err(SqlExecutionError::Unsupported(format!(
@@ -1857,6 +2145,7 @@ fn compute_window_results(
             let indices = partitions.get(&key).expect("partition entries must exist");
 
             let mut sorted_positions: Vec<usize> = indices.clone();
+            let mut sorted_keys: Vec<OrderKey> = Vec::new();
             if !order_clauses.is_empty() {
                 let mut keyed: Vec<(OrderKey, usize)> = Vec::with_capacity(indices.len());
                 for &position in indices {
@@ -1867,31 +2156,118 @@ fn compute_window_results(
                 keyed.sort_unstable_by(|left, right| {
                     compare_order_keys(&left.0, &right.0, &order_clauses)
                 });
-                sorted_positions = keyed.into_iter().map(|(_, pos)| pos).collect();
+                sorted_positions = Vec::with_capacity(keyed.len());
+                sorted_keys = Vec::with_capacity(keyed.len());
+                for (order_key, pos) in keyed {
+                    sorted_keys.push(order_key);
+                    sorted_positions.push(pos);
+                }
             }
 
             match plan.kind {
                 WindowFunctionKind::RowNumber => {
-                    for (rank, position) in sorted_positions.into_iter().enumerate() {
-                        values[position] = ScalarValue::Int((rank + 1) as i128);
+                    for (rank, position) in sorted_positions.iter().enumerate() {
+                        values[*position] = ScalarValue::Int((rank + 1) as i128);
                     }
                 }
-                WindowFunctionKind::Sum => {
+                WindowFunctionKind::Rank => {
+                    let mut current_rank: i64 = 1;
+                    for (idx, position) in sorted_positions.iter().enumerate() {
+                        if idx > 0 {
+                            if compare_order_keys(
+                                &sorted_keys[idx - 1],
+                                &sorted_keys[idx],
+                                &order_clauses,
+                            ) != Ordering::Equal
+                            {
+                                current_rank = (idx + 1) as i64;
+                            }
+                        }
+                        values[*position] = ScalarValue::Int(current_rank as i128);
+                    }
+                }
+                WindowFunctionKind::DenseRank => {
+                    let mut current_rank: i64 = 1;
+                    for (idx, position) in sorted_positions.iter().enumerate() {
+                        if idx > 0
+                            && compare_order_keys(
+                                &sorted_keys[idx - 1],
+                                &sorted_keys[idx],
+                                &order_clauses,
+                            ) != Ordering::Equal
+                        {
+                            current_rank += 1;
+                        }
+                        values[*position] = ScalarValue::Int(current_rank as i128);
+                    }
+                }
+                WindowFunctionKind::Sum { preceding } => {
                     let arg_expr = plan.arg.as_ref().expect("sum window must have argument");
                     let mut running_sum = 0.0;
-                    let mut seen = false;
-                    for position in sorted_positions {
-                        let row_idx = rows[position];
+                    let mut non_null_count: usize = 0;
+                    let mut window: VecDeque<Option<f64>> = VecDeque::new();
+                    for position in sorted_positions.iter() {
+                        let row_idx = rows[*position];
                         let value = evaluate_row_expr(arg_expr, row_idx, &base_dataset)?;
-                        if let Some(num) = value.as_f64() {
+                        let numeric = value.as_f64();
+                        if let Some(num) = numeric {
                             running_sum += num;
-                            seen = true;
+                            non_null_count += 1;
                         }
-                        if seen {
-                            values[position] = scalar_from_f64(running_sum);
+                        if let Some(preceding) = preceding {
+                            window.push_back(numeric);
+                            while window.len() > preceding + 1 {
+                                if let Some(front) = window.pop_front() {
+                                    if let Some(num) = front {
+                                        running_sum -= num;
+                                        non_null_count -= 1;
+                                    }
+                                }
+                            }
+                        }
+                        if non_null_count > 0 {
+                            values[*position] = scalar_from_f64(running_sum);
                         } else {
-                            values[position] = ScalarValue::Null;
+                            values[*position] = ScalarValue::Null;
                         }
+                    }
+                }
+                WindowFunctionKind::Lag { offset } => {
+                    let arg_expr = plan.arg.as_ref().expect("lag window must have argument");
+                    let mut evaluated: Vec<ScalarValue> =
+                        Vec::with_capacity(sorted_positions.len());
+                    for position in &sorted_positions {
+                        let row_idx = rows[*position];
+                        evaluated.push(evaluate_row_expr(arg_expr, row_idx, &base_dataset)?);
+                    }
+                    for (idx, position) in sorted_positions.iter().enumerate() {
+                        let value = if idx >= offset {
+                            evaluated[idx - offset].clone()
+                        } else if let Some(default_expr) = &plan.default_expr {
+                            evaluate_row_expr(default_expr, rows[*position], &base_dataset)?
+                        } else {
+                            ScalarValue::Null
+                        };
+                        values[*position] = value;
+                    }
+                }
+                WindowFunctionKind::Lead { offset } => {
+                    let arg_expr = plan.arg.as_ref().expect("lead window must have argument");
+                    let mut evaluated: Vec<ScalarValue> =
+                        Vec::with_capacity(sorted_positions.len());
+                    for position in &sorted_positions {
+                        let row_idx = rows[*position];
+                        evaluated.push(evaluate_row_expr(arg_expr, row_idx, &base_dataset)?);
+                    }
+                    for (idx, position) in sorted_positions.iter().enumerate() {
+                        let value = if idx + offset < evaluated.len() {
+                            evaluated[idx + offset].clone()
+                        } else if let Some(default_expr) = &plan.default_expr {
+                            evaluate_row_expr(default_expr, rows[*position], &base_dataset)?
+                        } else {
+                            ScalarValue::Null
+                        };
+                        values[*position] = value;
                     }
                 }
             }
