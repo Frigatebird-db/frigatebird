@@ -32,7 +32,8 @@ use aggregates::{
 use expressions::{evaluate_row_expr, evaluate_scalar_expression, evaluate_selection_expr};
 use helpers::{
     collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
-    object_name_matches_table, object_name_to_string, parse_limit, parse_offset,
+    object_name_matches_table, object_name_to_string, parse_interval_seconds, parse_limit,
+    parse_offset,
     table_with_joins_to_name, wildcard_options_supported,
 };
 use ordering::{
@@ -135,9 +136,11 @@ enum WindowFunctionKind {
     RowNumber,
     Rank,
     DenseRank,
-    Sum { preceding: Option<usize> },
+    Sum { frame: SumWindowFrame },
     Lag { offset: usize },
     Lead { offset: usize },
+    FirstValue,
+    LastValue,
 }
 
 #[derive(Clone)]
@@ -148,6 +151,18 @@ struct WindowFunctionPlan {
     order_by: Vec<OrderByExpr>,
     arg: Option<Expr>,
     default_expr: Option<Expr>,
+}
+
+#[derive(Clone)]
+enum SumWindowFrame {
+    Rows { preceding: Option<usize> },
+    Range { preceding: RangePreceding },
+}
+
+#[derive(Clone, Copy)]
+enum RangePreceding {
+    Unbounded,
+    Value(f64),
 }
 
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
@@ -516,6 +531,7 @@ impl SqlExecutor {
                 column_ordinals: &column_ordinals,
                 row_positions: None,
                 window_results: None,
+                masked_exprs: None,
             };
 
             if let Some(group_info) = &group_by_info {
@@ -543,6 +559,7 @@ impl SqlExecutor {
                         column_ordinals: &column_ordinals,
                         row_positions: None,
                         window_results: None,
+                        masked_exprs: None,
                     };
 
                     if !evaluate_having(&having, &dataset)? {
@@ -568,6 +585,7 @@ impl SqlExecutor {
                     column_ordinals: &column_ordinals,
                     row_positions: None,
                     window_results: None,
+                    masked_exprs: None,
                 };
 
                 if evaluate_having(&having, &dataset)? {
@@ -651,6 +669,7 @@ impl SqlExecutor {
                 column_ordinals: &column_ordinals,
                 row_positions: row_positions_map.as_ref(),
                 window_results: window_results_map.as_ref(),
+                masked_exprs: None,
             })
         } else {
             None
@@ -1950,41 +1969,86 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
                 }
             };
 
-            let mut preceding = None;
-            if let Some(frame) = &over.window_frame {
-                if frame.units != WindowFrameUnits::Rows {
-                    return Err(SqlExecutionError::Unsupported(
-                        "SUM window function currently supports only ROWS frames".into(),
-                    ));
-                }
-                match &frame.start_bound {
-                    WindowFrameBound::Preceding(None) => preceding = None,
-                    WindowFrameBound::Preceding(Some(expr)) => {
-                        let value = parse_usize_literal(expr).ok_or_else(|| {
-                            SqlExecutionError::Unsupported(
-                                "SUM window frame PRECEDING must be a non-negative integer literal"
+            let frame = if let Some(frame) = &over.window_frame {
+                match frame.units {
+                    WindowFrameUnits::Rows => {
+                        let mut preceding = None;
+                        match &frame.start_bound {
+                            WindowFrameBound::Preceding(None) => preceding = None,
+                            WindowFrameBound::Preceding(Some(expr)) => {
+                                let value = parse_usize_literal(expr).ok_or_else(|| {
+                                    SqlExecutionError::Unsupported(
+                                        "SUM window frame PRECEDING must be a non-negative integer literal"
+                                            .into(),
+                                    )
+                                })?;
+                                preceding = Some(value as usize);
+                            }
+                            _ => {
+                                return Err(SqlExecutionError::Unsupported(
+                                    "SUM window frame must start at UNBOUNDED or N PRECEDING"
+                                        .into(),
+                                ));
+                            }
+                        }
+                        if let Some(end_bound) = &frame.end_bound {
+                            match end_bound {
+                                WindowFrameBound::CurrentRow => {}
+                                _ => {
+                                    return Err(SqlExecutionError::Unsupported(
+                                        "SUM window frame must end at CURRENT ROW".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        SumWindowFrame::Rows { preceding }
+                    }
+                    WindowFrameUnits::Range => {
+                        if over.order_by.len() != 1 {
+                            return Err(SqlExecutionError::Unsupported(
+                                "SUM RANGE frame currently supports exactly one ORDER BY expression"
                                     .into(),
-                            )
-                        })?;
-                        preceding = Some(value as usize);
+                            ));
+                        }
+                        let preceding = match &frame.start_bound {
+                            WindowFrameBound::Preceding(None) => RangePreceding::Unbounded,
+                            WindowFrameBound::Preceding(Some(expr)) => {
+                                let seconds = parse_interval_seconds(expr, "SUM RANGE frame")?;
+                                if seconds < 0.0 {
+                                    return Err(SqlExecutionError::Unsupported(
+                                        "SUM RANGE frame requires non-negative interval".into(),
+                                    ));
+                                }
+                                RangePreceding::Value(seconds)
+                            }
+                            _ => {
+                                return Err(SqlExecutionError::Unsupported(
+                                    "SUM RANGE frame must start at INTERVAL PRECEDING or UNBOUNDED"
+                                        .into(),
+                                ));
+                            }
+                        };
+                        if let Some(end_bound) = &frame.end_bound {
+                            match end_bound {
+                                WindowFrameBound::CurrentRow => {}
+                                _ => {
+                                    return Err(SqlExecutionError::Unsupported(
+                                        "SUM RANGE frame must end at CURRENT ROW".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        SumWindowFrame::Range { preceding }
                     }
                     _ => {
                         return Err(SqlExecutionError::Unsupported(
-                            "SUM window frame must start at UNBOUNDED or N PRECEDING".into(),
+                            "SUM window frame supports only ROWS or RANGE units".into(),
                         ));
                     }
                 }
-                if let Some(end_bound) = &frame.end_bound {
-                    match end_bound {
-                        WindowFrameBound::CurrentRow => {}
-                        _ => {
-                            return Err(SqlExecutionError::Unsupported(
-                                "SUM window frame must end at CURRENT ROW".into(),
-                            ));
-                        }
-                    }
-                }
-            }
+            } else {
+                SumWindowFrame::Rows { preceding: None }
+            };
 
             if over.order_by.is_empty() {
                 return Err(SqlExecutionError::Unsupported(
@@ -1994,7 +2058,7 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
 
             Ok(Some(WindowFunctionPlan {
                 key,
-                kind: WindowFunctionKind::Sum { preceding },
+                kind: WindowFunctionKind::Sum { frame },
                 partition_by: over.partition_by.clone(),
                 order_by: over.order_by.clone(),
                 arg: Some(arg_expr),
@@ -2090,6 +2154,51 @@ fn extract_window_plan(expr: &Expr) -> Result<Option<WindowFunctionPlan>, SqlExe
                 default_expr,
             }))
         }
+        "FIRST_VALUE" | "LAST_VALUE" => {
+            if function.args.len() != 1 {
+                return Err(SqlExecutionError::Unsupported(
+                    "FIRST_VALUE/LAST_VALUE expect exactly one argument".into(),
+                ));
+            }
+            if over.order_by.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "FIRST_VALUE/LAST_VALUE require ORDER BY clause".into(),
+                ));
+            }
+            if over.window_frame.is_some() {
+                return Err(SqlExecutionError::Unsupported(
+                    "FIRST_VALUE/LAST_VALUE do not support custom window frames yet".into(),
+                ));
+            }
+
+            let arg_expr = match &function.args[0] {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => expr.clone(),
+                FunctionArg::Named {
+                    arg: FunctionArgExpr::Expr(expr),
+                    ..
+                } => expr.clone(),
+                _ => {
+                    return Err(SqlExecutionError::Unsupported(
+                        "FIRST_VALUE/LAST_VALUE argument must be an expression".into(),
+                    ));
+                }
+            };
+
+            let kind = if function_name == "FIRST_VALUE" {
+                WindowFunctionKind::FirstValue
+            } else {
+                WindowFunctionKind::LastValue
+            };
+
+            Ok(Some(WindowFunctionPlan {
+                key,
+                kind,
+                partition_by: over.partition_by.clone(),
+                order_by: over.order_by.clone(),
+                arg: Some(arg_expr),
+                default_expr: None,
+            }))
+        }
         _ => Err(SqlExecutionError::Unsupported(format!(
             "window function {function_name} is not supported yet"
         ))),
@@ -2110,6 +2219,7 @@ fn compute_window_results(
         column_ordinals,
         row_positions: None,
         window_results: None,
+        masked_exprs: None,
     };
 
     for plan in plans {
@@ -2201,34 +2311,100 @@ fn compute_window_results(
                         values[*position] = ScalarValue::Int(current_rank as i128);
                     }
                 }
-                WindowFunctionKind::Sum { preceding } => {
+                WindowFunctionKind::Sum { ref frame } => {
                     let arg_expr = plan.arg.as_ref().expect("sum window must have argument");
                     let mut running_sum = 0.0;
                     let mut non_null_count: usize = 0;
                     let mut window: VecDeque<Option<f64>> = VecDeque::new();
-                    for position in sorted_positions.iter() {
-                        let row_idx = rows[*position];
-                        let value = evaluate_row_expr(arg_expr, row_idx, &base_dataset)?;
-                        let numeric = value.as_f64();
-                        if let Some(num) = numeric {
-                            running_sum += num;
-                            non_null_count += 1;
-                        }
-                        if let Some(preceding) = preceding {
-                            window.push_back(numeric);
-                            while window.len() > preceding + 1 {
-                                if let Some(front) = window.pop_front() {
-                                    if let Some(num) = front {
-                                        running_sum -= num;
-                                        non_null_count -= 1;
+                    match frame {
+                        SumWindowFrame::Rows { preceding } => {
+                            for position in sorted_positions.iter() {
+                                let row_idx = rows[*position];
+                                let value = evaluate_row_expr(arg_expr, row_idx, &base_dataset)?;
+                                let numeric = value.as_f64();
+                                if let Some(num) = numeric {
+                                    running_sum += num;
+                                    non_null_count += 1;
+                                }
+                                if let Some(limit) = preceding {
+                                    window.push_back(numeric);
+                                    while window.len() > limit + 1 {
+                                        if let Some(front) = window.pop_front() {
+                                            if let Some(num) = front {
+                                                running_sum -= num;
+                                                non_null_count -= 1;
+                                            }
+                                        }
                                     }
+                                }
+                                if non_null_count > 0 {
+                                    values[*position] = scalar_from_f64(running_sum);
+                                } else {
+                                    values[*position] = ScalarValue::Null;
                                 }
                             }
                         }
-                        if non_null_count > 0 {
-                            values[*position] = scalar_from_f64(running_sum);
-                        } else {
-                            values[*position] = ScalarValue::Null;
+                        SumWindowFrame::Range { preceding } => {
+                            if sorted_keys.is_empty() {
+                                return Err(SqlExecutionError::Unsupported(
+                                    "SUM RANGE frame requires ORDER BY clause".into(),
+                                ));
+                            }
+                            let mut order_values: Vec<f64> = Vec::with_capacity(sorted_keys.len());
+                            for key in &sorted_keys {
+                                let value = key
+                                    .values
+                                    .get(0)
+                                    .and_then(|scalar| scalar.as_f64())
+                                    .ok_or_else(|| {
+                                        SqlExecutionError::Unsupported(
+                                            "SUM RANGE frame requires numeric ORDER BY expression"
+                                                .into(),
+                                        )
+                                    })?;
+                                order_values.push(value);
+                            }
+
+                            let span = match preceding {
+                                RangePreceding::Unbounded => None,
+                                RangePreceding::Value(value) => Some(*value),
+                            };
+                            let mut indexed_window: VecDeque<(usize, Option<f64>)> =
+                                VecDeque::new();
+
+                            for (idx, position) in sorted_positions.iter().enumerate() {
+                                let row_idx = rows[*position];
+                                let value = evaluate_row_expr(arg_expr, row_idx, &base_dataset)?;
+                                let numeric = value.as_f64();
+                                if let Some(num) = numeric {
+                                    running_sum += num;
+                                    non_null_count += 1;
+                                }
+                                indexed_window.push_back((idx, numeric));
+
+                                if let Some(span) = span {
+                                    let current_order = order_values[idx];
+                                    while let Some(&(front_idx, front_value)) = indexed_window.front()
+                                    {
+                                        let front_order = order_values[front_idx];
+                                        if current_order - front_order > span {
+                                            if let Some(num) = front_value {
+                                                running_sum -= num;
+                                                non_null_count -= 1;
+                                            }
+                                            indexed_window.pop_front();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if non_null_count > 0 {
+                                    values[*position] = scalar_from_f64(running_sum);
+                                } else {
+                                    values[*position] = ScalarValue::Null;
+                                }
+                            }
                         }
                     }
                 }
@@ -2268,6 +2444,33 @@ fn compute_window_results(
                             ScalarValue::Null
                         };
                         values[*position] = value;
+                    }
+                }
+                WindowFunctionKind::FirstValue => {
+                    let arg_expr = plan.arg.as_ref().expect("FIRST_VALUE requires argument");
+                    let mut cached: Option<ScalarValue> = None;
+                    for position in sorted_positions.iter() {
+                        if cached.is_none() {
+                            let row_idx = rows[*position];
+                            cached = Some(evaluate_row_expr(arg_expr, row_idx, &base_dataset)?);
+                        }
+                        values[*position] = cached.clone().unwrap_or(ScalarValue::Null);
+                    }
+                }
+                WindowFunctionKind::LastValue => {
+                    let arg_expr = plan.arg.as_ref().expect("LAST_VALUE requires argument");
+                    let mut evaluated: Vec<ScalarValue> =
+                        Vec::with_capacity(sorted_positions.len());
+                    for position in &sorted_positions {
+                        let row_idx = rows[*position];
+                        evaluated.push(evaluate_row_expr(arg_expr, row_idx, &base_dataset)?);
+                    }
+                    let last_value = evaluated
+                        .last()
+                        .cloned()
+                        .unwrap_or(ScalarValue::Null);
+                    for position in sorted_positions.iter() {
+                        values[*position] = last_value.clone();
                     }
                 }
             }

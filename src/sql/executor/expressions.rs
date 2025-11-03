@@ -18,6 +18,9 @@ pub(super) fn evaluate_scalar_expression(
     expr: &Expr,
     dataset: &AggregateDataset,
 ) -> Result<ScalarValue, SqlExecutionError> {
+    if dataset.is_expr_masked(expr) {
+        return Ok(ScalarValue::Null);
+    }
     match expr {
         Expr::Identifier(ident) => {
             for &row in dataset.rows {
@@ -297,6 +300,9 @@ pub(super) fn evaluate_row_expr(
     row_idx: u64,
     dataset: &AggregateDataset,
 ) -> Result<ScalarValue, SqlExecutionError> {
+    if dataset.is_expr_masked(expr) {
+        return Ok(ScalarValue::Null);
+    }
     match expr {
         Expr::Identifier(ident) => Ok(dataset
             .column_value(&ident.value, row_idx)
@@ -382,7 +388,6 @@ pub(super) fn evaluate_row_expr(
                     let result = compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Greater)
                         .unwrap_or(false);
-                    println!("row compare {:?} > {:?} => {}", lhs, rhs, result);
                     Ok(ScalarValue::Bool(result))
                 }
                 BinaryOperator::GtEq => Ok(ScalarValue::Bool(

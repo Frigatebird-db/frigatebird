@@ -1,7 +1,8 @@
 use super::SqlExecutionError;
 use super::values::{compare_strs, is_encoded_null};
 use sqlparser::ast::{
-    Expr, ObjectName, Offset, TableFactor, TableWithJoins, Value, WildcardAdditionalOptions,
+    DateTimeField, Expr, ObjectName, Offset, TableFactor, TableWithJoins, Value,
+    WildcardAdditionalOptions,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -78,6 +79,94 @@ pub(super) fn parse_usize_literal(expr: &Expr, context: &str) -> Result<usize, S
         _ => Err(SqlExecutionError::Unsupported(format!(
             "{context} requires a numeric literal"
         ))),
+    }
+}
+
+pub(super) fn parse_interval_seconds(
+    expr: &Expr,
+    context: &str,
+) -> Result<f64, SqlExecutionError> {
+    match expr {
+        Expr::Value(Value::Number(value, _)) => value.parse::<f64>().map_err(|_| {
+            SqlExecutionError::Unsupported(format!(
+                "{context} requires numeric interval"
+            ))
+        }),
+        Expr::Value(Value::SingleQuotedString(s)) => parse_interval_string(s).ok_or_else(|| {
+            SqlExecutionError::Unsupported(format!(
+                "{context} interval literal '{s}' is not supported"
+            ))
+        }),
+        Expr::Interval(interval) => {
+            let base = parse_interval_seconds(interval.value.as_ref(), context)?;
+            let multiplier = interval
+                .leading_field
+                .map(interval_unit_multiplier)
+                .transpose()
+                .map_err(|_| {
+                    SqlExecutionError::Unsupported(format!(
+                        "{context} interval unit is not supported"
+                    ))
+                })?
+                .unwrap_or(1.0);
+            Ok(base * multiplier)
+        }
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "{context} requires literal interval"
+        ))),
+    }
+}
+
+fn parse_interval_string(input: &str) -> Option<f64> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let value_part = parts.next()?;
+    let mut value = value_part.parse::<f64>().ok()?;
+
+    if let Some(unit_part) = parts.next() {
+        if parts.next().is_some() {
+            return None;
+        }
+        let multiplier = string_unit_multiplier(unit_part)?;
+        value *= multiplier;
+    }
+
+    Some(value)
+}
+
+fn string_unit_multiplier(unit: &str) -> Option<f64> {
+    let normalized = unit.trim().to_lowercase();
+    match normalized.as_str() {
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(1.0),
+        "millisecond" | "milliseconds" | "ms" => Some(0.001),
+        "microsecond" | "microseconds" | "us" => Some(0.000001),
+        "minute" | "minutes" | "min" | "mins" => Some(60.0),
+        "hour" | "hours" | "hr" | "hrs" => Some(3_600.0),
+        "day" | "days" => Some(86_400.0),
+        "week" | "weeks" => Some(604_800.0),
+        _ => None,
+    }
+}
+
+fn interval_unit_multiplier(field: DateTimeField) -> Result<f64, ()> {
+    match field {
+        DateTimeField::Second => Ok(1.0),
+        DateTimeField::Millisecond => Ok(0.001),
+        DateTimeField::Microsecond => Ok(0.000001),
+        DateTimeField::Minute => Ok(60.0),
+        DateTimeField::Hour => Ok(3_600.0),
+        DateTimeField::Day => Ok(86_400.0),
+        DateTimeField::Week => Ok(604_800.0),
+        DateTimeField::Month => Err(()),
+        DateTimeField::Quarter => Err(()),
+        DateTimeField::Year => Err(()),
+        DateTimeField::Decade => Err(()),
+        DateTimeField::Century => Err(()),
+        DateTimeField::Millennium => Err(()),
     }
 }
 
