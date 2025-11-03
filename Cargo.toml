@@ -14,6 +14,7 @@ sqlparser = "0.44"
 crossbeam = "0.8.4"
 crossbeam-skiplist = "0.1"
 rand = "0.8"
+chrono = "=0.4.31"
 
 [dev-dependencies]
 duckdb = "0.10"
@@ -30,6 +31,3 @@ io-uring = "0.7"
 [[test]]
 name = "sql_massive_correctness"
 path = "tests/sql_massive_correctness/mod.rs"
-
-[patch.crates-io]
-chrono = "=0.4.31"
