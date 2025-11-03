@@ -1,33 +1,53 @@
-# High-Volume SQL Benchmark
+# Satori Benchmarks
 
-This benchmark exercises the SQL surface area only: it uses the public `SqlExecutor`
-to create a table, insert large volumes of rows, and then run aggregate queries.
-No internal handlers are invoked directly.
+High-volume performance benchmarks for the Satori HTAP database.
 
-## Running
+## High Volume Benchmark
+
+The `high_volume.rs` benchmark tests Satori's performance with large datasets.
+
+### What it does
+
+1. **Creates a table** with 5 columns optimized for ~1KB rows
+2. **Inserts 10 million rows** (~10GB total data) in batches of 1,000
+3. **Runs 12 different read/write benchmarks**:
+   - Point queries (exact ID match)
+   - Range queries (BETWEEN)
+   - LIKE pattern matching
+   - Event type filtering
+   - COUNT aggregates
+   - COUNT with filters
+   - ORDER BY with LIMIT
+   - Pagination (OFFSET + LIMIT)
+   - DISTINCT queries
+   - GROUP BY with aggregates
+   - UPDATE with WHERE clause
+   - DELETE with WHERE clause
+
+### Running the benchmark
 
 ```bash
-cargo run --release --bin high_volume_bench -- \
-  --rows 1000000 \
-  --batch-size 5000 \
-  --payload-bytes 1024 \
-  --report-every 100000 \
-  --rows-per-id 1000
+# Build the benchmark
+cargo build --bin high_volume_bench --release
+
+# Run the benchmark (release mode recommended for realistic performance)
+cargo run --bin high_volume_bench --release
+
+# Or run in debug mode (slower but faster to compile)
+cargo run --bin high_volume_bench
 ```
 
-Arguments:
+### Expected Output
 
-- `--rows` – total number of rows to insert (default: `10_000`).
-- `--batch-size` – rows per `INSERT ... VALUES` statement (default: `1_000`).
-- `--payload-bytes` – size of the large payload column per row (default: `1_024` bytes).
-- `--report-every` – print progress after this many rows (default: `100_000`).
-- `--rows-per-id` – rows mapped onto the same ORDER BY key so aggregate queries
-  can touch a reasonably sized slice (default: `1_000`).
+The benchmark will:
+- Log progress every 2,000 inserted rows
+- Show insert rate (rows/sec)
+- Display timing for each query benchmark
+- Provide a final summary with overall statistics
 
-The run prints insertion throughput and the latency for a handful of aggregate queries,
-each scoped to a specific ORDER BY bucket (the SQL executor requires equality filters on
-the sort key). A supplementary lookup validates other aggregate operators on the same bucket.
+### Performance Notes
 
-> **Note:** Range predicates (for example `id >= '...' AND id <= '...'`) are not yet
-> supported by the SQL executor, so the benchmark limits itself to full-table aggregates
-> and equality predicates on the ordering column.
+- Insert performance varies based on storage backend and cache settings
+- Read performance depends on data locality and index usage
+- The benchmark uses ORDER BY on the `id` column, which matches the table's sort key for optimal performance
+- ~10GB of data will be written to the storage directory during the benchmark
