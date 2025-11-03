@@ -8,7 +8,7 @@ use idk_uwu_ig::ops_handler::{
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SqlExecutionError, SqlExecutor};
+use idk_uwu_ig::sql::executor::SqlExecutor;
 use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
 use std::cmp::Ordering;
 use std::sync::{Arc, RwLock};
@@ -270,7 +270,7 @@ fn sql_executor_query_requires_sort_predicate() {
 }
 
 #[test]
-fn sql_executor_query_rejects_expressions() {
+fn sql_executor_query_projects_expressions() {
     let (handler, directory, _store) = build_table_with_rows(
         "users",
         &[("id", vec!["1"]), ("name", vec!["Alice"])],
@@ -278,14 +278,11 @@ fn sql_executor_query_rejects_expressions() {
     );
     let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
 
-    let err = executor
+    let result = executor
         .query("SELECT id + 1 FROM users WHERE id = 1")
-        .expect_err("expression projection must error");
-    assert!(matches!(
-        err,
-        SqlExecutionError::Unsupported(message)
-            if message.contains("only simple column projections are supported")
-    ));
+        .expect("expression projection should work");
+    assert_eq!(result.columns, vec!["id + 1"]);
+    assert_eq!(result.rows, vec![vec![Some("2".to_string())]]);
 }
 
 #[test]
