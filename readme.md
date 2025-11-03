@@ -19,7 +19,7 @@ we are going to win
 - `DELETE FROM <table> [WHERE ...]`
   - WHERE clause optional; predicates share the same support as UPDATE.
 
-### Not Yet Supported
+### v0.2+ support roadmap
 
 - Joins, subqueries, CTEs, multi-table DML.
 - `GROUP BY ROLLUP`/`GROUPING SETS` (infrastructure exists, not fully operational).
