@@ -245,20 +245,31 @@ fn main() {
     print_separator();
     println!("\nSTEP 3: Running read benchmarks...\n");
 
+    // Calculate dynamic query bounds based on actual row count
+    let mid_point = config.total_rows / 2;
+    let range_start = config.total_rows / 10;
+    let range_end = range_start + 1000.min(config.total_rows / 100);
+    let offset_point = (config.total_rows as f64 * 0.5).floor() as usize;
+
     // Benchmark 1: Point query (exact match)
-    println!("Benchmark 1: Point Query (WHERE id = '0000005000')");
+    let point_id = format!("{:010}", mid_point);
+    println!("Benchmark 1: Point Query (WHERE id = '{}')", point_id);
     let start = Instant::now();
+    let query = format!("SELECT id, user_id, event_type FROM benchmark_data WHERE id = '{}'", point_id);
     let result = executor
-        .query("SELECT id, user_id, event_type FROM benchmark_data WHERE id = '0000005000'")
+        .query(&query)
         .expect("Point query failed");
     let duration = start.elapsed();
     println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
 
     // Benchmark 2: Range query with BETWEEN
-    println!("\nBenchmark 2: Range Query (BETWEEN '0001000000' AND '0001001000')");
+    let range_start_id = format!("{:010}", range_start);
+    let range_end_id = format!("{:010}", range_end);
+    println!("\nBenchmark 2: Range Query (BETWEEN '{}' AND '{}')", range_start_id, range_end_id);
     let start = Instant::now();
+    let query = format!("SELECT id, event_type FROM benchmark_data WHERE id BETWEEN '{}' AND '{}'", range_start_id, range_end_id);
     let result = executor
-        .query("SELECT id, event_type FROM benchmark_data WHERE id BETWEEN '0001000000' AND '0001001000'")
+        .query(&query)
         .expect("Range query failed");
     let duration = start.elapsed();
     println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
@@ -309,10 +320,12 @@ fn main() {
     println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
 
     // Benchmark 8: OFFSET + LIMIT (pagination)
-    println!("\nBenchmark 8: Pagination (OFFSET 5000000 LIMIT 100)");
+    let limit = 100.min(config.total_rows / 100);
+    println!("\nBenchmark 8: Pagination (OFFSET {} LIMIT {})", format_number(offset_point), limit);
     let start = Instant::now();
+    let query = format!("SELECT id, user_id FROM benchmark_data ORDER BY id OFFSET {} LIMIT {}", offset_point, limit);
     let result = executor
-        .query("SELECT id, user_id FROM benchmark_data ORDER BY id OFFSET 5000000 LIMIT 100")
+        .query(&query)
         .expect("Pagination query failed");
     let duration = start.elapsed();
     println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
@@ -327,10 +340,15 @@ fn main() {
     println!("  ✓ Returned {} distinct values in {}", result.rows.len(), format_duration(duration));
 
     // Benchmark 10: Complex WHERE with multiple conditions
-    println!("\nBenchmark 10: Complex WHERE (event_type = 'purchase' AND id BETWEEN '0005000000' AND '0005010000')");
+    let complex_start = config.total_rows / 2;
+    let complex_end = complex_start + 10000.min(config.total_rows / 100);
+    let complex_start_id = format!("{:010}", complex_start);
+    let complex_end_id = format!("{:010}", complex_end);
+    println!("\nBenchmark 10: Complex WHERE (event_type = 'purchase' AND id BETWEEN '{}' AND '{}')", complex_start_id, complex_end_id);
     let start = Instant::now();
+    let query = format!("SELECT id, user_id, event_type FROM benchmark_data WHERE event_type = 'purchase' AND id BETWEEN '{}' AND '{}'", complex_start_id, complex_end_id);
     let result = executor
-        .query("SELECT id, user_id, event_type FROM benchmark_data WHERE event_type = 'purchase' AND id BETWEEN '0005000000' AND '0005010000'")
+        .query(&query)
         .expect("Complex WHERE query failed");
     let duration = start.elapsed();
     println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
@@ -339,9 +357,13 @@ fn main() {
     print_separator();
     println!("\nSTEP 4: Update benchmark...");
     println!("\nBenchmark 11: UPDATE with WHERE clause");
+    let update_end = 1000.min(config.total_rows / 10);
+    let update_start_id = format!("{:010}", 0);
+    let update_end_id = format!("{:010}", update_end);
     let start = Instant::now();
+    let update_query = format!("UPDATE benchmark_data SET event_type = 'updated' WHERE id BETWEEN '{}' AND '{}'", update_start_id, update_end_id);
     executor
-        .execute("UPDATE benchmark_data SET event_type = 'updated' WHERE id BETWEEN '0000000000' AND '0000001000'")
+        .execute(&update_query)
         .expect("Update failed");
     let duration = start.elapsed();
     println!("  ✓ Updated rows in {}", format_duration(duration));
@@ -356,9 +378,13 @@ fn main() {
     print_separator();
     println!("\nSTEP 5: Delete benchmark...");
     println!("\nBenchmark 12: DELETE with WHERE clause");
+    let delete_end = 100.min(config.total_rows / 100);
+    let delete_start_id = format!("{:010}", 0);
+    let delete_end_id = format!("{:010}", delete_end);
     let start = Instant::now();
+    let delete_query = format!("DELETE FROM benchmark_data WHERE id BETWEEN '{}' AND '{}'", delete_start_id, delete_end_id);
     executor
-        .execute("DELETE FROM benchmark_data WHERE id BETWEEN '0000000000' AND '0000000100'")
+        .execute(&delete_query)
         .expect("Delete failed");
     let duration = start.elapsed();
     println!("  ✓ Deleted rows in {}", format_duration(duration));
