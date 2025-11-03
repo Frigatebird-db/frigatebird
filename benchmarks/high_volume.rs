@@ -7,9 +7,24 @@ use idk_uwu_ig::sql::executor::SqlExecutor;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-const TOTAL_ROWS: usize = 10_000_000;
+const DEFAULT_TOTAL_ROWS: usize = 10_000_000;
+const DEFAULT_ROW_SIZE_KB: usize = 1;
 const BATCH_SIZE: usize = 1000;
-const TARGET_ROW_SIZE: usize = 1024; // ~1KB per row for 10GB total
+
+#[derive(Debug)]
+struct BenchmarkConfig {
+    total_rows: usize,
+    row_size_bytes: usize,
+}
+
+impl Default for BenchmarkConfig {
+    fn default() -> Self {
+        Self {
+            total_rows: DEFAULT_TOTAL_ROWS,
+            row_size_bytes: DEFAULT_ROW_SIZE_KB * 1024,
+        }
+    }
+}
 
 fn setup_executor() -> (SqlExecutor, Arc<PageHandler>, Arc<PageDirectory>) {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
@@ -31,22 +46,80 @@ fn setup_executor() -> (SqlExecutor, Arc<PageHandler>, Arc<PageDirectory>) {
     (executor, handler, directory)
 }
 
-fn generate_large_text(id: usize, prefix: &str) -> String {
+fn parse_args() -> BenchmarkConfig {
+    let args: Vec<String> = std::env::args().collect();
+    let mut config = BenchmarkConfig::default();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--rows" | "-r" => {
+                if i + 1 < args.len() {
+                    config.total_rows = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("Invalid value for --rows: {}", args[i + 1]);
+                        std::process::exit(1);
+                    });
+                    i += 2;
+                } else {
+                    eprintln!("--rows requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--row-size" | "-s" => {
+                if i + 1 < args.len() {
+                    let size_kb: usize = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("Invalid value for --row-size: {}", args[i + 1]);
+                        std::process::exit(1);
+                    });
+                    config.row_size_bytes = size_kb * 1024;
+                    i += 2;
+                } else {
+                    eprintln!("--row-size requires a value (in KB)");
+                    std::process::exit(1);
+                }
+            }
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            _ => {
+                eprintln!("Unknown argument: {}", args[i]);
+                print_usage();
+                std::process::exit(1);
+            }
+        }
+    }
+
+    config
+}
+
+fn print_usage() {
+    println!("Usage: high_volume_bench [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  -r, --rows <N>         Number of rows to insert (default: 10,000,000)");
+    println!("  -s, --row-size <KB>    Target row size in KB (default: 1)");
+    println!("  -h, --help             Print this help message");
+    println!();
+    println!("Examples:");
+    println!("  high_volume_bench --rows 1000000 --row-size 2");
+    println!("  high_volume_bench -r 500000 -s 4");
+}
+
+fn generate_large_text(id: usize, prefix: &str, target_size: usize) -> String {
     // Generate text to fill up to target row size
-    // Each row has id + 4 text columns, so ~200 chars per column
-    format!(
-        "{}_{}_{}_{}_{}_{}_{}_{}_{}_{}",
-        prefix,
-        id,
-        "a".repeat(20),
-        "b".repeat(20),
-        "c".repeat(20),
-        "d".repeat(20),
-        "e".repeat(20),
-        "f".repeat(20),
-        "g".repeat(20),
-        "h".repeat(20)
-    )
+    // Account for other fields (id, user_id, event_type) taking ~50 bytes
+    // We have 2 large text fields (payload and metadata), so divide remaining space
+    let base = format!("{}_{}", prefix, id);
+    let remaining = if target_size > base.len() + 50 {
+        (target_size - base.len() - 50) / 2
+    } else {
+        50 // minimum size
+    };
+
+    // Fill with repeated characters
+    let fill = "x".repeat(remaining);
+    format!("{}{}", base, fill)
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -59,14 +132,33 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
 fn print_separator() {
     println!("\n{}", "=".repeat(80));
 }
 
 fn main() {
+    let config = parse_args();
+    let total_data_gb = (config.total_rows * config.row_size_bytes) as f64 / (1024.0 * 1024.0 * 1024.0);
+
     println!("╔══════════════════════════════════════════════════════════════════════════════╗");
     println!("║                    SATORI HIGH-VOLUME BENCHMARK                              ║");
-    println!("║                    10M Rows × ~1KB = ~10GB Dataset                           ║");
+    println!("║                    {} Rows × {}KB = ~{:.1}GB Dataset                           ║",
+        format_number(config.total_rows),
+        config.row_size_bytes / 1024,
+        total_data_gb
+    );
     println!("╚══════════════════════════════════════════════════════════════════════════════╝\n");
 
     let (executor, _, _) = setup_executor();
@@ -91,15 +183,15 @@ fn main() {
     let duration = start.elapsed();
     println!("✓ Table created successfully in {}", format_duration(duration));
 
-    // STEP 2: Insert 10M rows
+    // STEP 2: Insert rows
     print_separator();
-    println!("\nSTEP 2: Inserting {} rows in batches of {}...", TOTAL_ROWS, BATCH_SIZE);
+    println!("\nSTEP 2: Inserting {} rows in batches of {}...", format_number(config.total_rows), BATCH_SIZE);
     let start = Instant::now();
     let mut total_inserted = 0;
     const LOG_INTERVAL: usize = 2000;
 
-    for batch_start in (0..TOTAL_ROWS).step_by(BATCH_SIZE) {
-        let batch_end = (batch_start + BATCH_SIZE).min(TOTAL_ROWS);
+    for batch_start in (0..config.total_rows).step_by(BATCH_SIZE) {
+        let batch_end = (batch_start + BATCH_SIZE).min(config.total_rows);
         let mut values = Vec::new();
 
         for i in batch_start..batch_end {
@@ -112,8 +204,8 @@ fn main() {
                 3 => "click",
                 _ => "other",
             };
-            let payload = generate_large_text(i, "payload");
-            let metadata = generate_large_text(i, "meta");
+            let payload = generate_large_text(i, "payload", config.row_size_bytes);
+            let metadata = generate_large_text(i, "meta", config.row_size_bytes);
 
             values.push(format!(
                 "('{}', '{}', '{}', '{}', '{}')",
@@ -135,19 +227,19 @@ fn main() {
         if total_inserted % LOG_INTERVAL == 0 {
             let elapsed = start.elapsed();
             let rate = total_inserted as f64 / elapsed.as_secs_f64();
-            let progress = (total_inserted as f64 / TOTAL_ROWS as f64) * 100.0;
+            let progress = (total_inserted as f64 / config.total_rows as f64) * 100.0;
             println!(
                 "  Progress: {}/{} ({:.1}%) - {:.0} rows/sec - {}",
-                total_inserted, TOTAL_ROWS, progress, rate, format_duration(elapsed)
+                format_number(total_inserted), format_number(config.total_rows), progress, rate, format_duration(elapsed)
             );
         }
     }
 
     let insert_duration = start.elapsed();
-    let insert_rate = TOTAL_ROWS as f64 / insert_duration.as_secs_f64();
-    println!("\n✓ Inserted {} rows in {}", TOTAL_ROWS, format_duration(insert_duration));
+    let insert_rate = config.total_rows as f64 / insert_duration.as_secs_f64();
+    println!("\n✓ Inserted {} rows in {}", format_number(config.total_rows), format_duration(insert_duration));
     println!("  Average rate: {:.0} rows/sec", insert_rate);
-    println!("  Estimated data size: ~{}GB", (TOTAL_ROWS * TARGET_ROW_SIZE) / (1024 * 1024 * 1024));
+    println!("  Estimated data size: ~{:.1}GB", total_data_gb);
 
     // STEP 3: Read Benchmarks
     print_separator();
@@ -286,10 +378,11 @@ fn main() {
     println!("║                           BENCHMARK COMPLETE                                 ║");
     println!("╚══════════════════════════════════════════════════════════════════════════════╝");
     println!("\nSummary:");
-    println!("  • Total rows inserted: {}", TOTAL_ROWS);
+    println!("  • Total rows inserted: {}", format_number(config.total_rows));
+    println!("  • Row size: {}KB", config.row_size_bytes / 1024);
     println!("  • Insert time: {}", format_duration(insert_duration));
     println!("  • Insert rate: {:.0} rows/sec", insert_rate);
-    println!("  • Estimated dataset size: ~{}GB", (TOTAL_ROWS * TARGET_ROW_SIZE) / (1024 * 1024 * 1024));
+    println!("  • Estimated dataset size: ~{:.1}GB", total_data_gb);
     println!("  • All read benchmarks completed successfully");
     println!("\n");
 }
