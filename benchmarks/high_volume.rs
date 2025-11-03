@@ -1,58 +1,23 @@
-use idk_uwu_ig::cache::page_cache::{
-    PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
-};
+use idk_uwu_ig::cache::page_cache::PageCache;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SqlExecutionError, SqlExecutor};
-use std::env;
-use std::error::Error;
+use idk_uwu_ig::sql::executor::SqlExecutor;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone)]
-struct BenchmarkConfig {
-    rows: usize,
-    batch_size: usize,
-    payload_bytes: usize,
-    report_every: usize,
-    rows_per_id: usize,
-}
+const TOTAL_ROWS: usize = 10_000_000;
+const BATCH_SIZE: usize = 1000;
+const TARGET_ROW_SIZE: usize = 1024; // ~1KB per row for 10GB total
 
-impl BenchmarkConfig {
-    fn from_env() -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
-            rows: parse_arg("--rows").unwrap_or(10_000),
-            batch_size: parse_arg("--batch-size").unwrap_or(1_000),
-            payload_bytes: parse_arg("--payload-bytes").unwrap_or(1_024),
-            report_every: parse_arg("--report-every").unwrap_or(100_000),
-            rows_per_id: parse_arg("--rows-per-id").unwrap_or(1_000),
-        })
-    }
-}
-
-fn parse_arg(flag: &str) -> Option<usize> {
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == flag {
-            if let Some(value) = args.next() {
-                return value.parse::<usize>().ok();
-            }
-        }
-    }
-    None
-}
-
-fn setup_executor() -> SqlExecutor {
-    let metadata_store = Arc::new(RwLock::new(TableMetaStore::new()));
-    let page_directory = Arc::new(PageDirectory::new(Arc::clone(&metadata_store)));
-
-    let compressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryCompressed>::new()));
-    let uncompressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryUncompressed>::new()));
+fn setup_executor() -> (SqlExecutor, Arc<PageHandler>, Arc<PageDirectory>) {
+    let store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = Arc::new(PageDirectory::new(Arc::clone(&store)));
+    let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
+    let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
     let page_io = Arc::new(PageIO {});
-
-    let locator = Arc::new(PageLocator::new(Arc::clone(&page_directory)));
+    let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
     let fetcher = Arc::new(PageFetcher::new(
         Arc::clone(&compressed_cache),
         Arc::clone(&page_io),
@@ -61,164 +26,270 @@ fn setup_executor() -> SqlExecutor {
         Arc::clone(&uncompressed_cache),
         Arc::new(Compressor::new()),
     ));
-
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
-    SqlExecutor::new(handler, page_directory)
+    let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
+    (executor, handler, directory)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let config = BenchmarkConfig::from_env()?;
-    println!(
-        "Starting benchmark with rows={}, batch_size={}, payload_bytes={} …",
-        config.rows, config.batch_size, config.payload_bytes
-    );
-
-    let executor = setup_executor();
-    executor.execute(
-        "CREATE TABLE bench (
-            id TEXT,
-            metric TEXT,
-            payload TEXT
-        ) ORDER BY id",
-    )?;
-
-    run_insert_phase(&executor, &config)?;
-    run_query_phase(&executor, &config)?;
-
-    Ok(())
+fn generate_large_text(id: usize, prefix: &str) -> String {
+    // Generate text to fill up to target row size
+    // Each row has id + 4 text columns, so ~200 chars per column
+    format!(
+        "{}_{}_{}_{}_{}_{}_{}_{}_{}_{}",
+        prefix,
+        id,
+        "a".repeat(20),
+        "b".repeat(20),
+        "c".repeat(20),
+        "d".repeat(20),
+        "e".repeat(20),
+        "f".repeat(20),
+        "g".repeat(20),
+        "h".repeat(20)
+    )
 }
 
-fn run_insert_phase(
-    executor: &SqlExecutor,
-    config: &BenchmarkConfig,
-) -> Result<(), SqlExecutionError> {
-    let payload = "x".repeat(config.payload_bytes);
-    let mut rows_written: usize = 0;
-    let mut batches: usize = 0;
-    let mut elapsed_total = Duration::ZERO;
+fn format_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    let millis = duration.subsec_millis();
+    if secs > 0 {
+        format!("{}.{:03}s", secs, millis)
+    } else {
+        format!("{}ms", millis)
+    }
+}
 
-    let rows_per_id = config.rows_per_id.max(1);
+fn print_separator() {
+    println!("\n{}", "=".repeat(80));
+}
 
-    while rows_written < config.rows {
-        let mut statement = String::from("INSERT INTO bench (id, metric, payload) VALUES ");
-        let mut first = true;
-        let mut batch_rows = 0usize;
+fn main() {
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                    SATORI HIGH-VOLUME BENCHMARK                              ║");
+    println!("║                    10M Rows × ~1KB = ~10GB Dataset                           ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝\n");
 
-        while batch_rows < config.batch_size && rows_written < config.rows {
-            let current_row = rows_written;
-            let id_value = current_row / rows_per_id;
-            let id = format!("{:020}", id_value);
-            let metric = format!("{}", current_row % 10_000);
-            if !first {
-                statement.push_str(", ");
-            } else {
-                first = false;
-            }
-            statement.push_str("('");
-            statement.push_str(&id);
-            statement.push_str("', '");
-            statement.push_str(&metric);
-            statement.push_str("', '");
-            statement.push_str(&payload);
-            statement.push_str("')");
+    let (executor, _, _) = setup_executor();
 
-            rows_written += 1;
-            batch_rows += 1;
+    // STEP 1: Create Table
+    print_separator();
+    println!("STEP 1: Creating table...");
+    let start = Instant::now();
+
+    executor
+        .execute(
+            "CREATE TABLE benchmark_data (
+                id TEXT,
+                user_id TEXT,
+                event_type TEXT,
+                payload TEXT,
+                metadata TEXT
+            ) ORDER BY id"
+        )
+        .expect("Failed to create table");
+
+    let duration = start.elapsed();
+    println!("✓ Table created successfully in {}", format_duration(duration));
+
+    // STEP 2: Insert 10M rows
+    print_separator();
+    println!("\nSTEP 2: Inserting {} rows in batches of {}...", TOTAL_ROWS, BATCH_SIZE);
+    let start = Instant::now();
+    let mut total_inserted = 0;
+    const LOG_INTERVAL: usize = 2000;
+
+    for batch_start in (0..TOTAL_ROWS).step_by(BATCH_SIZE) {
+        let batch_end = (batch_start + BATCH_SIZE).min(TOTAL_ROWS);
+        let mut values = Vec::new();
+
+        for i in batch_start..batch_end {
+            let id = format!("{:010}", i); // Zero-padded ID for proper ordering
+            let user_id = format!("user_{}", i % 10000);
+            let event_type = match i % 5 {
+                0 => "login",
+                1 => "purchase",
+                2 => "view",
+                3 => "click",
+                _ => "other",
+            };
+            let payload = generate_large_text(i, "payload");
+            let metadata = generate_large_text(i, "meta");
+
+            values.push(format!(
+                "('{}', '{}', '{}', '{}', '{}')",
+                id, user_id, event_type, payload, metadata
+            ));
         }
 
-        let start = Instant::now();
-        executor.execute(&statement)?;
-        let batch_elapsed = start.elapsed();
-        elapsed_total += batch_elapsed;
-        batches += 1;
+        let insert_sql = format!(
+            "INSERT INTO benchmark_data (id, user_id, event_type, payload, metadata) VALUES {}",
+            values.join(", ")
+        );
 
-        if rows_written % config.report_every == 0 || rows_written == config.rows {
+        executor.execute(&insert_sql)
+            .expect(&format!("Failed to insert batch starting at {}", batch_start));
+
+        total_inserted += batch_end - batch_start;
+
+        // Print progress every 2k entries
+        if total_inserted % LOG_INTERVAL == 0 {
+            let elapsed = start.elapsed();
+            let rate = total_inserted as f64 / elapsed.as_secs_f64();
+            let progress = (total_inserted as f64 / TOTAL_ROWS as f64) * 100.0;
             println!(
-                "Inserted {rows_written}/{total} rows (last batch: {batch_rows} rows in {batch_elapsed:?})",
-                total = config.rows
+                "  Progress: {}/{} ({:.1}%) - {:.0} rows/sec - {}",
+                total_inserted, TOTAL_ROWS, progress, rate, format_duration(elapsed)
             );
-            println!("So far, that is {rows_written} shits lovingly stuffed into the table.");
         }
     }
 
-    let throughput_rows = rows_per_second(config.rows, elapsed_total);
-    let payload_bytes = config.rows as u64 * config.payload_bytes as u64;
-    let throughput_mb = megabytes_per_second(payload_bytes, elapsed_total);
-    println!(
-        "Insert phase complete: {rows} rows in {time:?} \
-         (~{throughput_rows:.2} rows/s, payload throughput ≈ {throughput_mb:.2} MiB/s across {batches} batches)",
-        rows = config.rows,
-        time = elapsed_total,
-        batches = batches,
-    );
-    println!(
-        "Grand total: {rows} shits inserted. That is a whole lot of shits.",
-        rows = config.rows
-    );
+    let insert_duration = start.elapsed();
+    let insert_rate = TOTAL_ROWS as f64 / insert_duration.as_secs_f64();
+    println!("\n✓ Inserted {} rows in {}", TOTAL_ROWS, format_duration(insert_duration));
+    println!("  Average rate: {:.0} rows/sec", insert_rate);
+    println!("  Estimated data size: ~{}GB", (TOTAL_ROWS * TARGET_ROW_SIZE) / (1024 * 1024 * 1024));
 
-    Ok(())
-}
+    // STEP 3: Read Benchmarks
+    print_separator();
+    println!("\nSTEP 3: Running read benchmarks...\n");
 
-fn run_query_phase(
-    executor: &SqlExecutor,
-    config: &BenchmarkConfig,
-) -> Result<(), SqlExecutionError> {
-    println!("Running query benchmarks…");
+    // Benchmark 1: Point query (exact match)
+    println!("Benchmark 1: Point Query (WHERE id = '0000005000')");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT id, user_id, event_type FROM benchmark_data WHERE id = '0000005000'")
+        .expect("Point query failed");
+    let duration = start.elapsed();
+    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
 
-    let rows_per_id = config.rows_per_id.max(1);
-    if config.rows == 0 {
-        println!("No rows inserted; skipping query phase.");
-        return Ok(());
+    // Benchmark 2: Range query with BETWEEN
+    println!("\nBenchmark 2: Range Query (BETWEEN '0001000000' AND '0001001000')");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT id, event_type FROM benchmark_data WHERE id BETWEEN '0001000000' AND '0001001000'")
+        .expect("Range query failed");
+    let duration = start.elapsed();
+    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+
+    // Benchmark 3: LIKE query
+    println!("\nBenchmark 3: LIKE Query (user_id LIKE 'user_123%')");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT id, user_id FROM benchmark_data WHERE user_id LIKE 'user_123%' LIMIT 100")
+        .expect("LIKE query failed");
+    let duration = start.elapsed();
+    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+
+    // Benchmark 4: Filter by event type
+    println!("\nBenchmark 4: Event Type Filter (event_type = 'purchase')");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT id, user_id FROM benchmark_data WHERE event_type = 'purchase' LIMIT 1000")
+        .expect("Event type query failed");
+    let duration = start.elapsed();
+    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+
+    // Benchmark 5: COUNT aggregate
+    println!("\nBenchmark 5: COUNT Aggregate (total rows)");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT COUNT(*) FROM benchmark_data")
+        .expect("COUNT query failed");
+    let duration = start.elapsed();
+    println!("  ✓ Count: {} in {}", result.rows[0][0].as_ref().unwrap(), format_duration(duration));
+
+    // Benchmark 6: COUNT with filter
+    println!("\nBenchmark 6: COUNT with Filter (event_type = 'login')");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT COUNT(*) FROM benchmark_data WHERE event_type = 'login'")
+        .expect("COUNT with filter failed");
+    let duration = start.elapsed();
+    println!("  ✓ Count: {} in {}", result.rows[0][0].as_ref().unwrap(), format_duration(duration));
+
+    // Benchmark 7: ORDER BY with LIMIT
+    println!("\nBenchmark 7: ORDER BY with LIMIT (first 100 rows)");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT id, user_id, event_type FROM benchmark_data ORDER BY id LIMIT 100")
+        .expect("ORDER BY query failed");
+    let duration = start.elapsed();
+    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+
+    // Benchmark 8: OFFSET + LIMIT (pagination)
+    println!("\nBenchmark 8: Pagination (OFFSET 5000000 LIMIT 100)");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT id, user_id FROM benchmark_data ORDER BY id OFFSET 5000000 LIMIT 100")
+        .expect("Pagination query failed");
+    let duration = start.elapsed();
+    println!("  ✓ Returned {} rows in {}", result.rows.len(), format_duration(duration));
+
+    // Benchmark 9: DISTINCT
+    println!("\nBenchmark 9: DISTINCT event_type");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT DISTINCT event_type FROM benchmark_data")
+        .expect("DISTINCT query failed");
+    let duration = start.elapsed();
+    println!("  ✓ Returned {} distinct values in {}", result.rows.len(), format_duration(duration));
+
+    // Benchmark 10: GROUP BY with aggregate
+    println!("\nBenchmark 10: GROUP BY with COUNT");
+    let start = Instant::now();
+    let result = executor
+        .query("SELECT event_type, COUNT(*) FROM benchmark_data GROUP BY event_type")
+        .expect("GROUP BY query failed");
+    let duration = start.elapsed();
+    println!("  ✓ Returned {} groups in {}", result.rows.len(), format_duration(duration));
+    for row in &result.rows {
+        println!("    {} -> {}", row[0].as_ref().unwrap(), row[1].as_ref().unwrap());
     }
 
-    let max_bucket = (config.rows.saturating_sub(1)) / rows_per_id;
-    let ids_to_probe = [
-        ("head", 0usize),
-        ("mid", max_bucket / 2),
-        ("tail", max_bucket),
-    ];
+    // STEP 4: Update Benchmark
+    print_separator();
+    println!("\nSTEP 4: Update benchmark...");
+    println!("\nBenchmark 11: UPDATE with WHERE clause");
+    let start = Instant::now();
+    executor
+        .execute("UPDATE benchmark_data SET event_type = 'updated' WHERE id BETWEEN '0000000000' AND '0000001000'")
+        .expect("Update failed");
+    let duration = start.elapsed();
+    println!("  ✓ Updated rows in {}", format_duration(duration));
 
-    for (label, bucket) in ids_to_probe {
-        let id_literal = format!("{:020}", bucket);
-        let sql = format!(
-            "SELECT COUNT(*), SUM(metric), AVG(metric) FROM bench WHERE id = '{id_literal}'"
-        );
-        let start = Instant::now();
-        let result = executor.query(&sql)?;
-        let elapsed = start.elapsed();
-        println!(
-            "Query `{label}` on id bucket {bucket} completed in {elapsed:?} (result: {:?})",
-            result.rows.first().unwrap_or(&Vec::new())
-        );
-    }
+    // Verify update
+    let result = executor
+        .query("SELECT COUNT(*) FROM benchmark_data WHERE event_type = 'updated'")
+        .expect("Verify update failed");
+    println!("  ✓ Verified {} rows updated", result.rows[0][0].as_ref().unwrap());
 
-    if config.rows > 0 {
-        let sample_bucket = (config.rows / rows_per_id) / 3;
-        let sample_id = format!("{:020}", sample_bucket);
-        let sql = format!("SELECT COUNT(*), MAX(metric) FROM bench WHERE id = '{sample_id}'");
-        let start = Instant::now();
-        let result = executor.query(&sql)?;
-        let elapsed = start.elapsed();
-        println!(
-            "Supplementary check on id={sample_id} took {elapsed:?} (result: {:?})",
-            result.rows.first().unwrap_or(&Vec::new())
-        );
-    }
+    // STEP 5: Delete Benchmark
+    print_separator();
+    println!("\nSTEP 5: Delete benchmark...");
+    println!("\nBenchmark 12: DELETE with WHERE clause");
+    let start = Instant::now();
+    executor
+        .execute("DELETE FROM benchmark_data WHERE id BETWEEN '0000000000' AND '0000000100'")
+        .expect("Delete failed");
+    let duration = start.elapsed();
+    println!("  ✓ Deleted rows in {}", format_duration(duration));
 
-    Ok(())
-}
+    // Verify delete
+    let result = executor
+        .query("SELECT COUNT(*) FROM benchmark_data")
+        .expect("Count after delete failed");
+    println!("  ✓ Total rows after delete: {}", result.rows[0][0].as_ref().unwrap());
 
-fn rows_per_second(rows: usize, elapsed: Duration) -> f64 {
-    if elapsed.is_zero() {
-        return rows as f64;
-    }
-    rows as f64 / elapsed.as_secs_f64()
-}
-
-fn megabytes_per_second(bytes: u64, elapsed: Duration) -> f64 {
-    const BYTES_PER_MIB: f64 = 1_048_576.0;
-    if elapsed.is_zero() {
-        return bytes as f64 / BYTES_PER_MIB;
-    }
-    (bytes as f64 / BYTES_PER_MIB) / elapsed.as_secs_f64()
+    // Final Summary
+    print_separator();
+    println!("\n╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                           BENCHMARK COMPLETE                                 ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!("\nSummary:");
+    println!("  • Total rows inserted: {}", TOTAL_ROWS);
+    println!("  • Insert time: {}", format_duration(insert_duration));
+    println!("  • Insert rate: {:.0} rows/sec", insert_rate);
+    println!("  • Estimated dataset size: ~{}GB", (TOTAL_ROWS * TARGET_ROW_SIZE) / (1024 * 1024 * 1024));
+    println!("  • All read benchmarks completed successfully");
+    println!("\n");
 }
