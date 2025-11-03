@@ -31,7 +31,7 @@ pub fn build_pipeline(plan: &QueryPlan, page_handler: Arc<PageHandler>) -> Vec<J
             jobs.push(Job::new(table.table_name.clone(), steps, entry_producer));
         } else {
             // No filters, empty pipeline
-            let (entry_producer, _) = unbounded::<PipelineBatch>();
+            let (entry_producer, _) = channel::unbounded::<PipelineBatch>();
             jobs.push(Job::new(
                 table.table_name.clone(),
                 Vec::new(),
@@ -105,20 +105,20 @@ fn attach_channels(
     table: String,
     page_handler: Arc<PageHandler>,
 ) -> (Sender<PipelineBatch>, Vec<PipelineStep>) {
-    let (entry_producer, mut previous_receiver) = unbounded::<PipelineBatch>();
+    let (entry_producer, mut previous_receiver) = channel::unbounded::<PipelineBatch>();
     let mut steps = Vec::with_capacity(grouped_steps.len());
     let mut is_root = true;
 
     for (column, filters) in grouped_steps {
-        let (current_producer, next_receiver) = unbounded::<PipelineBatch>();
+        let (current_producer, next_receiver) = channel::unbounded::<PipelineBatch>();
         steps.push(PipelineStep::new(
-            table.clone(),
             column,
             filters,
-            is_root,
-            Arc::clone(&page_handler),
             current_producer,
             previous_receiver,
+            is_root,
+            table.clone(),
+            Arc::clone(&page_handler),
         ));
         previous_receiver = next_receiver;
         is_root = false;
@@ -446,8 +446,8 @@ mod tests {
     #[test]
     fn test_apply_filters_empty_batch() {
         let page_handler = create_mock_page_handler();
-        let (_tx, rx) = unbounded::<PipelineBatch>();
-        let (out_tx, _out_rx) = unbounded::<PipelineBatch>();
+        let (_tx, rx) = channel::unbounded::<PipelineBatch>();
+        let (out_tx, _out_rx) = channel::unbounded::<PipelineBatch>();
 
         let filter = FilterExpr::Leaf(make_binary_op(
             make_ident_expr("age"),
@@ -473,8 +473,8 @@ mod tests {
     #[test]
     fn test_apply_filters_no_filters() {
         let page_handler = create_mock_page_handler();
-        let (_tx, rx) = unbounded::<PipelineBatch>();
-        let (out_tx, _out_rx) = unbounded::<PipelineBatch>();
+        let (_tx, rx) = channel::unbounded::<PipelineBatch>();
+        let (out_tx, _out_rx) = channel::unbounded::<PipelineBatch>();
 
         let step = PipelineStep::new(
             "age".to_string(),
@@ -496,8 +496,8 @@ mod tests {
     #[test]
     fn test_apply_filters_no_pages_clears_batch() {
         let page_handler = create_mock_page_handler();
-        let (_tx, rx) = unbounded::<PipelineBatch>();
-        let (out_tx, _out_rx) = unbounded::<PipelineBatch>();
+        let (_tx, rx) = channel::unbounded::<PipelineBatch>();
+        let (out_tx, _out_rx) = channel::unbounded::<PipelineBatch>();
 
         let filter = FilterExpr::Leaf(make_binary_op(
             make_ident_expr("age"),
@@ -527,8 +527,8 @@ mod tests {
         // actual page data set up. In practice, this would need actual pages
         // with entries registered in the metadata store.
         let page_handler = create_mock_page_handler();
-        let (_tx, rx) = unbounded::<PipelineBatch>();
-        let (out_tx, _out_rx) = unbounded::<PipelineBatch>();
+        let (_tx, rx) = channel::unbounded::<PipelineBatch>();
+        let (out_tx, _out_rx) = channel::unbounded::<PipelineBatch>();
 
         let filter = FilterExpr::Leaf(make_binary_op(
             make_ident_expr("age"),
@@ -557,8 +557,8 @@ mod tests {
     #[test]
     fn test_pipeline_step_execute_with_filters() {
         let page_handler = create_mock_page_handler();
-        let (prev_tx, prev_rx) = unbounded::<PipelineBatch>();
-        let (out_tx, out_rx) = unbounded::<PipelineBatch>();
+        let (prev_tx, prev_rx) = channel::unbounded::<PipelineBatch>();
+        let (out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
 
         let filter = FilterExpr::Leaf(make_binary_op(
             make_ident_expr("status"),
@@ -594,8 +594,8 @@ mod tests {
     #[test]
     fn test_pipeline_step_execute_root() {
         let page_handler = create_mock_page_handler();
-        let (_prev_tx, prev_rx) = unbounded::<PipelineBatch>();
-        let (out_tx, out_rx) = unbounded::<PipelineBatch>();
+        let (_prev_tx, prev_rx) = channel::unbounded::<PipelineBatch>();
+        let (out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
 
         let step = PipelineStep::new(
             "col".to_string(),
@@ -620,8 +620,8 @@ mod tests {
     #[test]
     fn test_multiple_filters_and_logic() {
         let page_handler = create_mock_page_handler();
-        let (_tx, rx) = unbounded::<PipelineBatch>();
-        let (out_tx, _out_rx) = unbounded::<PipelineBatch>();
+        let (_tx, rx) = channel::unbounded::<PipelineBatch>();
+        let (out_tx, _out_rx) = channel::unbounded::<PipelineBatch>();
 
         // Multiple filters on the same column (AND logic)
         let filter1 = FilterExpr::Leaf(make_binary_op(

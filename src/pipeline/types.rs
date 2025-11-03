@@ -180,3 +180,11 @@ impl PartialOrd for Job {
         Some(self.cmp(other))
     }
 }
+
+impl Ord for Job {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Compare by cost first (fewer steps = higher priority)
+        // Then by table name for deterministic ordering
+        self.cost.cmp(&other.cost).then_with(|| self.table_name.cmp(&other.table_name))
+    }
+}
