@@ -10,6 +10,7 @@ we are going to win
   - Multiple value tuples allowed; literals only.
 - `SELECT ... FROM <table>`
   - Single table, optional WHERE (supports `AND/OR`, comparisons, `BETWEEN`, `LIKE/ILIKE/RLIKE`, `IN`, `IS NULL`), optional `ORDER BY` matching the table’s leading ORDER BY columns (ASC or DESC on the first column), optional `OFFSET`/`LIMIT`, aggregates in the projection, and basic `DISTINCT`.
+  - Projection list may mix plain columns with scalar expressions (arithmetic, CASE, built-in scalar functions).
 - `UPDATE <table> SET ... [WHERE ...]`
   - WHERE clause optional; predicates may target any columns. The engine updates every matching row, falling back to a scan when ORDER BY columns aren’t fully constrained.
 - `DELETE FROM <table> [WHERE ...]`
