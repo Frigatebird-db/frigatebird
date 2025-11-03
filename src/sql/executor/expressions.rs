@@ -19,6 +19,28 @@ pub(super) fn evaluate_scalar_expression(
     dataset: &AggregateDataset,
 ) -> Result<ScalarValue, SqlExecutionError> {
     match expr {
+        Expr::Identifier(ident) => {
+            for &row in dataset.rows {
+                if let Some(value) = dataset.column_value(&ident.value, row) {
+                    return Ok(cached_to_scalar(value));
+                }
+            }
+            Ok(ScalarValue::Null)
+        }
+        Expr::CompoundIdentifier(idents) => {
+            if let Some(last) = idents.last() {
+                for &row in dataset.rows {
+                    if let Some(value) = dataset.column_value(&last.value, row) {
+                        return Ok(cached_to_scalar(value));
+                    }
+                }
+                Ok(ScalarValue::Null)
+            } else {
+                Err(SqlExecutionError::Unsupported(
+                    "empty compound identifier".into(),
+                ))
+            }
+        }
         Expr::Value(Value::SingleQuotedString(s)) => Ok(ScalarValue::Text(s.clone())),
         Expr::Value(Value::Number(n, _)) => Ok(match n.parse::<f64>() {
             Ok(num) => ScalarValue::Float(num),
