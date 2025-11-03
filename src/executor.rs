@@ -195,13 +195,13 @@ mod tests {
         for idx in 0..step_count {
             let (tx, rx) = channel::unbounded::<PipelineBatch>();
             steps.push(PipelineStep::new(
+                "test_table".to_string(),
                 format!("c{idx}"),
                 Vec::new(),
+                idx == 0,
+                Arc::clone(&page_handler),
                 tx,
                 rx,
-                idx == 0,
-                "test_table".to_string(),
-                Arc::clone(&page_handler),
             ));
         }
         Job::new("t".into(), steps, entry_tx)
