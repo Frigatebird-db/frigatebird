@@ -69,35 +69,37 @@ fn page_cache_has_returns_correct_status() {
 #[test]
 fn page_cache_eviction_at_capacity() {
     let mut cache = PageCache::new();
+    let capacity = PageCache::<Page>::capacity_limit();
 
-    // Add pages up to and beyond capacity (10)
-    for i in 0..12 {
+    // Add pages up to and beyond capacity
+    for i in 0..(capacity + 2) {
         cache.add(&format!("page{}", i), create_test_page(i));
     }
 
-    // Should only have 10 pages
-    assert_eq!(cache.store.len(), 10);
-    assert_eq!(cache.lru_queue.len(), 10);
+    // Should only have `capacity` pages
+    assert_eq!(cache.store.len(), capacity);
+    assert_eq!(cache.lru_queue.len(), capacity);
 
     // Oldest pages should be evicted
     assert!(!cache.has("page0"));
     assert!(!cache.has("page1"));
-    assert!(cache.has("page11"));
+    assert!(cache.has(&format!("page{}", capacity + 1)));
 }
 
 #[test]
 fn page_cache_lru_order() {
     let mut cache = PageCache::new();
+    let capacity = PageCache::<Page>::capacity_limit();
 
-    for i in 0..5 {
+    for i in 0..capacity {
         cache.add(&format!("page{}", i), create_test_page(i));
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::thread::sleep(std::time::Duration::from_micros(100));
     }
 
-    // Add 6 more to trigger evictions
-    for i in 5..11 {
+    // Add a few more to trigger evictions
+    for i in capacity..(capacity + 5) {
         cache.add(&format!("page{}", i), create_test_page(i));
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::thread::sleep(std::time::Duration::from_micros(100));
     }
 
     // First page added should be evicted first
@@ -174,11 +176,12 @@ fn page_cache_lifecycle_called_on_capacity_evict() {
     });
 
     let mut cache = PageCache::with_lifecycle(Some(lifecycle));
+    let capacity = PageCache::<Page>::capacity_limit();
 
-    // Add 11 pages to trigger eviction
-    for i in 0..11 {
+    // Add enough pages to trigger eviction
+    for i in 0..(capacity + 1) {
         cache.add(&format!("page{}", i), create_test_page(i));
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_micros(100));
     }
 
     let evicted_ids = evicted.lock().unwrap();
@@ -233,18 +236,20 @@ fn page_cache_arc_sharing() {
 #[test]
 fn page_cache_rapid_adds_and_evicts() {
     let mut cache = PageCache::new();
+    let capacity = PageCache::<Page>::capacity_limit();
+    let total = capacity + 100;
 
-    for i in 0..100 {
+    for i in 0..total {
         cache.add(&format!("page{}", i), create_test_page(i));
     }
 
     // Should maintain capacity
-    assert_eq!(cache.store.len(), 10);
-    assert_eq!(cache.lru_queue.len(), 10);
+    assert_eq!(cache.store.len(), capacity);
+    assert_eq!(cache.lru_queue.len(), capacity);
 
     // Should have latest pages
-    assert!(cache.has("page99"));
-    assert!(cache.has("page90"));
+    assert!(cache.has(&format!("page{}", total - 1)));
+    assert!(cache.has(&format!("page{}", total - 10)));
 }
 
 #[test]

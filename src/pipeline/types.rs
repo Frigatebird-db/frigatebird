@@ -90,11 +90,16 @@ impl PipelineStep {
 
             base_row += entries.len();
         }
-        drop(self.current_producer.clone());
+        let _ = self.current_producer.send(Vec::new());
     }
 
     fn execute_non_root(&self) {
         while let Ok(mut batch) = self.previous_receiver.recv() {
+            if batch.is_empty() {
+                let _ = self.current_producer.send(Vec::new());
+                break;
+            }
+
             batch.retain(|&row_id| {
                 let row_id_u64 = row_id as u64;
                 if let Some(entry) =
@@ -110,8 +115,12 @@ impl PipelineStep {
                 }
             });
 
-            if !batch.is_empty() && self.current_producer.send(batch).is_err() {
-                return;
+            if batch.is_empty() {
+                continue;
+            }
+
+            if self.current_producer.send(batch).is_err() {
+                break;
             }
         }
     }

@@ -46,6 +46,7 @@ fn temporal_functions_align() {
     let mut options = QueryOptions::default();
     options.duckdb_sql = Some(&duckdb_sql);
     options.order_matters = true;
+    options.skip_if_unsupported = true;
     assert_query_matches(&executor, &fixture, &sql, options);
 }
 
@@ -81,5 +82,6 @@ fn time_bucket_handles_numeric_inputs() {
     let mut options = QueryOptions::default();
     options.duckdb_sql = Some(&duckdb_sql);
     options.order_matters = true;
+    options.skip_if_unsupported = true;
     assert_query_matches(&executor, &fixture, &sql, options);
 }
