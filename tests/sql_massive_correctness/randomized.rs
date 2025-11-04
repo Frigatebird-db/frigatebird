@@ -39,13 +39,24 @@ fn run_random_suite(iterations: usize) {
     }
 
     for (idx, case) in queries.iter().enumerate() {
-        println!("Random case #{idx}: {}", case.sql);
+        eprintln!("Random case #{idx}: {}", case.sql);
         let mut options = QueryOptions::default();
         options.duckdb_sql = case.duckdb_sql.as_deref();
         options.order_matters = case.order_matters;
         options.skip_if_unsupported = true;
         assert_query_matches(&executor, &fixture, &case.sql, options);
     }
+}
+
+#[test]
+fn debug_distinct_nullable_text_case() {
+    let (harness, fixture) = install_fixture();
+    let ExecutorHarness { executor, .. } = harness;
+    let sql = "SELECT DISTINCT nullable_text, segment FROM massive_correctness WHERE quantity BETWEEN 2873 AND 3411 ORDER BY quantity DESC, id ASC";
+    let ours = executor.query(sql).expect("satori query failed");
+    println!("ours rows: {:?}", ours.rows);
+    let (_cols, duck_rows) = query_duckdb(fixture.duckdb(), sql).expect("duckdb query failed");
+    println!("duck rows: {:?}", duck_rows);
 }
 
 fn generate_random_query(table: &str, row_count: i64, rng: &mut StdRng) -> RandomQuery {
