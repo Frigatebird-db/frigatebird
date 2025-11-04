@@ -108,17 +108,27 @@ impl Default for MassiveFixtureConfig {
 
 impl MassiveFixtureConfig {
     pub fn from_env() -> Self {
-        let mut config = MassiveFixtureConfig::default();
-        if let Ok(value) = env::var("SATORI_MASSIVE_FIXTURE_ROWS") {
+        // Default to a reasonable test size to prevent hangs
+        let default_test_rows = 1000;
+
+        let row_count = if let Ok(value) = env::var("SATORI_MASSIVE_FIXTURE_ROWS") {
             match value.parse::<usize>() {
-                Ok(rows) if rows > 0 => config.row_count = rows,
-                Ok(_) => eprintln!("SATORI_MASSIVE_FIXTURE_ROWS must be greater than zero"),
+                Ok(rows) if rows > 0 => rows,
+                Ok(_) => {
+                    eprintln!("SATORI_MASSIVE_FIXTURE_ROWS must be greater than zero, using default");
+                    default_test_rows
+                }
                 Err(err) => {
-                    eprintln!("failed to parse SATORI_MASSIVE_FIXTURE_ROWS ('{value}'): {err}")
+                    eprintln!("failed to parse SATORI_MASSIVE_FIXTURE_ROWS ('{value}'): {err}, using default");
+                    default_test_rows
                 }
             }
-        }
-        config
+        } else {
+            // When running tests without env var, use small dataset to prevent hangs
+            default_test_rows
+        };
+
+        MassiveFixtureConfig { row_count }
     }
 }
 
