@@ -22,7 +22,8 @@ Set((used_time,id),()...)
 
 create when adding, remove when removing
 */
-const LRU_SIZE: usize = 10;
+// Keep enough pages resident while the persistence pipeline is still evolving.
+const LRU_SIZE: usize = 1024;
 
 pub trait CacheLifecycle<T>: Send + Sync {
     fn on_evict(&self, id: &str, data: Arc<T>);
