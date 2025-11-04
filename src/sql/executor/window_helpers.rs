@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(super) fn plan_order_clauses(
     order_by: &[OrderByExpr],
+    alias_map: Option<&HashMap<String, Expr>>,
 ) -> Result<Vec<OrderClause>, SqlExecutionError> {
     let mut clauses = Vec::with_capacity(order_by.len());
     for clause in order_by {
@@ -28,13 +29,95 @@ pub(super) fn plan_order_clauses(
             Some(false) => NullsPlacement::Last,
             None => NullsPlacement::Default,
         };
+        let mut expr = clause.expr.clone();
+        if let Some(map) = alias_map {
+            expr = rewrite_aliases(&expr, map);
+        }
         clauses.push(OrderClause {
-            expr: clause.expr.clone(),
+            expr,
             descending: clause.asc == Some(false),
             nulls,
         });
     }
     Ok(clauses)
+}
+
+fn rewrite_aliases(expr: &Expr, alias_map: &HashMap<String, Expr>) -> Expr {
+    use sqlparser::ast::Expr::*;
+
+    match expr {
+        Identifier(ident) => alias_map
+            .get(&ident.value)
+            .cloned()
+            .unwrap_or_else(|| Identifier(ident.clone())),
+        CompoundIdentifier(idents) => {
+            if idents.len() == 1 {
+                if let Some(replacement) = alias_map.get(&idents[0].value) {
+                    return replacement.clone();
+                }
+            }
+            CompoundIdentifier(idents.clone())
+        }
+        BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(rewrite_aliases(left, alias_map)),
+            op: op.clone(),
+            right: Box::new(rewrite_aliases(right, alias_map)),
+        },
+        UnaryOp { op, expr } => Expr::UnaryOp {
+            op: op.clone(),
+            expr: Box::new(rewrite_aliases(expr, alias_map)),
+        },
+        Nested(inner) => Expr::Nested(Box::new(rewrite_aliases(inner, alias_map))),
+        Function(function) => {
+            let mut function = function.clone();
+            for arg in &mut function.args {
+                match arg {
+                    FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+                        if let FunctionArgExpr::Expr(inner) = arg {
+                            *inner = rewrite_aliases(inner, alias_map);
+                        }
+                    }
+                }
+            }
+            if let Some(filter) = &mut function.filter {
+                *filter = Box::new(rewrite_aliases(filter, alias_map));
+            }
+            for order in &mut function.order_by {
+                order.expr = rewrite_aliases(&order.expr, alias_map);
+            }
+            if let Some(WindowType::WindowSpec(spec)) = &mut function.over {
+                for expr in &mut spec.partition_by {
+                    *expr = rewrite_aliases(expr, alias_map);
+                }
+                for order in &mut spec.order_by {
+                    order.expr = rewrite_aliases(&order.expr, alias_map);
+                }
+            }
+            Expr::Function(function)
+        }
+        Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => Expr::Case {
+            operand: operand
+                .as_ref()
+                .map(|expr| Box::new(rewrite_aliases(expr, alias_map))),
+            conditions: conditions
+                .iter()
+                .map(|expr| rewrite_aliases(expr, alias_map))
+                .collect(),
+            results: results
+                .iter()
+                .map(|expr| rewrite_aliases(expr, alias_map))
+                .collect(),
+            else_result: else_result
+                .as_ref()
+                .map(|expr| Box::new(rewrite_aliases(expr, alias_map))),
+        },
+        _ => expr.clone(),
+    }
 }
 
 pub(super) fn collect_window_function_plans(
@@ -574,7 +657,7 @@ pub(super) fn compute_window_results(
         }
 
         let mut values: Vec<ScalarValue> = vec![ScalarValue::Null; rows.len()];
-        let order_clauses = plan_order_clauses(&plan.order_by)?;
+        let order_clauses = plan_order_clauses(&plan.order_by, None)?;
 
         for key in key_order {
             let indices = partitions.get(&key).expect("partition entries must exist");

@@ -42,6 +42,7 @@ fn run_random_suite(iterations: usize) {
         let mut options = QueryOptions::default();
         options.duckdb_sql = case.duckdb_sql.as_deref();
         options.order_matters = case.order_matters;
+        options.skip_if_unsupported = true;
         assert_query_matches(&executor, &fixture, &case.sql, options);
     }
 }

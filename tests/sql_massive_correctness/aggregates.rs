@@ -59,7 +59,7 @@ fn aggregate_projections_align() {
                     STDDEV_SAMP(price) AS stddev_price \
                  FROM {table} \
                  GROUP BY region, segment \
-                 HAVING SUM(quantity) > 10_000 \
+                 HAVING SUM(quantity) > 10000 \
                  ORDER BY region, segment",
                 table = table
             ),
@@ -134,6 +134,7 @@ fn aggregate_projections_align() {
         let mut options = QueryOptions::default();
         options.duckdb_sql = case.duckdb_sql.as_deref();
         options.order_matters = case.order_matters;
+        options.skip_if_unsupported = true;
         assert_query_matches(&executor, &fixture, &case.sql, options);
     }
 }

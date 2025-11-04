@@ -20,7 +20,7 @@ use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
 use sqlparser::ast::{
-    Assignment, BinaryOperator, Expr, FromTable, FunctionArg, FunctionArgExpr, GroupByExpr,
+    Assignment, BinaryOperator, Expr, FromTable, FunctionArg, FunctionArgExpr, GroupByExpr, Ident,
     ObjectName, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
     TableWithJoins, Value, WindowFrameBound, WindowFrameUnits, WindowType,
 };
@@ -118,6 +118,115 @@ impl ProjectionPlan {
         self.items
             .iter()
             .any(|item| matches!(item, ProjectionItem::Computed { .. }))
+    }
+}
+
+fn build_projection_alias_map(
+    plan: &ProjectionPlan,
+    columns: &[ColumnCatalog],
+) -> HashMap<String, Expr> {
+    let mut map = HashMap::new();
+    for (idx, header) in plan.headers.iter().enumerate() {
+        match plan
+            .items
+            .get(idx)
+            .expect("projection items and headers must align")
+        {
+            ProjectionItem::Direct { ordinal } => {
+                if let Some(column) = columns.get(*ordinal) {
+                    if header != &column.name {
+                        map.insert(
+                            header.clone(),
+                            Expr::Identifier(Ident::new(column.name.clone())),
+                        );
+                    }
+                }
+            }
+            ProjectionItem::Computed { expr } => {
+                map.insert(header.clone(), expr.clone());
+            }
+        }
+    }
+    map
+}
+
+fn build_aggregate_alias_map(plan: &AggregateProjectionPlan) -> HashMap<String, Expr> {
+    let mut map = HashMap::new();
+    for (label, output) in plan.headers.iter().zip(plan.outputs.iter()) {
+        map.insert(label.clone(), output.expr.clone());
+    }
+    map
+}
+
+fn projection_expressions_from_plan(
+    plan: &ProjectionPlan,
+    columns: &[ColumnCatalog],
+) -> Vec<Expr> {
+    plan.items
+        .iter()
+        .map(|item| match item {
+            ProjectionItem::Direct { ordinal } => {
+                let column = columns
+                    .get(*ordinal)
+                    .expect("projection direct ordinal must reference a column");
+                Expr::Identifier(Ident::new(column.name.clone()))
+            }
+            ProjectionItem::Computed { expr } => expr.clone(),
+        })
+        .collect()
+}
+
+fn resolve_group_by_exprs(
+    group_by: &GroupByExpr,
+    projection_exprs: &[Expr],
+) -> Result<GroupByExpr, SqlExecutionError> {
+    match group_by {
+        GroupByExpr::All => Ok(GroupByExpr::All),
+        GroupByExpr::Expressions(exprs) => {
+            if exprs.is_empty() {
+                return Ok(GroupByExpr::Expressions(Vec::new()));
+            }
+            let mut resolved = Vec::with_capacity(exprs.len());
+            for expr in exprs {
+                resolved.push(resolve_projection_reference(expr, projection_exprs)?);
+            }
+            Ok(GroupByExpr::Expressions(resolved))
+        }
+    }
+}
+
+fn resolve_order_by_exprs(
+    clauses: &[OrderByExpr],
+    projection_exprs: &[Expr],
+) -> Result<Vec<OrderByExpr>, SqlExecutionError> {
+    let mut resolved = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let mut rewritten = clause.clone();
+        rewritten.expr = resolve_projection_reference(&clause.expr, projection_exprs)?;
+        resolved.push(rewritten);
+    }
+    Ok(resolved)
+}
+
+fn resolve_projection_reference(
+    expr: &Expr,
+    projection_exprs: &[Expr],
+) -> Result<Expr, SqlExecutionError> {
+    match expr {
+        Expr::Value(Value::Number(value, _)) => {
+            let position = value.parse::<usize>().map_err(|_| {
+                SqlExecutionError::Unsupported(format!(
+                    "invalid projection index reference `{value}`"
+                ))
+            })?;
+            if position == 0 || position > projection_exprs.len() {
+                return Err(SqlExecutionError::Unsupported(format!(
+                    "projection index {position} is out of range"
+                )));
+            }
+            Ok(projection_exprs[position - 1].clone())
+        }
+        _ => Ok(expr.clone()),
     }
 }
 
@@ -373,16 +482,12 @@ impl SqlExecutor {
             .iter()
             .any(|item| select_item_contains_aggregate(item));
 
-        let order_clauses = plan_order_clauses(&order_by_clauses)?;
+        let has_grouping = matches!(
+            &group_by,
+            GroupByExpr::Expressions(exprs) if !exprs.is_empty()
+        );
 
-        let group_by_info = validate_group_by(&group_by)?;
-
-        let needs_aggregation = aggregate_query
-            || group_by_info
-                .as_ref()
-                .map(|info| !info.sets.is_empty())
-                .unwrap_or(false)
-            || having.is_some();
+        let needs_aggregation = aggregate_query || has_grouping || having.is_some();
 
         if needs_aggregation && qualify.is_some() {
             return Err(SqlExecutionError::Unsupported(
@@ -400,9 +505,17 @@ impl SqlExecutor {
         let mut projection_plan_opt: Option<ProjectionPlan> = None;
         let mut required_ordinals: BTreeSet<usize>;
         let result_columns: Vec<String>;
+        let mut alias_map: HashMap<String, Expr> = HashMap::new();
+        let projection_exprs: Vec<Expr>;
 
         if needs_aggregation {
             let plan = plan_aggregate_projection(&projection_items, &column_ordinals, &table_name)?;
+            alias_map = build_aggregate_alias_map(&plan);
+            projection_exprs = plan
+                .outputs
+                .iter()
+                .map(|output| output.expr.clone())
+                .collect();
             required_ordinals = plan.required_ordinals.clone();
             result_columns = plan.headers.clone();
             aggregate_plan_opt = Some(plan);
@@ -414,10 +527,25 @@ impl SqlExecutor {
                 &table_name,
                 table_alias.as_deref(),
             )?;
+            alias_map = build_projection_alias_map(&projection_plan, &columns);
+            projection_exprs = projection_expressions_from_plan(&projection_plan, &columns);
             required_ordinals = projection_plan.required_ordinals.clone();
             result_columns = projection_plan.headers.clone();
             projection_plan_opt = Some(projection_plan);
         }
+
+        let resolved_group_by = resolve_group_by_exprs(&group_by, &projection_exprs)?;
+        let group_by_info = validate_group_by(&resolved_group_by)?;
+        let resolved_order_by =
+            resolve_order_by_exprs(&order_by_clauses, &projection_exprs)?;
+        let order_clauses = plan_order_clauses(
+            &resolved_order_by,
+            if alias_map.is_empty() {
+                None
+            } else {
+                Some(&alias_map)
+            },
+        )?;
 
         for column in &sort_columns {
             required_ordinals.insert(column.ordinal);

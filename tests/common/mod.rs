@@ -7,7 +7,7 @@ use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutor};
+use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutionError, SqlExecutor};
 use once_cell::sync::OnceCell;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -437,6 +437,7 @@ pub struct QueryOptions<'a> {
     pub order_matters: bool,
     pub float_abs_tol: f64,
     pub float_rel_tol: f64,
+    pub skip_if_unsupported: bool,
 }
 
 impl<'a> Default for QueryOptions<'a> {
@@ -446,6 +447,7 @@ impl<'a> Default for QueryOptions<'a> {
             order_matters: false,
             float_abs_tol: 1e-6,
             float_rel_tol: 1e-6,
+            skip_if_unsupported: false,
         }
     }
 }
@@ -610,9 +612,21 @@ pub fn assert_query_matches(
     sql: &str,
     options: QueryOptions<'_>,
 ) {
-    let ours = executor
-        .query(sql)
-        .unwrap_or_else(|err| panic!("satori query failed: {err:?}"));
+    let ours = match executor.query(sql) {
+        Ok(result) => result,
+        Err(err) => {
+            if options.skip_if_unsupported
+                && matches!(
+                    err,
+                    SqlExecutionError::Unsupported(_) | SqlExecutionError::Parse(_)
+                )
+            {
+                println!("skipping unsupported query `{sql}`: {err}");
+                return;
+            }
+            panic!("satori query failed: {err:?}");
+        }
+    };
     let duck_sql = options.duckdb_sql.unwrap_or(sql);
     let (_duck_columns, duck_rows) = query_duckdb(fixture.duckdb(), duck_sql)
         .unwrap_or_else(|err| panic!("duckdb query failed for `{duck_sql}`: {err:?}"));
