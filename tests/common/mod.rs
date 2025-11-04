@@ -652,18 +652,9 @@ fn compare_results(
         duck_norm.sort();
     }
 
-    for idx in 0..ours_norm.len().min(5) {
-        println!(
-            "preview row {idx} ours={:?} duck={:?}",
-            ours_norm[idx].values, duck_norm[idx].values
-        );
-    }
-
     for (idx, (lhs, rhs)) in ours_norm.iter().zip(duck_norm.iter()).enumerate() {
         for (col_idx, (lhs_val, rhs_val)) in lhs.values.iter().zip(rhs.values.iter()).enumerate() {
             if !lhs_val.equals_with_tol(rhs_val, options.float_abs_tol, options.float_rel_tol) {
-                println!("ours[{idx}] = {:?}", lhs.values);
-                println!("duck[{idx}] = {:?}", rhs.values);
                 panic!(
                     "value mismatch at row {idx}, column {col_idx}: ours={lhs_val:?} duck={rhs_val:?}"
                 );
@@ -730,6 +721,7 @@ fn timestamp_to_string(unit: duckdb::types::TimeUnit, raw: i64) -> Option<String
 
     let secs = micros.div_euclid(1_000_000);
     let micros_part = (micros.rem_euclid(1_000_000)) as u32;
+    #[allow(deprecated)]
     if let Some(dt) = NaiveDateTime::from_timestamp_opt(secs, micros_part * 1000) {
         Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
     } else {
