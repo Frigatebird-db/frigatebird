@@ -158,10 +158,7 @@ fn build_aggregate_alias_map(plan: &AggregateProjectionPlan) -> HashMap<String, 
     map
 }
 
-fn projection_expressions_from_plan(
-    plan: &ProjectionPlan,
-    columns: &[ColumnCatalog],
-) -> Vec<Expr> {
+fn projection_expressions_from_plan(plan: &ProjectionPlan, columns: &[ColumnCatalog]) -> Vec<Expr> {
     plan.items
         .iter()
         .map(|item| match item {
@@ -536,8 +533,7 @@ impl SqlExecutor {
 
         let resolved_group_by = resolve_group_by_exprs(&group_by, &projection_exprs)?;
         let group_by_info = validate_group_by(&resolved_group_by)?;
-        let resolved_order_by =
-            resolve_order_by_exprs(&order_by_clauses, &projection_exprs)?;
+        let resolved_order_by = resolve_order_by_exprs(&order_by_clauses, &projection_exprs)?;
         let order_clauses = plan_order_clauses(
             &resolved_order_by,
             if alias_map.is_empty() {
