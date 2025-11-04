@@ -97,7 +97,7 @@ pub(super) fn evaluate_row_function(
                     let value = args[0].as_f64().ok_or_else(|| {
                         SqlExecutionError::Unsupported("LOG requires numeric argument".into())
                     })?;
-                    value.ln()
+                    value.log10()
                 }
                 2 => {
                     let base = args[0].as_f64().ok_or_else(|| {
@@ -148,7 +148,7 @@ pub(super) fn evaluate_row_function(
                 SqlExecutionError::Unsupported("WIDTH_BUCKET requires integer bucket count".into())
             })?;
 
-            if buckets <= 0 || high <= low {
+            if buckets <= 0 || !high.is_finite() || !low.is_finite() || high <= low {
                 return Err(SqlExecutionError::Unsupported(
                     "WIDTH_BUCKET arguments out of range".into(),
                 ));
@@ -157,7 +157,7 @@ pub(super) fn evaluate_row_function(
             let bucket = if value < low {
                 0
             } else if value >= high {
-                buckets + 1
+                buckets
             } else {
                 let step = (high - low) / buckets as f64;
                 ((value - low) / step).floor() as i128 + 1

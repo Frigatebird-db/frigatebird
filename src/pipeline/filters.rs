@@ -29,6 +29,8 @@ pub fn eval_expr(expr: &Expr, value: &str) -> bool {
                     }
                     _ => {}
                 }
+                // Unsupported right-hand side: conservatively include the row.
+                return true;
             }
             false
         }
@@ -166,18 +168,18 @@ fn eval_binary_op_string(value: &str, op: &BinaryOperator, pattern: &str) -> boo
         GtEq => {
             super::parsers::compare_values(value, pattern, |ord| ord != std::cmp::Ordering::Less)
         }
-        _ => false,
+        _ => true,
     }
 }
 
 fn eval_binary_op_number(value: &str, op: &BinaryOperator, num_str: &str) -> bool {
     let val_num = match value.parse::<f64>() {
         Ok(n) => n,
-        Err(_) => return false,
+        Err(_) => return true,
     };
     let target = match num_str.parse::<f64>() {
         Ok(n) => n,
-        Err(_) => return false,
+        Err(_) => return true,
     };
 
     use BinaryOperator::*;
@@ -188,7 +190,7 @@ fn eval_binary_op_number(value: &str, op: &BinaryOperator, num_str: &str) -> boo
         LtEq => val_num <= target,
         Gt => val_num > target,
         GtEq => val_num >= target,
-        _ => false,
+        _ => true,
     }
 }
 
@@ -202,7 +204,7 @@ fn eval_binary_op_bool(value: &str, op: &BinaryOperator, target: bool) -> bool {
     match op {
         Eq => val_bool == target,
         NotEq => val_bool != target,
-        _ => false,
+        _ => true,
     }
 }
 
@@ -212,7 +214,7 @@ fn eval_binary_op_null(value: &str, op: &BinaryOperator) -> bool {
     match op {
         Eq => is_null,
         NotEq => !is_null,
-        _ => false,
+        _ => true,
     }
 }
 

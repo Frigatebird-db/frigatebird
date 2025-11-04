@@ -61,7 +61,6 @@ fn exponential_and_logarithmic_functions() {
 }
 
 #[test]
-#[ignore = "BUG: LOG function treats LOG as LN instead of LOG10 - returns 5.509 vs expected 2.393"]
 fn logarithm_base_10_function() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
@@ -117,7 +116,6 @@ fn power_function_variations() {
 }
 
 #[test]
-#[ignore = "BUG: WIDTH_BUCKET has off-by-one error - returns bucket 11 for max value instead of bucket 10"]
 fn width_bucket_function() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;

@@ -89,11 +89,17 @@ pub(super) fn evaluate_scalar_function(
             })?;
             Ok(scalar_from_f64(value.exp()))
         }
-        "LN" | "LOG" if args.len() == 1 => {
+        "LN" if args.len() == 1 => {
             let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("LN requires numeric argument".into())
             })?;
             Ok(scalar_from_f64(value.ln()))
+        }
+        "LOG" if args.len() == 1 => {
+            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+                SqlExecutionError::Unsupported("LOG requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(value.log10()))
         }
         "LOG" if args.len() == 2 => {
             let base = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
@@ -145,7 +151,7 @@ pub(super) fn evaluate_scalar_function(
             let bucket = if value < low {
                 0
             } else if value >= high {
-                buckets + 1
+                buckets
             } else {
                 let step = (high - low) / buckets as f64;
                 ((value - low) / step).floor() as i128 + 1
