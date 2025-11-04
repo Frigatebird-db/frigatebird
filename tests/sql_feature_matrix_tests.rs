@@ -247,22 +247,10 @@ fn test_sql_feature_matrix_with_large_dataset() {
         }
     }
 
-    // Spot-check that window results align with raw dataset for later positions (edge behaviour).
-    if let Some(last_expected) = expected_window
-        .iter()
-        .rev()
-        .find(|(_, _, value)| value.is_some())
-    {
-        let last_ts = &last_expected.0;
-        let confirm_query = format!(
-            "SELECT SUM(score) OVER (PARTITION BY category ORDER BY ts ROWS UNBOUNDED PRECEDING) \
-             FROM metrics WHERE category = 'alpha' AND ts = '{last_ts}'"
-        );
-        let confirm_result = executor.query(&confirm_query).expect("confirm running sum");
-        assert_eq!(confirm_result.rows.len(), 1);
-        let running: i64 = confirm_result.rows[0][0].as_ref().unwrap().parse().unwrap();
-        assert_eq!(running, last_expected.2.unwrap());
-    }
+    // Note: The previous spot-check was flawed. Window functions operate on the result set
+    // AFTER the WHERE clause is applied. When filtering to a single timestamp, the window
+    // function only sees that one row, not all preceding rows. The main verification loop
+    // above (lines 231-247) already validates all window function results correctly.
 
     // ----- QUALIFY with ROW_NUMBER -----
     let mut beta_rows: Vec<&MetricRow> = rows.iter().filter(|row| row.category == "beta").collect();
