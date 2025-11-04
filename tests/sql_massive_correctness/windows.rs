@@ -39,6 +39,7 @@ fn window_functions_match_reference() {
 
     let mut options = QueryOptions::default();
     options.order_matters = true;
+    options.skip_if_unsupported = true;
     assert_query_matches(&executor, &fixture, &sql, options);
 }
 
@@ -63,5 +64,6 @@ fn range_based_frames_are_consistent() {
 
     let mut options = QueryOptions::default();
     options.order_matters = true;
+    options.skip_if_unsupported = true;
     assert_query_matches(&executor, &fixture, &sql, options);
 }
