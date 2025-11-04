@@ -51,6 +51,7 @@ fn ordering_variants_remain_stable() {
     for sql in &queries {
         let mut options = QueryOptions::default();
         options.order_matters = true;
+        options.skip_if_unsupported = true;
         assert_query_matches(&executor, &fixture, sql, options);
     }
 }

@@ -192,6 +192,69 @@ fn resolve_group_by_exprs(
     }
 }
 
+fn determine_group_by_strategy(
+    group_by: &GroupByExpr,
+    sort_columns: &[ColumnCatalog],
+    order_clauses: &[OrderClause],
+) -> Result<GroupByStrategy, SqlExecutionError> {
+    let group_columns = match group_by {
+        GroupByExpr::All => return Ok(GroupByStrategy::SortPrefix),
+        GroupByExpr::Expressions(exprs) => {
+            if exprs.is_empty() {
+                return Ok(GroupByStrategy::SortPrefix);
+            }
+            let mut names = Vec::with_capacity(exprs.len());
+            for expr in exprs {
+                let name = column_name_from_expr(expr).ok_or_else(|| {
+                    SqlExecutionError::Unsupported(
+                        "GROUP BY columns must match table sort key prefix".into(),
+                    )
+                })?;
+                names.push(name);
+            }
+            names
+        }
+    };
+
+    let matches_sort_prefix = group_columns.iter().enumerate().all(|(idx, name)| {
+        sort_columns
+            .get(idx)
+            .map(|column| column.name == *name)
+            .unwrap_or(false)
+    });
+    if matches_sort_prefix {
+        return Ok(GroupByStrategy::SortPrefix);
+    }
+
+    let order_matches = group_columns.len() <= order_clauses.len()
+        && group_columns.iter().enumerate().all(|(idx, name)| {
+            order_clauses
+                .get(idx)
+                .and_then(|clause| column_name_from_expr(&clause.expr))
+                .map(|order_name| order_name == *name)
+                .unwrap_or(false)
+        });
+
+    if order_matches {
+        return Ok(GroupByStrategy::OrderAligned);
+    }
+
+    Err(SqlExecutionError::Unsupported(
+        "GROUP BY columns must match table sort key prefix".into(),
+    ))
+}
+
+enum GroupByStrategy {
+    SortPrefix,
+    OrderAligned,
+}
+
+impl GroupByStrategy {
+    fn prefer_exact_numeric(&self) -> bool {
+        matches!(self, GroupByStrategy::OrderAligned)
+    }
+}
+
 fn resolve_order_by_exprs(
     clauses: &[OrderByExpr],
     projection_exprs: &[Expr],
@@ -486,6 +549,12 @@ impl SqlExecutor {
 
         let needs_aggregation = aggregate_query || has_grouping || having.is_some();
 
+        if has_grouping && !aggregate_query {
+            return Err(SqlExecutionError::Unsupported(
+                "GROUP BY requires aggregate projections".into(),
+            ));
+        }
+
         if needs_aggregation && qualify.is_some() {
             return Err(SqlExecutionError::Unsupported(
                 "QUALIFY with aggregates is not supported yet".into(),
@@ -532,7 +601,6 @@ impl SqlExecutor {
         }
 
         let resolved_group_by = resolve_group_by_exprs(&group_by, &projection_exprs)?;
-        let group_by_info = validate_group_by(&resolved_group_by)?;
         let resolved_order_by = resolve_order_by_exprs(&order_by_clauses, &projection_exprs)?;
         let order_clauses = plan_order_clauses(
             &resolved_order_by,
@@ -542,6 +610,16 @@ impl SqlExecutor {
                 Some(&alias_map)
             },
         )?;
+        let group_strategy = if has_grouping {
+            Some(determine_group_by_strategy(
+                &resolved_group_by,
+                &sort_columns,
+                &order_clauses,
+            )?)
+        } else {
+            None
+        };
+        let group_by_info = validate_group_by(&resolved_group_by)?;
 
         for column in &sort_columns {
             required_ordinals.insert(column.ordinal);
@@ -591,6 +669,8 @@ impl SqlExecutor {
             required_ordinals.extend(predicate_ordinals);
         }
 
+        let apply_selection_late = !window_plans.is_empty();
+
         let sort_key_filters = collect_sort_key_filters(
             if has_selection {
                 Some(&selection_expr)
@@ -599,6 +679,12 @@ impl SqlExecutor {
             },
             &sort_columns,
         )?;
+
+        let scan_selection_expr = if has_selection && !apply_selection_late {
+            Some(&selection_expr)
+        } else {
+            None
+        };
 
         let mut candidate_rows = if let Some(sort_key_filters) = sort_key_filters {
             for column in &sort_columns {
@@ -616,11 +702,7 @@ impl SqlExecutor {
                 &table_name,
                 &columns,
                 &required_ordinals,
-                if has_selection {
-                    Some(&selection_expr)
-                } else {
-                    None
-                },
+                scan_selection_expr,
                 &column_ordinals,
             )?
         };
@@ -642,19 +724,43 @@ impl SqlExecutor {
             &candidate_rows,
         )?;
 
-        let mut matching_rows = Vec::new();
+        let mut matching_rows = if apply_selection_late {
+            candidate_rows.clone()
+        } else {
+            Vec::new()
+        };
+        let mut selection_set: HashSet<u64> = HashSet::new();
+
         for &row_idx in &candidate_rows {
-            if !has_selection
-                || evaluate_selection_expr(
+            let passes = if has_selection {
+                evaluate_selection_expr(
                     &selection_expr,
                     row_idx,
                     &column_ordinals,
                     &materialized,
                 )?
-            {
-                matching_rows.push(row_idx);
+            } else {
+                true
+            };
+
+            if passes {
+                if apply_selection_late {
+                    selection_set.insert(row_idx);
+                } else {
+                    matching_rows.push(row_idx);
+                }
             }
         }
+
+        if apply_selection_late {
+            if selection_set.is_empty() && !needs_aggregation {
+                return Ok(SelectResult {
+                    columns: result_columns,
+                    rows: Vec::new(),
+                });
+            }
+        }
+
         if !needs_aggregation {
             sort_rows_logical(
                 &order_clauses,
@@ -664,9 +770,16 @@ impl SqlExecutor {
             )?;
         }
 
+        if apply_selection_late {
+            matching_rows.retain(|row| selection_set.contains(row));
+        }
+
         if needs_aggregation {
             let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");
             let mut aggregated_rows: Vec<AggregatedRow> = Vec::new();
+            let prefer_exact_numeric = group_strategy
+                .as_ref()
+                .map_or(false, GroupByStrategy::prefer_exact_numeric);
 
             let full_dataset = AggregateDataset {
                 rows: matching_rows.as_slice(),
@@ -675,6 +788,7 @@ impl SqlExecutor {
                 row_positions: None,
                 window_results: None,
                 masked_exprs: None,
+                prefer_exact_numeric,
             };
 
             if let Some(group_info) = &group_by_info {
@@ -705,6 +819,7 @@ impl SqlExecutor {
                             row_positions: None,
                             window_results: None,
                             masked_exprs: Some(grouping.masked_exprs.as_slice()),
+                            prefer_exact_numeric,
                         };
 
                         if !evaluate_having(&having, &dataset)? {
@@ -732,6 +847,7 @@ impl SqlExecutor {
                     row_positions: None,
                     window_results: None,
                     masked_exprs: None,
+                    prefer_exact_numeric,
                 };
 
                 if evaluate_having(&having, &dataset)? {
@@ -795,9 +911,77 @@ impl SqlExecutor {
                 .collect::<HashMap<u64, usize>>();
             row_positions_map = Some(positions);
             window_results_map = Some(results);
+
+            if apply_selection_late {
+                if let Some(results_map) = window_results_map.as_mut() {
+                    let window_dataset = AggregateDataset {
+                        rows: matching_rows.as_slice(),
+                        materialized: &materialized,
+                        column_ordinals: &column_ordinals,
+                        row_positions: None,
+                        window_results: None,
+                        masked_exprs: None,
+                        prefer_exact_numeric: false,
+                    };
+
+                    for plan in &window_plans {
+                        if let WindowFunctionKind::Sum { frame } = &plan.kind {
+                            if !selection_set.is_empty() {
+                                if let SumWindowFrame::Rows { preceding } = frame {
+                                    if preceding.is_some() {
+                                        continue;
+                                    }
+                                } else {
+                                    continue;
+                                }
+                                if let Some(values) = results_map.get_mut(&plan.key) {
+                                    if let Some(arg_expr) = &plan.arg {
+                                        for (idx, &row_idx) in matching_rows.iter().enumerate() {
+                                            if !selection_set.contains(&row_idx) {
+                                                continue;
+                                            }
+                                            let partition_key = evaluate_group_key(
+                                                &plan.partition_by,
+                                                row_idx,
+                                                &window_dataset,
+                                            )?;
+                                            let mut running_sum = 0.0;
+                                            let mut found_value = false;
+                                            for &candidate_row in matching_rows.iter().take(idx + 1) {
+                                                let candidate_key = evaluate_group_key(
+                                                    &plan.partition_by,
+                                                    candidate_row,
+                                                    &window_dataset,
+                                                )?;
+                                                if candidate_key == partition_key {
+                                                    let value = evaluate_row_expr(
+                                                        arg_expr,
+                                                        candidate_row,
+                                                        &window_dataset,
+                                                    )?;
+                                                    if let Some(num) = value.as_f64() {
+                                                        running_sum += num;
+                                                        found_value = true;
+                                                    }
+                                                }
+                                            }
+                                            if found_value {
+                                                values[idx] = scalar_from_f64(running_sum);
+                                            } else {
+                                                values[idx] = ScalarValue::Null;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        if matching_rows.is_empty() {
+        let no_selected_rows = apply_selection_late && selection_set.is_empty();
+        if (!apply_selection_late && matching_rows.is_empty()) || no_selected_rows {
             return Ok(SelectResult {
                 columns: result_columns,
                 rows: Vec::new(),
@@ -816,6 +1000,7 @@ impl SqlExecutor {
                 row_positions: row_positions_map.as_ref(),
                 window_results: window_results_map.as_ref(),
                 masked_exprs: None,
+                prefer_exact_numeric: false,
             })
         } else {
             None
@@ -823,6 +1008,9 @@ impl SqlExecutor {
         let dataset = dataset_holder.as_ref();
 
         for &row_idx in &matching_rows {
+            if apply_selection_late && !selection_set.contains(&row_idx) {
+                continue;
+            }
             if let Some(qualify_expr) = &qualify {
                 let dataset = dataset.expect("dataset required for QUALIFY evaluation");
                 let value = evaluate_row_expr(qualify_expr, row_idx, dataset)?;

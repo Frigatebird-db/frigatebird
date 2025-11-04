@@ -17,6 +17,9 @@ use std::env;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+// Re-export commonly used types for test modules
+pub use idk_uwu_ig::sql::executor::{SelectResult as PublicSelectResult, SqlExecutionError as PublicSqlExecutionError, SqlExecutor as PublicSqlExecutor};
+
 pub struct ExecutorHarness {
     pub executor: SqlExecutor,
     pub handler: Arc<PageHandler>,

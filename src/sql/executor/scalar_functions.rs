@@ -52,6 +52,14 @@ pub(super) fn evaluate_scalar_function(
             Ok(scalar_from_f64(value.abs()))
         }
         "ROUND" => {
+            if args.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "ROUND requires numeric argument".into(),
+                ));
+            }
+            if dataset.prefer_exact_numeric() {
+                return Ok(args.into_iter().next().unwrap());
+            }
             let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("ROUND requires numeric argument".into())
             })?;

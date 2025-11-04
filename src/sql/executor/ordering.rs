@@ -37,6 +37,7 @@ pub(super) fn sort_rows_logical(
         row_positions: None,
         window_results: None,
         masked_exprs: None,
+        prefer_exact_numeric: false,
     };
 
     let mut keyed: Vec<(OrderKey, u64)> = Vec::with_capacity(rows.len());

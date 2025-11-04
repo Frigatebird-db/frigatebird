@@ -628,6 +628,7 @@ pub(super) fn compute_window_results(
         row_positions: None,
         window_results: None,
         masked_exprs: None,
+        prefer_exact_numeric: false,
     };
 
     for plan in plans {

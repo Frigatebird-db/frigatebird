@@ -26,6 +26,7 @@ pub(super) struct AggregateDataset<'a> {
     pub(super) row_positions: Option<&'a HashMap<u64, usize>>,
     pub(super) window_results: Option<&'a WindowResultMap>,
     pub(super) masked_exprs: Option<&'a [Expr]>,
+    pub(super) prefer_exact_numeric: bool,
 }
 
 impl<'a> AggregateDataset<'a> {
@@ -52,6 +53,10 @@ impl<'a> AggregateDataset<'a> {
             .map(|masked| masked.iter().any(|masked_expr| masked_expr == expr))
             .unwrap_or(false)
     }
+
+    pub(super) fn prefer_exact_numeric(&self) -> bool {
+        self.prefer_exact_numeric
+    }
 }
 
 pub(super) fn select_item_contains_aggregate(item: &SelectItem) -> bool {
@@ -65,7 +70,7 @@ pub(super) fn select_item_contains_aggregate(item: &SelectItem) -> bool {
 pub(super) fn expr_contains_aggregate(expr: &Expr) -> bool {
     match expr {
         Expr::Function(function) => {
-            if is_aggregate_function(function) {
+            if is_aggregate_function(function) && function.over.is_none() {
                 return true;
             }
             function.args.iter().any(|arg| match arg {
