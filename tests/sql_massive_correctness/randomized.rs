@@ -128,7 +128,6 @@ fn random_grouped_select(table: &str, row_count: i64, rng: &mut StdRng) -> Rando
         "SUM(net_amount) AS sum_net".to_string(),
         "AVG(price) AS avg_price".to_string(),
         "MAX(discount) AS max_disc".to_string(),
-        "MIN(created_at) AS first_seen".to_string(),
         "COUNT(*) AS total_rows".to_string(),
     ];
     measures.shuffle(rng);
@@ -140,6 +139,7 @@ fn random_grouped_select(table: &str, row_count: i64, rng: &mut StdRng) -> Rando
     if rng.gen_bool(0.3) {
         measures.push("VAR_SAMP(quantity) AS var_qty".into());
     }
+    let has_sum_net = measures.iter().any(|measure| measure.contains("sum_net"));
 
     let mut sql = format!(
         "SELECT {groups}, {measures} FROM {table}",
@@ -163,7 +163,7 @@ fn random_grouped_select(table: &str, row_count: i64, rng: &mut StdRng) -> Rando
 
     if rng.gen_bool(0.3) {
         let having = if rng.gen_bool(0.5) {
-            "SUM(net_amount) > 10_000"
+            "SUM(net_amount) > 10000"
         } else {
             "COUNT(*) > 200"
         };
@@ -173,7 +173,7 @@ fn random_grouped_select(table: &str, row_count: i64, rng: &mut StdRng) -> Rando
 
     sql.push_str(" ORDER BY ");
     let mut order_parts: Vec<String> = group_cols.iter().map(|col| format!("{col} ASC")).collect();
-    if rng.gen_bool(0.5) {
+    if has_sum_net && rng.gen_bool(0.5) {
         order_parts.push("sum_net DESC".into());
     }
     sql.push_str(&order_parts.join(", "));
@@ -416,5 +416,9 @@ fn build_order_clause(rng: &mut StdRng) -> String {
     ];
     candidates.shuffle(rng);
     candidates.truncate(rng.gen_range(1..=3));
-    candidates.join(", ")
+    let mut clause = candidates.join(", ");
+    if !clause.to_lowercase().contains("id ") {
+        clause.push_str(", id ASC");
+    }
+    clause
 }

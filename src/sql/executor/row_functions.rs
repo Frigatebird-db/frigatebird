@@ -207,7 +207,11 @@ pub(super) fn evaluate_time_bucket_row(
     let value = evaluate_row_expr(value_expr, row_idx, dataset)?;
     let numeric = match value.as_f64() {
         Some(v) => v,
-        None => return Ok(ScalarValue::Null),
+        None => {
+            return Err(SqlExecutionError::Unsupported(
+                "DATE_TRUNC requires numeric timestamp values".into(),
+            ));
+        }
     };
 
     let origin = if function.args.len() >= 3 {
