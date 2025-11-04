@@ -8,7 +8,8 @@ struct Case {
 
 fn install_fixture() -> (ExecutorHarness, MassiveFixture) {
     let harness = setup_executor();
-    let fixture = MassiveFixture::install(&harness.executor);
+    let config = MassiveFixtureConfig::from_env();
+    let fixture = MassiveFixture::install_with_config(&harness.executor, config);
     (harness, fixture)
 }
 
