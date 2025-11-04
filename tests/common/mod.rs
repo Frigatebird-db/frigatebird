@@ -10,6 +10,8 @@ use once_cell::sync::OnceCell;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::env;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
@@ -83,8 +85,37 @@ pub const MASSIVE_COLUMNS: [ColumnMeta; 13] = [
     ColumnMeta::new("nullable_number", ColumnKind::Float),
 ];
 
-const MASSIVE_ROW_COUNT: usize = 50_000;
+const DEFAULT_MASSIVE_ROW_COUNT: usize = 50_000;
 const MASSIVE_INSERT_BATCH: usize = 500;
+
+#[derive(Clone, Copy)]
+pub struct MassiveFixtureConfig {
+    pub row_count: usize,
+}
+
+impl Default for MassiveFixtureConfig {
+    fn default() -> Self {
+        MassiveFixtureConfig {
+            row_count: DEFAULT_MASSIVE_ROW_COUNT,
+        }
+    }
+}
+
+impl MassiveFixtureConfig {
+    pub fn from_env() -> Self {
+        let mut config = MassiveFixtureConfig::default();
+        if let Ok(value) = env::var("SATORI_MASSIVE_FIXTURE_ROWS") {
+            match value.parse::<usize>() {
+                Ok(rows) if rows > 0 => config.row_count = rows,
+                Ok(_) => eprintln!("SATORI_MASSIVE_FIXTURE_ROWS must be greater than zero"),
+                Err(err) => {
+                    eprintln!("failed to parse SATORI_MASSIVE_FIXTURE_ROWS ('{value}'): {err}")
+                }
+            }
+        }
+        config
+    }
+}
 
 #[derive(Clone)]
 pub struct BigFixtureRow {
@@ -155,17 +186,31 @@ fn format_float(value: f64) -> String {
 
 struct BigFixtureDataset {
     create_sql: String,
+    duckdb_create_sql: String,
     insert_batches: Vec<String>,
+    batch_row_counts: Vec<usize>,
     rows: Vec<BigFixtureRow>,
 }
 
-static MASSIVE_DATASET: OnceCell<BigFixtureDataset> = OnceCell::new();
+static MASSIVE_DATASETS: OnceCell<RwLock<HashMap<usize, Arc<BigFixtureDataset>>>> = OnceCell::new();
 
-fn dataset() -> &'static BigFixtureDataset {
-    MASSIVE_DATASET.get_or_init(build_dataset)
+fn dataset(config: &MassiveFixtureConfig) -> Arc<BigFixtureDataset> {
+    let cache = MASSIVE_DATASETS.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(guard) = cache.read() {
+        if let Some(existing) = guard.get(&config.row_count) {
+            return Arc::clone(existing);
+        }
+    }
+
+    let mut guard = cache.write().expect("massive dataset cache poisoned");
+    Arc::clone(
+        guard
+            .entry(config.row_count)
+            .or_insert_with(|| Arc::new(build_dataset(config.row_count))),
+    )
 }
 
-fn build_dataset() -> BigFixtureDataset {
+fn build_dataset(row_count: usize) -> BigFixtureDataset {
     let mut rng = StdRng::seed_from_u64(0x5A7A_5015_2024);
     let tenants = ["alpha", "beta", "gamma", "delta", "omega"];
     let regions = ["americas", "emea", "apac", "africa", "antarctica", "orbit"];
@@ -177,8 +222,8 @@ fn build_dataset() -> BigFixtureDataset {
         "partner",
     ];
 
-    let mut rows = Vec::with_capacity(MASSIVE_ROW_COUNT);
-    for idx in 0..MASSIVE_ROW_COUNT {
+    let mut rows = Vec::with_capacity(row_count);
+    for idx in 0..row_count {
         let tenant = tenants[idx % tenants.len()].to_string();
         let region = regions[(idx / tenants.len()) % regions.len()].to_string();
         let segment = segments[(idx / regions.len()) % segments.len()].to_string();
@@ -249,8 +294,10 @@ fn build_dataset() -> BigFixtureDataset {
         ) ORDER BY (id, created_at)",
         table = MASSIVE_TABLE
     );
+    let duckdb_create_sql = create_sql.replace(" ORDER BY (id, created_at)", "");
 
     let mut insert_batches = Vec::new();
+    let mut batch_row_counts = Vec::new();
     for chunk in rows.chunks(MASSIVE_INSERT_BATCH) {
         let mut statement = format!("INSERT INTO {table} (", table = MASSIVE_TABLE);
         for (idx, column) in MASSIVE_COLUMNS.iter().enumerate() {
@@ -277,11 +324,14 @@ fn build_dataset() -> BigFixtureDataset {
         }
         statement.push(';');
         insert_batches.push(statement);
+        batch_row_counts.push(chunk.len());
     }
 
     BigFixtureDataset {
         create_sql,
+        duckdb_create_sql,
         insert_batches,
+        batch_row_counts,
         rows,
     }
 }
@@ -310,30 +360,49 @@ fn random_code(index: usize, rng: &mut StdRng) -> String {
 }
 
 pub struct MassiveFixture {
-    dataset: &'static BigFixtureDataset,
+    dataset: Arc<BigFixtureDataset>,
     duckdb: Connection,
 }
 
 impl MassiveFixture {
     pub fn install(executor: &SqlExecutor) -> Self {
-        let dataset = dataset();
+        Self::install_with_config(executor, MassiveFixtureConfig::default())
+    }
+
+    pub fn install_with_config(executor: &SqlExecutor, config: MassiveFixtureConfig) -> Self {
+        let dataset = dataset(&config);
         executor
             .execute(&dataset.create_sql)
             .expect("create massive fixture table");
-        for batch in &dataset.insert_batches {
+
+        let total_rows = dataset.rows.len();
+        let mut inserted_rows = 0usize;
+        for (batch, count) in dataset.insert_batches.iter().zip(&dataset.batch_row_counts) {
             executor
                 .execute(batch)
                 .unwrap_or_else(|err| panic!("failed to seed fixture batch: {err:?}"));
+            inserted_rows = (inserted_rows + *count).min(total_rows);
+            println!(
+                "MassiveFixture: inserted {}/{} rows into primary store",
+                inserted_rows, total_rows
+            );
         }
 
         let duckdb = Connection::open_in_memory().expect("open duckdb reference");
         duckdb
-            .execute_batch(&dataset.create_sql)
+            .execute_batch(&dataset.duckdb_create_sql)
             .expect("create duckdb table");
-        for batch in &dataset.insert_batches {
+
+        let mut duckdb_rows = 0usize;
+        for (batch, count) in dataset.insert_batches.iter().zip(&dataset.batch_row_counts) {
             duckdb
                 .execute_batch(batch)
                 .unwrap_or_else(|err| panic!("duckdb batch load failed: {err:?}"));
+            duckdb_rows = (duckdb_rows + *count).min(total_rows);
+            println!(
+                "MassiveFixture: inserted {}/{} rows into DuckDB reference",
+                duckdb_rows, total_rows
+            );
         }
 
         MassiveFixture { dataset, duckdb }
@@ -510,17 +579,16 @@ fn query_duckdb(
     conn: &Connection,
     sql: &str,
 ) -> duckdb::Result<(Vec<String>, Vec<Vec<Option<String>>>)> {
-    let mut stmt = conn.prepare(sql)?;
-    let column_count = stmt.column_count();
-    let mut column_names = Vec::with_capacity(column_count);
-    for idx in 0..column_count {
-        let name = stmt
-            .column_name(idx)
-            .map(|value| value.to_string())
-            .unwrap_or_else(|_| format!("column_{idx}"));
-        column_names.push(name);
-    }
+    let column_count = {
+        let mut meta_stmt = conn.prepare(sql)?;
+        {
+            let mut meta_rows = meta_stmt.query([])?;
+            let _ = meta_rows.next()?;
+        }
+        meta_stmt.column_count()
+    };
 
+    let mut stmt = conn.prepare(sql)?;
     let mut rows = stmt.query([])?;
     let mut output = Vec::new();
     while let Some(row) = rows.next()? {
@@ -531,7 +599,7 @@ fn query_duckdb(
         }
         output.push(values);
     }
-    Ok((column_names, output))
+    Ok((Vec::new(), output))
 }
 
 pub fn assert_query_matches(
@@ -594,11 +662,10 @@ fn compare_results(
 }
 
 pub fn sample_rows(limit: usize) -> Vec<BigFixtureRow> {
-    let dataset = dataset();
-    dataset
-        .rows
+    let data = dataset(&MassiveFixtureConfig::default());
+    data.rows
         .iter()
-        .step_by((dataset.rows.len() / limit.max(1)).max(1))
+        .step_by((data.rows.len() / limit.max(1)).max(1))
         .take(limit)
         .cloned()
         .collect()
