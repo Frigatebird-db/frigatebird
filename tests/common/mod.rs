@@ -1,4 +1,6 @@
+use chrono::NaiveDateTime;
 use duckdb::Connection;
+use duckdb::types::ValueRef;
 use float_cmp::{ApproxEq, F64Margin};
 use idk_uwu_ig::cache::page_cache::PageCache;
 use idk_uwu_ig::helpers::compressor::Compressor;
@@ -594,8 +596,8 @@ fn query_duckdb(
     while let Some(row) = rows.next()? {
         let mut values = Vec::with_capacity(column_count);
         for idx in 0..column_count {
-            let value: Option<String> = row.get(idx)?;
-            values.push(value);
+            let value = row.get_ref(idx)?;
+            values.push(value_ref_to_option_string(value));
         }
         output.push(values);
     }
@@ -650,9 +652,18 @@ fn compare_results(
         duck_norm.sort();
     }
 
+    for idx in 0..ours_norm.len().min(5) {
+        println!(
+            "preview row {idx} ours={:?} duck={:?}",
+            ours_norm[idx].values, duck_norm[idx].values
+        );
+    }
+
     for (idx, (lhs, rhs)) in ours_norm.iter().zip(duck_norm.iter()).enumerate() {
         for (col_idx, (lhs_val, rhs_val)) in lhs.values.iter().zip(rhs.values.iter()).enumerate() {
             if !lhs_val.equals_with_tol(rhs_val, options.float_abs_tol, options.float_rel_tol) {
+                println!("ours[{idx}] = {:?}", lhs.values);
+                println!("duck[{idx}] = {:?}", rhs.values);
                 panic!(
                     "value mismatch at row {idx}, column {col_idx}: ours={lhs_val:?} duck={rhs_val:?}"
                 );
@@ -669,4 +680,59 @@ pub fn sample_rows(limit: usize) -> Vec<BigFixtureRow> {
         .take(limit)
         .cloned()
         .collect()
+}
+
+fn value_ref_to_option_string(value: ValueRef<'_>) -> Option<String> {
+    match value {
+        ValueRef::Null => None,
+        ValueRef::Boolean(b) => Some(if b { "TRUE".into() } else { "FALSE".into() }),
+        ValueRef::TinyInt(i) => Some(i.to_string()),
+        ValueRef::SmallInt(i) => Some(i.to_string()),
+        ValueRef::Int(i) => Some(i.to_string()),
+        ValueRef::BigInt(i) => Some(i.to_string()),
+        ValueRef::HugeInt(i) => Some(i.to_string()),
+        ValueRef::UTinyInt(i) => Some(i.to_string()),
+        ValueRef::USmallInt(i) => Some(i.to_string()),
+        ValueRef::UInt(i) => Some(i.to_string()),
+        ValueRef::UBigInt(i) => Some(i.to_string()),
+        ValueRef::Float(f) => Some(format_float(f as f64)),
+        ValueRef::Double(f) => Some(format_float(f)),
+        ValueRef::Decimal(decimal) => Some(decimal.to_string()),
+        ValueRef::Timestamp(unit, raw) => timestamp_to_string(unit, raw),
+        ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => Some(text.to_string()),
+            Err(_) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        },
+        ValueRef::Blob(bytes) => Some(bytes.iter().map(|b| format!("{:02x}", b)).collect()),
+        ValueRef::Date32(days) => Some(days.to_string()),
+        ValueRef::Time64(_, value) => Some(value.to_string()),
+        ValueRef::Interval {
+            months,
+            days,
+            nanos,
+        } => Some(format!("{months}:{days}:{nanos}")),
+        ValueRef::List(_, _)
+        | ValueRef::Enum(_, _)
+        | ValueRef::Struct(_, _)
+        | ValueRef::Array(_, _)
+        | ValueRef::Map(_, _)
+        | ValueRef::Union(_, _) => Some(format!("{value:?}")),
+    }
+}
+
+fn timestamp_to_string(unit: duckdb::types::TimeUnit, raw: i64) -> Option<String> {
+    let micros = match unit {
+        duckdb::types::TimeUnit::Second => raw.saturating_mul(1_000_000),
+        duckdb::types::TimeUnit::Millisecond => raw.saturating_mul(1_000),
+        duckdb::types::TimeUnit::Microsecond => raw,
+        duckdb::types::TimeUnit::Nanosecond => raw / 1_000,
+    };
+
+    let secs = micros.div_euclid(1_000_000);
+    let micros_part = (micros.rem_euclid(1_000_000)) as u32;
+    if let Some(dt) = NaiveDateTime::from_timestamp_opt(secs, micros_part * 1000) {
+        Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+    } else {
+        Some(micros.to_string())
+    }
 }
