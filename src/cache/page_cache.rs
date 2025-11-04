@@ -76,6 +76,14 @@ impl<T> PageCache<T> {
         }
     }
 
+    pub fn capacity_limit() -> usize {
+        LRU_SIZE
+    }
+
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
+
     pub fn with_lifecycle(lifecycle: Option<Arc<dyn CacheLifecycle<T>>>) -> Self {
         PageCache {
             store: HashMap::new(),
@@ -89,10 +97,9 @@ impl<T> PageCache<T> {
     }
 
     pub fn add(&mut self, id: &str, page: T) {
-        if self.store.contains_key(id) {
-            let entry = self.store.get(id);
+        if let Some(entry) = self.store.get(id) {
             self.lru_queue
-                .remove(&((entry.unwrap()).used_time, String::from(id)));
+                .remove(&(entry.used_time, String::from(id)));
         }
 
         let used_time = current_epoch_millis();

@@ -111,7 +111,18 @@ fn aggregate_projections_align() {
                  LIMIT 200",
                 table = table
             ),
-            duckdb_sql: None,
+            duckdb_sql: Some(format!(
+                "SELECT \
+                    strftime('%Y-%m-%d %H:%M:%S', DATE_TRUNC('day', CAST(created_at AS TIMESTAMP))) AS day_bucket, \
+                    tenant, \
+                    COUNT(*) AS rows_seen, \
+                    SUM(quantity) AS qty_sum \
+                 FROM {table} \
+                 GROUP BY 1, 2 \
+                 ORDER BY 1, 2 \
+                 LIMIT 200",
+                table = table
+            )),
             order_matters: true,
         },
         Case {
@@ -131,10 +142,6 @@ fn aggregate_projections_align() {
     ];
 
     for case in &cases {
-        if case.sql.contains("DATE_TRUNC") {
-            println!("skipping aggregate case requiring DATE_TRUNC support");
-            continue;
-        }
         let mut options = QueryOptions::default();
         options.duckdb_sql = case.duckdb_sql.as_deref();
         options.order_matters = case.order_matters;

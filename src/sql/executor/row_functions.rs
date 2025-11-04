@@ -3,6 +3,7 @@ use super::aggregates::AggregateDataset;
 use super::expressions::evaluate_row_expr;
 use super::helpers::parse_interval_seconds;
 use super::values::{ScalarValue, scalar_from_f64};
+use chrono::{Datelike, DateTime, Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Value};
 
 pub(super) fn evaluate_row_function(
@@ -205,32 +206,43 @@ pub(super) fn evaluate_time_bucket_row(
     };
 
     let value = evaluate_row_expr(value_expr, row_idx, dataset)?;
-    let numeric = match value.as_f64() {
-        Some(v) => v,
-        None => {
-            return Err(SqlExecutionError::Unsupported(
-                "DATE_TRUNC requires numeric timestamp values".into(),
-            ));
-        }
-    };
+    if value.is_null() {
+        return Ok(ScalarValue::Null);
+    }
+    let (value_seconds, value_kind) = scalar_to_seconds(&value).ok_or_else(|| {
+        SqlExecutionError::Unsupported(
+            "TIME_BUCKET value must be numeric or a timestamp literal".into(),
+        )
+    })?;
 
-    let origin = if function.args.len() >= 3 {
+    let origin_seconds = if function.args.len() >= 3 {
         match &function.args[2] {
             FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
             | FunctionArg::Named {
                 arg: FunctionArgExpr::Expr(expr),
                 ..
-            } => evaluate_row_expr(expr, row_idx, dataset)?
-                .as_f64()
-                .unwrap_or(0.0),
+            } => {
+                let origin_value = evaluate_row_expr(expr, row_idx, dataset)?;
+                if origin_value.is_null() {
+                    0.0
+                } else {
+                    scalar_to_seconds(&origin_value)
+                        .ok_or_else(|| {
+                            SqlExecutionError::Unsupported(
+                                "TIME_BUCKET origin must be numeric or a timestamp literal".into(),
+                            )
+                        })?
+                        .0
+                }
+            }
             _ => 0.0,
         }
     } else {
         0.0
     };
 
-    let bucket = ((numeric - origin) / interval).floor() * interval + origin;
-    Ok(scalar_from_f64(bucket))
+    let bucket = ((value_seconds - origin_seconds) / interval).floor() * interval + origin_seconds;
+    Ok(format_time_value(bucket, value_kind))
 }
 
 pub(super) fn evaluate_date_trunc_row(
@@ -273,17 +285,42 @@ pub(super) fn evaluate_date_trunc_row(
     };
 
     let value = evaluate_row_expr(value_expr, row_idx, dataset)?;
-    let numeric = match value.as_f64() {
-        Some(v) => v,
-        None => return Ok(ScalarValue::Null),
+    if value.is_null() {
+        return Ok(ScalarValue::Null);
+    }
+
+    let (value_seconds, value_kind) = scalar_to_seconds(&value).ok_or_else(|| {
+        SqlExecutionError::Unsupported("DATE_TRUNC requires numeric or timestamp inputs".into())
+    })?;
+
+    let truncated_seconds = if let Some(dt) = seconds_to_datetime(value_seconds) {
+        let truncated = truncate_datetime(&unit, dt)?;
+        datetime_to_seconds(&truncated)
+    } else {
+        let unit_seconds = unit_to_seconds(&unit)?;
+        (value_seconds / unit_seconds).floor() * unit_seconds
     };
 
-    let unit_seconds = match unit.to_lowercase().as_str() {
-        "second" | "seconds" | "sec" | "s" => 1.0,
-        "minute" | "minutes" | "min" | "mins" => 60.0,
-        "hour" | "hours" | "hr" | "hrs" => 3_600.0,
-        "day" | "days" => 86_400.0,
-        "week" | "weeks" => 604_800.0,
+    Ok(format_time_value(truncated_seconds, value_kind))
+}
+
+fn truncate_datetime(unit: &str, dt: NaiveDateTime) -> Result<NaiveDateTime, SqlExecutionError> {
+    let lowered = unit.to_lowercase();
+    let truncated = match lowered.as_str() {
+        "second" | "seconds" | "sec" | "s" => dt.with_nanosecond(0),
+        "minute" | "minutes" | "min" | "mins" => {
+            dt.with_second(0).and_then(|v| v.with_nanosecond(0))
+        }
+        "hour" | "hours" | "hr" | "hrs" => dt
+            .with_minute(0)
+            .and_then(|v| v.with_second(0))
+            .and_then(|v| v.with_nanosecond(0)),
+        "day" | "days" => dt.date().and_hms_opt(0, 0, 0),
+        "week" | "weeks" => {
+            let weekday = dt.weekday().num_days_from_monday() as i64;
+            let start_date: NaiveDate = dt.date() - Duration::days(weekday);
+            start_date.and_hms_opt(0, 0, 0)
+        }
         _ => {
             return Err(SqlExecutionError::Unsupported(format!(
                 "DATE_TRUNC unit '{unit}' is not supported"
@@ -291,8 +328,65 @@ pub(super) fn evaluate_date_trunc_row(
         }
     };
 
-    let truncated = (numeric / unit_seconds).floor() * unit_seconds;
-    Ok(scalar_from_f64(truncated))
+    truncated.ok_or_else(|| {
+        SqlExecutionError::Unsupported(format!("failed to truncate timestamp for unit '{unit}'"))
+    })
+}
+
+fn unit_to_seconds(unit: &str) -> Result<f64, SqlExecutionError> {
+    match unit.to_lowercase().as_str() {
+        "second" | "seconds" | "sec" | "s" => Ok(1.0),
+        "minute" | "minutes" | "min" | "mins" => Ok(60.0),
+        "hour" | "hours" | "hr" | "hrs" => Ok(3_600.0),
+        "day" | "days" => Ok(86_400.0),
+        "week" | "weeks" => Ok(604_800.0),
+        other => Err(SqlExecutionError::Unsupported(format!(
+            "DATE_TRUNC unit '{other}' is not supported"
+        ))),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TimeValueKind {
+    DateTime,
+    Numeric,
+}
+
+fn scalar_to_seconds(value: &ScalarValue) -> Option<(f64, TimeValueKind)> {
+    match value {
+        ScalarValue::Null => None,
+        ScalarValue::Int(v) => Some((*v as f64, TimeValueKind::Numeric)),
+        ScalarValue::Float(v) => Some((*v, TimeValueKind::Numeric)),
+        ScalarValue::Bool(v) => Some((if *v { 1.0 } else { 0.0 }, TimeValueKind::Numeric)),
+        ScalarValue::Text(text) => parse_timestamp(text)
+            .map(|dt| (datetime_to_seconds(&dt), TimeValueKind::DateTime))
+            .or_else(|| text.parse::<f64>().ok().map(|num| (num, TimeValueKind::Numeric))),
+    }
+}
+
+fn parse_timestamp(text: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok()
+}
+
+fn seconds_to_datetime(seconds: f64) -> Option<NaiveDateTime> {
+    let secs = seconds.trunc() as i64;
+    let nanos = ((seconds - secs as f64) * 1_000_000_000.0).round();
+    let nanos = nanos.clamp(0.0, 999_999_999.0) as u32;
+    DateTime::<Utc>::from_timestamp(secs, nanos).map(|dt| dt.naive_utc())
+}
+
+fn datetime_to_seconds(dt: &NaiveDateTime) -> f64 {
+    let utc = dt.and_utc();
+    utc.timestamp() as f64 + utc.timestamp_subsec_nanos() as f64 / 1_000_000_000.0
+}
+
+fn format_time_value(seconds: f64, kind: TimeValueKind) -> ScalarValue {
+    match kind {
+        TimeValueKind::Numeric => scalar_from_f64(seconds),
+        TimeValueKind::DateTime => seconds_to_datetime(seconds)
+            .map(|dt| ScalarValue::Text(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
+            .unwrap_or_else(|| scalar_from_f64(seconds)),
+    }
 }
 
 fn extract_literal_string(expr: &Expr) -> Option<String> {
