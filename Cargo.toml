@@ -15,6 +15,7 @@ crossbeam = "0.8.4"
 crossbeam-skiplist = "0.1"
 rand = "0.8"
 chrono = "0.4"
+regex = "1"
 
 [dev-dependencies]
 duckdb = { version = "1.1", features = ["bundled"] }

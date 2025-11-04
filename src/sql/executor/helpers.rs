@@ -1,5 +1,6 @@
 use super::SqlExecutionError;
 use super::values::{compare_strs, is_encoded_null};
+use regex::Regex;
 use sqlparser::ast::{
     DateTimeField, Expr, ObjectName, Offset, TableFactor, TableWithJoins, Value,
     WildcardAdditionalOptions,
@@ -452,18 +453,8 @@ fn like_match_dfs(value: &[char], pattern: &[char], mut v_idx: usize, mut p_idx:
 }
 
 pub(super) fn regex_match(value: &str, pattern: &str) -> bool {
-    let starts_with_anchor = pattern.starts_with('^');
-    let ends_with_anchor = pattern.ends_with('$');
-
-    let clean_pattern = pattern.trim_start_matches('^').trim_end_matches('$');
-
-    if starts_with_anchor && ends_with_anchor {
-        value == clean_pattern
-    } else if starts_with_anchor {
-        value.starts_with(clean_pattern)
-    } else if ends_with_anchor {
-        value.ends_with(clean_pattern)
-    } else {
-        value.contains(clean_pattern)
+    match Regex::new(pattern) {
+        Ok(re) => re.is_match(value),
+        Err(_) => false,
     }
 }

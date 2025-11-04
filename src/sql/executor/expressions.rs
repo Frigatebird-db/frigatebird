@@ -661,21 +661,25 @@ pub(super) fn evaluate_selection_expr(
         Expr::Nested(inner) => {
             evaluate_selection_expr(inner, row_idx, column_ordinals, materialized)
         }
+        Expr::Identifier(ident) => {
+            evaluate_column_truthy(&ident.value, row_idx, column_ordinals, materialized)
+        }
+        Expr::CompoundIdentifier(idents) => {
+            if let Some(last) = idents.last() {
+                evaluate_column_truthy(&last.value, row_idx, column_ordinals, materialized)
+            } else {
+                Err(SqlExecutionError::Unsupported(
+                    "empty compound identifier".into(),
+                ))
+            }
+        }
         Expr::IsNull(inner) => {
             let operand = resolve_operand(inner, row_idx, column_ordinals, materialized)?;
-            Ok(matches!(operand, OperandValue::Null)
-                || matches!(
-                operand,
-                    OperandValue::Text(ref value) if is_null_value(value.as_ref())
-                ))
+            Ok(matches!(operand, OperandValue::Null))
         }
         Expr::IsNotNull(inner) => {
             let operand = resolve_operand(inner, row_idx, column_ordinals, materialized)?;
-            Ok(!matches!(operand, OperandValue::Null)
-                && !matches!(
-                    operand,
-                    OperandValue::Text(ref value) if is_null_value(value.as_ref())
-                ))
+            Ok(!matches!(operand, OperandValue::Null))
         }
         Expr::Between {
             expr,
@@ -848,6 +852,32 @@ fn resolve_operand<'a>(
             "unsupported operand expression: {expr:?}"
         ))),
     }
+}
+
+fn evaluate_column_truthy(
+    column_name: &str,
+    row_idx: u64,
+    column_ordinals: &HashMap<String, usize>,
+    materialized: &MaterializedColumns,
+) -> Result<bool, SqlExecutionError> {
+    let value = column_operand(column_name, row_idx, column_ordinals, materialized)?;
+    Ok(match value {
+        OperandValue::Null => false,
+        OperandValue::Text(text) => literal_is_truthy(text.as_ref()),
+    })
+}
+
+fn literal_is_truthy(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if is_null_value(trimmed) {
+        return false;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    !matches!(lowered.as_str(), "false" | "0" | "no" | "off" | "f" | "n")
 }
 
 fn column_operand<'a>(
