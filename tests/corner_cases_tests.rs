@@ -283,19 +283,23 @@ fn cache_get_nonexistent_key() {
 #[test]
 fn cache_has_after_eviction() {
     let mut cache = PageCache::new();
+    let capacity = PageCache::<PageCacheEntryUncompressed>::capacity_limit();
 
-    // Fill to capacity (10) and beyond
-    for i in 0..20 {
+    // Fill to capacity and beyond
+    for i in 0..(capacity + 5) {
         cache.add(&format!("page{}", i), create_test_page(1));
     }
 
     // First pages should be evicted
-    assert!(!cache.has("page0"));
-    assert!(!cache.has("page1"));
+    assert!(!cache.has("page0"), "oldest entry should be evicted once capacity is exceeded");
+    assert!(
+        !cache.has("page1"),
+        "second-oldest entry should also be evicted once capacity is exceeded"
+    );
 
     // Recent pages should exist
-    assert!(cache.has("page19"));
-    assert!(cache.has("page18"));
+    assert!(cache.has(&format!("page{}", capacity + 4)));
+    assert!(cache.has(&format!("page{}", capacity + 3)));
 }
 
 #[test]

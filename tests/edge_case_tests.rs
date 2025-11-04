@@ -122,19 +122,20 @@ fn mvcc_timestamp_before_all_versions() {
 #[test]
 fn page_cache_eviction_lru_order_stress() {
     let mut cache = PageCache::new();
+    let capacity = PageCache::<PageCacheEntryUncompressed>::capacity_limit();
 
-    // Fill to capacity (10 pages)
-    for i in 0..10 {
+    // Fill to capacity
+    for i in 0..capacity {
         cache.add(&format!("page{}", i), create_page(5));
     }
 
     // Re-add some pages to move them to front of LRU: 1, 3, 5, 7, 9
-    for i in (1..10).step_by(2) {
+    for i in (1..capacity).step_by(2) {
         cache.add(&format!("page{}", i), create_page(5));
     }
 
     // Add one more page - should evict oldest (page0)
-    cache.add("page10", create_page(5));
+    cache.add(&format!("page{}", capacity), create_page(5));
 
     // page0 should be evicted (oldest), page1 should remain (recently re-added)
     assert!(
@@ -146,19 +147,21 @@ fn page_cache_eviction_lru_order_stress() {
         "page1 was re-added recently, should remain"
     );
     assert!(
-        cache.has("page10"),
-        "page10 was just added, should be present"
+        cache.has(&format!("page{}", capacity)),
+        "newly added page should be present"
     );
 }
 
 #[test]
 fn page_cache_concurrent_eviction_and_add() {
     let cache = Arc::new(RwLock::new(PageCache::new()));
+    let capacity = PageCache::<PageCacheEntryUncompressed>::capacity_limit();
+    let additions = capacity.min(64);
 
     // Fill cache to capacity
     {
         let mut c = cache.write().unwrap();
-        for i in 0..10 {
+        for i in 0..capacity {
             c.add(&format!("init{}", i), create_page(1));
         }
     }
@@ -166,7 +169,7 @@ fn page_cache_concurrent_eviction_and_add() {
     let mut handles = vec![];
 
     // Spawn threads that add pages concurrently
-    for i in 0..20 {
+    for i in 0..additions {
         let cache_clone = Arc::clone(&cache);
         let handle = thread::spawn(move || {
             let mut c = cache_clone.write().unwrap();
@@ -181,18 +184,16 @@ fn page_cache_concurrent_eviction_and_add() {
 
     // Cache should still be at capacity
     let c = cache.read().unwrap();
-    let mut count = 0;
-    for i in 0..10 {
-        if c.has(&format!("init{}", i)) {
-            count += 1;
-        }
-    }
-    for i in 0..20 {
-        if c.has(&format!("thread{}", i)) {
-            count += 1;
-        }
-    }
-    assert!(count <= 10, "Cache should not exceed capacity");
+    assert!(
+        c.len() <= capacity,
+        "Cache should not exceed capacity (limit {})",
+        capacity
+    );
+    let thread_entry_present = (0..additions).any(|i| c.has(&format!("thread{}", i)));
+    assert!(
+        thread_entry_present,
+        "At least one concurrently added page should remain in cache"
+    );
 }
 
 #[test]

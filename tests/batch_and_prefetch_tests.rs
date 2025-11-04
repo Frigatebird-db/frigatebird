@@ -219,7 +219,10 @@ fn cache_thrash_add_evict_repeatedly() {
             }
         }
     }
-    assert!(count <= 10, "Cache should maintain capacity limit");
+    assert!(
+        count <= PageCache::<PageCacheEntryUncompressed>::capacity_limit(),
+        "Cache should maintain capacity limit"
+    );
 }
 
 #[test]
