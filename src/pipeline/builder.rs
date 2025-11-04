@@ -322,7 +322,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_eval_expr_unsupported_returns_true() {
         let expr = make_binary_op(
             make_ident_expr("value"),
@@ -334,7 +333,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_eval_expr_unsupported_right_side() {
         let expr = make_binary_op(
             make_ident_expr("value"),
@@ -750,7 +748,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_compare_values_boolean_true() {
         let expr = make_binary_op(
             make_ident_expr("active"),
@@ -768,7 +765,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_compare_values_boolean_false() {
         let expr = make_binary_op(
             make_ident_expr("disabled"),
@@ -786,7 +782,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_compare_values_boolean_gt() {
         // true > false
         let expr = make_binary_op(
@@ -881,7 +876,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests overly clever boolean matching - current implementation uses exact string matching
     fn test_parse_bool_variations() {
         // Test the parse_bool helper directly through eval_expr
         let expr_true = make_binary_op(
@@ -945,7 +939,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_datetime_iso_timestamp_comparison() {
         let expr = make_binary_op(
             make_ident_expr("timestamp"),
@@ -1177,7 +1170,6 @@ mod tests {
     // ========== UUID Comparison Tests ==========
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_uuid_comparison() {
         let expr = make_binary_op(
             make_ident_expr("id"),
@@ -1245,7 +1237,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_version_patch_comparison() {
         // This would FAIL with lexicographic: "1.2.9" > "1.2.10"
         // But works with version parsing: 1.2.10 > 1.2.9
@@ -1272,7 +1263,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_version_with_prerelease() {
         let expr = make_binary_op(
             make_ident_expr("version"),
@@ -1286,7 +1276,6 @@ mod tests {
     // ========== Duration Comparison Tests ==========
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_duration_simple_format() {
         let expr = make_binary_op(
             make_ident_expr("duration"),
@@ -1299,7 +1288,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_duration_days_vs_hours() {
         let expr = make_binary_op(
             make_ident_expr("duration"),
@@ -1314,7 +1302,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_duration_compact_format() {
         let expr = make_binary_op(
             make_ident_expr("duration"),
@@ -1325,7 +1312,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_duration_complex_compact() {
         let expr = make_binary_op(
             make_ident_expr("duration"),
@@ -1338,7 +1324,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tests implementation detail
     fn test_duration_weeks() {
         let expr = make_binary_op(
             make_ident_expr("duration"),

@@ -38,7 +38,8 @@ fn run_random_suite(iterations: usize) {
         queries.push(generate_random_query(&table, row_count, &mut rng));
     }
 
-    for case in &queries {
+    for (idx, case) in queries.iter().enumerate() {
+        println!("Random case #{idx}: {}", case.sql);
         let mut options = QueryOptions::default();
         options.duckdb_sql = case.duckdb_sql.as_deref();
         options.order_matters = case.order_matters;

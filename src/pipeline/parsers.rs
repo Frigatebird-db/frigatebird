@@ -9,19 +9,14 @@ where
         return predicate(left_num.partial_cmp(&right_num).unwrap_or(Ordering::Equal));
     }
 
+    // Try boolean comparison (handles variants like "yes"/"no")
+    if let (Ok(left_bool), Ok(right_bool)) = (parse_bool(left), parse_bool(right)) {
+        return predicate(left_bool.cmp(&right_bool));
+    }
+
     // Try datetime comparison
     if let (Some(left_dt), Some(right_dt)) = (parse_datetime(left), parse_datetime(right)) {
         return predicate(left_dt.cmp(&right_dt));
-    }
-
-    // Try IP comparison
-    if let (Some(left_ip), Some(right_ip)) = (parse_ip(left), parse_ip(right)) {
-        return predicate(left_ip.cmp(&right_ip));
-    }
-
-    // Try version comparison
-    if let (Some(left_ver), Some(right_ver)) = (parse_version(left), parse_version(right)) {
-        return predicate(left_ver.cmp(&right_ver));
     }
 
     // Try duration comparison
@@ -29,9 +24,19 @@ where
         return predicate(left_dur.cmp(&right_dur));
     }
 
+    // Try IP comparison
+    if let (Some(left_ip), Some(right_ip)) = (parse_ip(left), parse_ip(right)) {
+        return predicate(left_ip.cmp(&right_ip));
+    }
+
     // Try UUID comparison
     if let (Some(left_uuid), Some(right_uuid)) = (parse_uuid(left), parse_uuid(right)) {
         return predicate(left_uuid.cmp(&right_uuid));
+    }
+
+    // Try version comparison
+    if let (Some(left_ver), Some(right_ver)) = (parse_version(left), parse_version(right)) {
+        return predicate(left_ver.cmp(&right_ver));
     }
 
     // Fallback to lexicographic string comparison
@@ -40,8 +45,8 @@ where
 
 pub fn parse_bool(s: &str) -> Result<bool, ()> {
     match s.to_lowercase().as_str() {
-        "true" | "1" | "yes" | "y" => Ok(true),
-        "false" | "0" | "no" | "n" | "" => Ok(false),
+        "true" | "1" | "yes" | "y" | "on" | "t" => Ok(true),
+        "false" | "0" | "no" | "n" | "off" | "f" | "" => Ok(false),
         _ => Err(()),
     }
 }
@@ -61,6 +66,12 @@ pub fn parse_datetime(s: &str) -> Option<i64> {
     // Try ISO 8601 format
     if let Some(ts) = parse_iso_date(s) {
         return Some(ts);
+    }
+    if s.contains(' ') && !s.contains('T') {
+        let iso_like = s.replacen(' ', "T", 1);
+        if let Some(ts) = parse_iso_date(&iso_like) {
+            return Some(ts);
+        }
     }
 
     // Try common date formats
@@ -159,6 +170,12 @@ fn try_parse_mdy(s: &str, sep: char) -> Option<(u32, u32, i32)> {
 fn try_parse_dmy(s: &str, sep: char) -> Option<(u32, u32, i32)> {
     let parts: Vec<&str> = s.split(sep).collect();
     if parts.len() == 3 {
+        if sep == '.' {
+            let year_len = parts[2].len();
+            if year_len != 2 && year_len != 4 {
+                return None;
+            }
+        }
         let d = parts[0].parse::<u32>().ok()?;
         let m = parts[1].parse::<u32>().ok()?;
         let mut y = parts[2].parse::<i32>().ok()?;
@@ -201,6 +218,7 @@ pub fn parse_uuid(s: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionTuple {
     pub parts: Vec<u32>,
+    pub pre_release: Option<String>,
 }
 
 impl PartialOrd for VersionTuple {
@@ -220,7 +238,12 @@ impl Ord for VersionTuple {
                 other => return other,
             }
         }
-        Ordering::Equal
+        match (&self.pre_release, &other.pre_release) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(left), Some(right)) => left.cmp(right),
+        }
     }
 }
 
@@ -243,7 +266,13 @@ pub fn parse_version(s: &str) -> Option<VersionTuple> {
     if parts.is_empty() {
         None
     } else {
-        Some(VersionTuple { parts })
+        let remainder = trimmed[version_part.len()..].trim_start_matches(|c| c == '-' || c == '_');
+        let pre_release = if remainder.is_empty() {
+            None
+        } else {
+            Some(remainder.to_ascii_lowercase())
+        };
+        Some(VersionTuple { parts, pre_release })
     }
 }
 
@@ -272,6 +301,7 @@ fn try_parse_simple_duration(s: &str) -> Option<(i64, i64)> {
         "m" | "min" | "mins" | "minute" | "minutes" => 60,
         "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
         "d" | "day" | "days" => 86400,
+        "w" | "wk" | "wks" | "week" | "weeks" => 604800,
         _ => return None,
     };
 
@@ -294,6 +324,7 @@ fn try_parse_compact_duration(s: &str) -> Option<i64> {
                 'm' => 60,
                 'h' => 3600,
                 'd' => 86400,
+                'w' => 604800,
                 _ => return None,
             };
 
@@ -302,4 +333,15 @@ fn try_parse_compact_duration(s: &str) -> Option<i64> {
     }
 
     if total > 0 { Some(total) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_comparison_orders_patches() {
+        assert!(compare_values("1.2.10", "1.2.9", |ord| ord == Ordering::Greater));
+        assert!(compare_values("1.2.100", "1.2.9", |ord| ord == Ordering::Greater));
+    }
 }

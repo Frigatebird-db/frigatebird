@@ -94,9 +94,13 @@ impl PipelineStep {
     }
 
     fn execute_non_root(&self) {
+        let mut sent_termination = false;
         while let Ok(mut batch) = self.previous_receiver.recv() {
             if batch.is_empty() {
-                let _ = self.current_producer.send(Vec::new());
+                if self.current_producer.send(Vec::new()).is_err() {
+                    return;
+                }
+                sent_termination = true;
                 break;
             }
 
@@ -120,8 +124,12 @@ impl PipelineStep {
             }
 
             if self.current_producer.send(batch).is_err() {
+                sent_termination = true;
                 break;
             }
+        }
+        if !sent_termination {
+            let _ = self.current_producer.send(Vec::new());
         }
     }
 }
