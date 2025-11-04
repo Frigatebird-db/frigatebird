@@ -55,7 +55,25 @@ fn debug_distinct_nullable_text_case() {
     let sql = "SELECT DISTINCT nullable_text, segment FROM massive_correctness WHERE quantity BETWEEN 2873 AND 3411 ORDER BY quantity DESC, id ASC";
     let ours = executor.query(sql).expect("satori query failed");
     println!("ours rows: {:?}", ours.rows);
-    let (_cols, duck_rows) = query_duckdb(fixture.duckdb(), sql).expect("duckdb query failed");
+    let conn = fixture.duckdb();
+    let mut stmt = conn.prepare(sql).expect("prep duckdb");
+    let column_count = stmt.column_count();
+    let mut rows = stmt.query([]).expect("duckdb query");
+    let mut duck_rows = Vec::new();
+    use duckdb::types::ValueRef;
+    while let Some(row) = rows.next().expect("duckdb step") {
+        let mut values = Vec::with_capacity(column_count);
+        for idx in 0..column_count {
+            let value = row.get_ref(idx).expect("duckdb value");
+            let cell = match value {
+                ValueRef::Null => None,
+                ValueRef::Text(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+                _ => Some(format!("{value:?}")),
+            };
+            values.push(cell);
+        }
+        duck_rows.push(values);
+    }
     println!("duck rows: {:?}", duck_rows);
 }
 
