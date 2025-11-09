@@ -16,9 +16,8 @@ fn update_without_where_full_table() {
 
     // First, get count before update
     let count_sql = format!("SELECT COUNT(*) FROM {table}", table = table);
-    let count_result = executor.query(&count_sql);
-    if count_result.is_ok() {
-        println!("Row count before UPDATE: {:?}", count_result.unwrap().rows());
+    if let Ok(count_result) = executor.query(&count_sql) {
+        println!("Row count before UPDATE:\n{}", count_result);
     }
 
     // UPDATE without WHERE - should update ALL rows
@@ -45,10 +44,8 @@ fn update_without_where_full_table() {
         table = table
     );
 
-    let result = executor.query(&verify_sql);
-    if result.is_ok() {
-        let rows = result.unwrap().rows();
-        println!("After full table UPDATE: {:?}", rows);
+    if let Ok(result) = executor.query(&verify_sql) {
+        println!("After full table UPDATE:\n{}", result);
         // Both counts should be equal if all rows were updated
     }
 }
@@ -61,9 +58,8 @@ fn delete_without_where_full_table() {
 
     // Get count before delete
     let count_before_sql = format!("SELECT COUNT(*) FROM {table}", table = table);
-    let count_before = executor.query(&count_before_sql);
-    if count_before.is_ok() {
-        println!("Row count before DELETE: {:?}", count_before.unwrap().rows());
+    if let Ok(count_before) = executor.query(&count_before_sql) {
+        println!("Row count before DELETE:\n{}", count_before);
     }
 
     // DELETE without WHERE - should delete ALL rows
@@ -82,10 +78,8 @@ fn delete_without_where_full_table() {
 
     // Verify all rows were deleted
     let count_after_sql = format!("SELECT COUNT(*) FROM {table}", table = table);
-    let count_after = executor.query(&count_after_sql);
-    if count_after.is_ok() {
-        let rows = count_after.unwrap().rows();
-        println!("Row count after full table DELETE: {:?}", rows);
+    if let Ok(count_after) = executor.query(&count_after_sql) {
+        println!("Row count after full table DELETE:\n{}", count_after);
         // Should be 0 if all rows deleted
     }
 }

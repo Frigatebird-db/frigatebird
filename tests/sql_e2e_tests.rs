@@ -50,7 +50,7 @@ fn test_e2e_create_insert_update_delete_full_lifecycle() {
     let result = executor
         .query("SELECT name, price, stock FROM products WHERE id = '1'")
         .expect("select after insert");
-    assert_eq!(result.rows().len(), 1);
+    assert_eq!(result.row_count(), 1);
     assert_eq!(
         result.rows()[0],
         vec![
@@ -466,7 +466,7 @@ fn test_select_on_non_sort_column_filters() {
     let result = executor
         .query("SELECT COUNT(*) FROM tasks WHERE status = 'done'")
         .expect("count done");
-    assert_eq!(result.rows().len(), 1);
+    assert_eq!(result.row_count(), 1);
     assert_eq!(result.rows()[0], vec![Some("2".to_string())]);
 
     let result = executor
@@ -506,7 +506,7 @@ fn test_select_without_where_and_order_by() {
     let result = executor
         .query("SELECT id FROM jobs ORDER BY id")
         .expect("select order by sort key");
-    assert_eq!(result.rows().len(), 3);
+    assert_eq!(result.row_count(), 3);
     assert_eq!(result.rows()[0], vec![Some("1".to_string())]);
     assert_eq!(result.rows()[1], vec![Some("2".to_string())]);
     assert_eq!(result.rows()[2], vec![Some("3".to_string())]);
@@ -514,7 +514,7 @@ fn test_select_without_where_and_order_by() {
     let result = executor
         .query("SELECT id, status FROM jobs ORDER BY id DESC")
         .expect("select order by desc");
-    assert_eq!(result.rows().len(), 3);
+    assert_eq!(result.row_count(), 3);
     assert_eq!(
         result.rows()[0],
         vec![Some("3".to_string()), Some("done".to_string())]
@@ -657,5 +657,5 @@ fn test_select_distinct_rows() {
     let result = executor
         .query("SELECT DISTINCT status FROM distincts LIMIT 1")
         .expect("distinct limit");
-    assert_eq!(result.rows().len(), 1);
+    assert_eq!(result.row_count(), 1);
 }

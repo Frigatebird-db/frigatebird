@@ -383,7 +383,9 @@ impl From<crate::sql::models::PlannerError> for SqlExecutionError {
     }
 }
 
-#[derive(Debug, Clone)]
+use std::fmt;
+
+#[derive(Clone)]
 pub struct SelectResult {
     pub columns: Vec<String>,
     pub batches: Vec<ColumnarBatch>,
@@ -404,6 +406,55 @@ impl SelectResult {
 
     pub fn is_empty(&self) -> bool {
         self.batches.iter().all(|batch| batch.num_rows == 0)
+    }
+}
+
+impl fmt::Debug for SelectResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SelectResult")
+            .field("columns", &self.columns)
+            .field("row_count", &self.row_count())
+            .finish()
+    }
+}
+
+impl fmt::Display for SelectResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.columns.is_empty() {
+            writeln!(f, "(0 columns)")?;
+        } else {
+            for (idx, column) in self.columns.iter().enumerate() {
+                if idx > 0 {
+                    write!(f, " | ")?;
+                }
+                write!(f, "{column}")?;
+            }
+            writeln!(f)?;
+        }
+
+        let mut row_count = 0usize;
+        for batch in &self.batches {
+            for row_idx in 0..batch.num_rows {
+                row_count += 1;
+                for col_idx in 0..self.columns.len() {
+                    if col_idx > 0 {
+                        write!(f, " | ")?;
+                    }
+                    let value = batch
+                        .columns
+                        .get(&col_idx)
+                        .ok_or(fmt::Error)?
+                        .value_as_string(row_idx);
+                    match value {
+                        Some(text) => write!(f, "{text}")?,
+                        None => write!(f, "NULL")?,
+                    }
+                }
+                writeln!(f)?;
+            }
+        }
+
+        writeln!(f, "({row_count} rows)")
     }
 }
 
