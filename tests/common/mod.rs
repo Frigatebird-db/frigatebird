@@ -18,7 +18,32 @@ use std::fmt;
 use std::sync::{Arc, RwLock};
 
 // Re-export commonly used types for test modules
-pub use idk_uwu_ig::sql::executor::{SelectResult as PublicSelectResult, SqlExecutionError as PublicSqlExecutionError, SqlExecutor as PublicSqlExecutor};
+pub use idk_uwu_ig::sql::executor::{
+    SelectResult as PublicSelectResult, SqlExecutionError as PublicSqlExecutionError,
+    SqlExecutor as PublicSqlExecutor,
+};
+pub use result_rows_ext::SelectResultRowsExt;
+
+mod result_rows_ext {
+    use idk_uwu_ig::sql::executor::SelectResult;
+
+    pub trait SelectResultRowsExt {
+        fn rows(&self) -> Vec<Vec<Option<String>>>;
+        fn into_rows(self) -> Vec<Vec<Option<String>>>
+        where
+            Self: Sized;
+    }
+
+    impl SelectResultRowsExt for SelectResult {
+        fn rows(&self) -> Vec<Vec<Option<String>>> {
+            self.row_iter().map(|row| row.to_vec()).collect()
+        }
+
+        fn into_rows(self) -> Vec<Vec<Option<String>>> {
+            self.row_iter().map(|row| row.to_vec()).collect()
+        }
+    }
+}
 
 pub struct ExecutorHarness {
     pub executor: SqlExecutor,

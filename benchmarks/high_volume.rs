@@ -3,9 +3,19 @@ use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::SqlExecutor;
+use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutor};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+
+trait ResultRowsExt {
+    fn rows(&self) -> Vec<Vec<Option<String>>>;
+}
+
+impl ResultRowsExt for SelectResult {
+    fn rows(&self) -> Vec<Vec<Option<String>>> {
+        self.row_iter().map(|row| row.to_vec()).collect()
+    }
+}
 
 const DEFAULT_TOTAL_ROWS: usize = 10_000_000;
 const DEFAULT_ROW_SIZE_KB: usize = 1;
