@@ -11,10 +11,10 @@ mod scan_helpers;
 mod values;
 mod window_helpers;
 
-use self::batch::ColumnarPage;
+use self::batch::{ColumnarBatch, ColumnarPage};
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
-use crate::metadata_store::{ColumnCatalog, PageDescriptor, PageDirectory};
+use crate::metadata_store::{ColumnCatalog, PageDescriptor, PageDirectory, TableCatalog};
 use crate::ops_handler::{
     create_table_from_plan, delete_row, insert_sorted_row, overwrite_row, read_row,
 };
@@ -27,7 +27,7 @@ use crate::writer::{
 };
 use sqlparser::ast::{
     Assignment, BinaryOperator, Expr, FromTable, FunctionArg, FunctionArgExpr, GroupByExpr, Ident,
-    ObjectName, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    ObjectName, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
     TableWithJoins, Value, WindowFrameBound, WindowFrameUnits, WindowType,
 };
 use sqlparser::parser::ParserError;
@@ -40,8 +40,8 @@ use aggregates::{
     evaluate_aggregate_outputs, plan_aggregate_projection, select_item_contains_aggregate,
 };
 use expressions::{
-    evaluate_row_expr, evaluate_scalar_expression, evaluate_selection_expr,
-    evaluate_selection_on_page,
+    evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
+    evaluate_selection_expr, evaluate_selection_on_page,
 };
 use grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
 use helpers::{
@@ -716,6 +716,35 @@ impl SqlExecutor {
             None
         };
 
+        let can_run_vectorized_projection = !needs_aggregation
+            && qualify.is_none()
+            && window_plans.is_empty()
+            && sort_key_filters.is_none()
+            && order_clauses.is_empty()
+            && projection_plan_opt.is_some();
+
+        if can_run_vectorized_projection {
+            if let Some(projection_plan) = &projection_plan_opt {
+                match self.execute_vectorized_projection(
+                    &table_name,
+                    &catalog,
+                    &columns,
+                    projection_plan,
+                    &required_ordinals,
+                    scan_selection_expr,
+                    &column_ordinals,
+                    result_columns.clone(),
+                    limit_expr.clone(),
+                    offset_expr.clone(),
+                    distinct_flag,
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(SqlExecutionError::Unsupported(_)) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
         let mut candidate_rows = if let Some(sort_key_filters) = sort_key_filters {
             for column in &sort_columns {
                 key_values.push(sort_key_filters.get(&column.name).cloned().ok_or_else(|| {
@@ -1106,6 +1135,103 @@ impl SqlExecutor {
             columns: result_columns,
             rows: final_rows,
         })
+    }
+
+    fn execute_vectorized_projection(
+        &self,
+        table: &str,
+        catalog: &TableCatalog,
+        columns: &[ColumnCatalog],
+        projection_plan: &ProjectionPlan,
+        required_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&Expr>,
+        column_ordinals: &HashMap<String, usize>,
+        result_columns: Vec<String>,
+        limit_expr: Option<Expr>,
+        offset_expr: Option<Offset>,
+        distinct_flag: bool,
+    ) -> Result<SelectResult, SqlExecutionError> {
+        let batch = self.scan_and_filter_vectorized(
+            table,
+            columns,
+            required_ordinals,
+            selection_expr,
+            column_ordinals,
+        )?;
+
+        if batch.num_rows == 0 || batch.columns.is_empty() {
+            return Ok(SelectResult {
+                columns: result_columns,
+                rows: Vec::new(),
+            });
+        }
+
+        let mut final_batch = ColumnarBatch::with_capacity(projection_plan.items.len());
+        final_batch.num_rows = batch.num_rows;
+
+        for (idx, item) in projection_plan.items.iter().enumerate() {
+            let column_page = match item {
+                ProjectionItem::Direct { ordinal } => batch
+                    .columns
+                    .get(ordinal)
+                    .cloned()
+                    .ok_or_else(|| {
+                        SqlExecutionError::OperationFailed(format!(
+                            "missing column ordinal {ordinal} in vectorized batch"
+                        ))
+                    })?,
+                ProjectionItem::Computed { expr } => {
+                    evaluate_expression_on_batch(expr, &batch, catalog)?
+                }
+            };
+            final_batch.columns.insert(idx, column_page);
+        }
+
+        let mut rows = self.transpose_batch_to_rows(&final_batch)?;
+
+        if distinct_flag {
+            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
+            rows.retain(|row| seen.insert(row.clone()));
+        }
+
+        let offset = parse_offset(offset_expr)?;
+        let limit = parse_limit(limit_expr)?;
+        let start = offset.min(rows.len());
+        let end = if let Some(limit) = limit {
+            start.saturating_add(limit).min(rows.len())
+        } else {
+            rows.len()
+        };
+        let final_rows = rows[start..end].to_vec();
+
+        Ok(SelectResult {
+            columns: result_columns,
+            rows: final_rows,
+        })
+    }
+
+    fn transpose_batch_to_rows(
+        &self,
+        batch: &ColumnarBatch,
+    ) -> Result<Vec<Vec<Option<String>>>, SqlExecutionError> {
+        if batch.num_rows == 0 {
+            return Ok(Vec::new());
+        }
+        let column_count = batch.columns.len();
+        let mut rows = Vec::with_capacity(batch.num_rows);
+        for row_idx in 0..batch.num_rows {
+            let mut row = Vec::with_capacity(column_count);
+            for column_idx in 0..column_count {
+                let column = batch.columns.get(&column_idx).ok_or_else(|| {
+                    SqlExecutionError::OperationFailed(format!(
+                        "missing projection column at index {column_idx}"
+                    ))
+                })?;
+                row.push(column.value_as_string(row_idx));
+            }
+            rows.push(row);
+        }
+        Ok(rows)
     }
 
     fn execute_create(&self, statement: Statement) -> Result<(), SqlExecutionError> {
@@ -1801,7 +1927,7 @@ impl SqlExecutor {
         selection_expr: Option<&Expr>,
         column_ordinals: &HashMap<String, usize>,
     ) -> Result<Vec<u64>, SqlExecutionError> {
-        match self.scan_and_filter_vectorized(
+        match self.scan_matching_rows_vectorized(
             table,
             columns,
             required_ordinals,
@@ -1821,6 +1947,147 @@ impl SqlExecutor {
     }
 
     fn scan_and_filter_vectorized(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        required_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&Expr>,
+        column_ordinals: &HashMap<String, usize>,
+    ) -> Result<ColumnarBatch, SqlExecutionError> {
+        if columns.is_empty() || required_ordinals.is_empty() {
+            return Ok(ColumnarBatch::new());
+        }
+
+        let leading_column = &columns[0].name;
+        let lead_pages = self.page_handler.list_pages_in_table(table, leading_column);
+        if lead_pages.is_empty() {
+            return Ok(ColumnarBatch::new());
+        }
+
+        let mut predicate_columns = BTreeSet::new();
+        if let Some(expr) = selection_expr {
+            collect_expr_column_names(expr, &mut predicate_columns);
+            if predicate_columns.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "vectorized scan requires column references in the predicate".into(),
+                ));
+            }
+        }
+
+        let mut predicate_ordinals = BTreeSet::new();
+        for column in &predicate_columns {
+            let ordinal = column_ordinals.get(column).copied().ok_or_else(|| {
+                SqlExecutionError::Unsupported(format!(
+                    "vectorized predicate references unknown column {column}"
+                ))
+            })?;
+            predicate_ordinals.insert(ordinal);
+        }
+
+        let mut scan_ordinals = required_ordinals.clone();
+        scan_ordinals.extend(predicate_ordinals.iter());
+        if scan_ordinals.is_empty() {
+            return Ok(ColumnarBatch::new());
+        }
+
+        let mut descriptor_map: HashMap<usize, Vec<PageDescriptor>> = HashMap::new();
+        for &ordinal in &scan_ordinals {
+            let column = columns.get(ordinal).ok_or_else(|| {
+                SqlExecutionError::OperationFailed(format!(
+                    "invalid column ordinal {ordinal} on table {table}"
+                ))
+            })?;
+            let descriptors = self.page_handler.list_pages_in_table(table, &column.name);
+            if descriptors.len() != lead_pages.len() {
+                return Err(SqlExecutionError::Unsupported(
+                    "vectorized scan requires aligned page descriptors across columns".into(),
+                ));
+            }
+            descriptor_map.insert(ordinal, descriptors);
+        }
+
+        let mut result_batch = ColumnarBatch::with_capacity(required_ordinals.len());
+
+        for (page_idx, _) in lead_pages.iter().enumerate() {
+            let mut page_entries: HashMap<usize, Arc<PageCacheEntryUncompressed>> =
+                HashMap::with_capacity(scan_ordinals.len());
+            for &ordinal in &scan_ordinals {
+                let descriptors = descriptor_map.get(&ordinal).ok_or_else(|| {
+                    SqlExecutionError::OperationFailed(format!(
+                        "missing page descriptors for ordinal {ordinal}"
+                    ))
+                })?;
+                let descriptor = descriptors.get(page_idx).ok_or_else(|| {
+                    SqlExecutionError::OperationFailed(format!(
+                        "descriptor misalignment for ordinal {ordinal}"
+                    ))
+                })?;
+                let page = self
+                    .page_handler
+                    .get_page(descriptor.clone())
+                    .ok_or_else(|| {
+                        SqlExecutionError::OperationFailed(format!(
+                            "unable to load page {} for ordinal {ordinal}",
+                            descriptor.id
+                        ))
+                    })?;
+                page_entries.insert(ordinal, page);
+            }
+
+            let bitmap = if let Some(expr) = selection_expr {
+                let mut predicate_refs: HashMap<String, &ColumnarPage> =
+                    HashMap::with_capacity(predicate_columns.len());
+                for column in &predicate_columns {
+                    let ordinal = column_ordinals.get(column).copied().ok_or_else(|| {
+                        SqlExecutionError::Unsupported(format!(
+                            "vectorized predicate references unknown column {column}"
+                        ))
+                    })?;
+                    let page = page_entries.get(&ordinal).ok_or_else(|| {
+                        SqlExecutionError::OperationFailed(format!(
+                            "missing predicate column {column} for ordinal {ordinal}"
+                        ))
+                    })?;
+                    predicate_refs.insert(column.clone(), &page.page);
+                }
+                let mut bitmap = evaluate_selection_on_page(expr, &predicate_refs)?;
+                if bitmap.count_ones() == 0 {
+                    continue;
+                }
+                Some(bitmap)
+            } else {
+                None
+            };
+
+            for &ordinal in required_ordinals {
+                let page_entry = page_entries.get(&ordinal).ok_or_else(|| {
+                    SqlExecutionError::OperationFailed(format!(
+                        "missing page entry for ordinal {ordinal}"
+                    ))
+                })?;
+                let filtered_page = if let Some(bitmap) = &bitmap {
+                    page_entry.page.filter_by_bitmap(bitmap)
+                } else {
+                    page_entry.page.clone()
+                };
+                result_batch
+                    .columns
+                    .entry(ordinal)
+                    .and_modify(|existing| existing.append(&filtered_page))
+                    .or_insert(filtered_page);
+            }
+        }
+
+        if let Some(first_col) = result_batch.columns.values().next() {
+            result_batch.num_rows = first_col.num_rows;
+        } else {
+            result_batch.num_rows = 0;
+        }
+
+        Ok(result_batch)
+    }
+
+    fn scan_matching_rows_vectorized(
         &self,
         table: &str,
         columns: &[ColumnCatalog],
