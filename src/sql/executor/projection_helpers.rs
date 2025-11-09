@@ -5,13 +5,12 @@ use super::helpers::{
 };
 use super::values::CachedValue;
 use super::{ProjectionItem, ProjectionPlan, SqlExecutionError};
-use crate::cache::page_cache::PageCacheEntryUncompressed;
+use crate::entry::Entry;
 use crate::metadata_store::ColumnCatalog;
 use crate::page_handler::PageHandler;
 use sqlparser::ast::Expr;
 use sqlparser::ast::SelectItem;
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
 
 pub(super) fn build_projection(
     projection: Vec<SelectItem>,
@@ -168,10 +167,10 @@ pub(super) fn materialize_columns(
             .collect::<Vec<_>>();
         let pages = page_handler.get_pages(descriptors);
 
-        let mut page_map: HashMap<String, Arc<PageCacheEntryUncompressed>> =
-            HashMap::with_capacity(pages.len());
+        let mut page_map: HashMap<String, Vec<Entry>> = HashMap::with_capacity(pages.len());
         for page in pages {
-            page_map.insert(page.page.page_metadata.clone(), page);
+            let disk_page = page.page.as_disk_page();
+            page_map.insert(disk_page.page_metadata.clone(), disk_page.entries);
         }
 
         let mut values: HashMap<u64, CachedValue> = HashMap::with_capacity(rows.len());
@@ -183,13 +182,12 @@ pub(super) fn materialize_columns(
                 break;
             }
 
-            let page = page_map.get(&slice.descriptor.id).ok_or_else(|| {
+            let entries = page_map.get(&slice.descriptor.id).ok_or_else(|| {
                 SqlExecutionError::OperationFailed(format!(
                     "missing page {} for column {}",
                     slice.descriptor.id, column.name
                 ))
             })?;
-            let entries = &page.page.entries;
 
             let start = slice.start_row_offset as usize;
             let end = slice.end_row_offset.min(entries.len() as u64) as usize;

@@ -41,6 +41,17 @@ fn setup_writer() -> (Arc<Writer>, Arc<PageHandler>, Arc<PageDirectory>) {
     (writer, page_handler, directory)
 }
 
+fn entry_values(page: &PageCacheEntryUncompressed) -> Vec<String> {
+    (0..page.page.len())
+        .map(|idx| {
+            page.page
+                .entry_at(idx)
+                .map(|entry| entry.get_data().to_string())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 #[test]
 fn writer_new_creates_instance() {
     let (writer, _, _) = setup_writer();
@@ -142,8 +153,15 @@ fn writer_submit_insert_at_operation() {
 
     let descriptor = directory.latest_in_table("users", "score").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
-    let values: Vec<&str> = page.page.entries.iter().map(|e| e.get_data()).collect();
-    assert_eq!(values, vec!["10", "20", "30"]);
+    let values = entry_values(&page);
+    assert_eq!(
+        values,
+        vec![
+            "10".to_string(),
+            "20".to_string(),
+            "30".to_string()
+        ]
+    );
 }
 
 #[test]
@@ -180,8 +198,9 @@ fn writer_submit_overwrite_operation() {
     // Verify the entry was overwritten
     let descriptor = directory.latest_in_table("users", "status").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
-    assert_eq!(page.page.entries.len(), 1);
-    assert_eq!(page.page.entries[0].get_data(), "active");
+    let values = entry_values(&page);
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0], "active");
 }
 
 #[test]
@@ -204,11 +223,11 @@ fn writer_submit_overwrite_extends_page() {
 
     let descriptor = directory.latest_in_table("users", "data").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
-    assert_eq!(page.page.entries.len(), 6); // 0-5 inclusive
-    assert_eq!(page.page.entries[5].get_data(), "value_at_5");
-    // Earlier entries should be empty
-    assert_eq!(page.page.entries[0].get_data(), "");
-    assert_eq!(page.page.entries[4].get_data(), "");
+    let values = entry_values(&page);
+    assert_eq!(values.len(), 6); // 0-5 inclusive
+    assert_eq!(values[5], "value_at_5");
+    assert_eq!(values[0], "");
+    assert_eq!(values[4], "");
 }
 
 #[test]
@@ -238,10 +257,15 @@ fn writer_submit_multiple_operations_same_column() {
 
     let descriptor = directory.latest_in_table("users", "tags").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
-    assert_eq!(page.page.entries.len(), 3);
-    assert_eq!(page.page.entries[0].get_data(), "tag1");
-    assert_eq!(page.page.entries[1].get_data(), "tag2");
-    assert_eq!(page.page.entries[2].get_data(), "tag3");
+    let values = entry_values(&page);
+    assert_eq!(
+        values,
+        vec![
+            "tag1".to_string(),
+            "tag2".to_string(),
+            "tag3".to_string()
+        ]
+    );
 }
 
 #[test]
@@ -267,10 +291,15 @@ fn writer_submit_sequential_jobs_ordering() {
     // All entries should be in order
     let descriptor = directory.latest_in_table("users", "counter").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
-    assert_eq!(page.page.entries.len(), 3);
-    assert_eq!(page.page.entries[0].get_data(), "value_0");
-    assert_eq!(page.page.entries[1].get_data(), "value_1");
-    assert_eq!(page.page.entries[2].get_data(), "value_2");
+    let values = entry_values(&page);
+    assert_eq!(
+        values,
+        vec![
+            "value_0".to_string(),
+            "value_1".to_string(),
+            "value_2".to_string()
+        ]
+    );
 }
 
 #[test]
@@ -525,9 +554,9 @@ fn writer_updates_existing_page() {
     let page_v2 = page_handler.get_page(desc_v2.clone()).unwrap();
 
     // New version should have both entries
-    assert_eq!(page_v2.page.entries.len(), 2);
-    assert_eq!(page_v2.page.entries[0].get_data(), "v1");
-    assert_eq!(page_v2.page.entries[1].get_data(), "v2");
+    assert_eq!(page_v2.page.len(), 2);
+    assert_eq!(entry_values(&page_v2)[0], "v1");
+    assert_eq!(entry_values(&page_v2)[1], "v2");
 
     // New version should have different ID
     assert_ne!(page_v1_id, desc_v2.id);
@@ -553,9 +582,9 @@ fn writer_large_page() {
     let descriptor = directory.latest_in_table("users", "large").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
 
-    assert_eq!(page.page.entries.len(), 1000);
-    assert_eq!(page.page.entries[0].get_data(), "entry_0");
-    assert_eq!(page.page.entries[999].get_data(), "entry_999");
+    assert_eq!(page.page.len(), 1000);
+    assert_eq!(entry_values(&page)[0], "entry_0");
+    assert_eq!(entry_values(&page)[999], "entry_999");
 }
 
 #[test]
@@ -579,8 +608,8 @@ fn writer_special_characters_in_data() {
     let descriptor = directory.latest_in_table("users", "special").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
 
-    assert_eq!(page.page.entries.len(), 1);
-    assert_eq!(page.page.entries[0].get_data(), special_data);
+    assert_eq!(page.page.len(), 1);
+    assert_eq!(entry_values(&page)[0], special_data);
 }
 
 #[test]
@@ -604,8 +633,8 @@ fn writer_unicode_data() {
     let descriptor = directory.latest_in_table("users", "unicode").unwrap();
     let page = page_handler.get_page(descriptor).unwrap();
 
-    assert_eq!(page.page.entries.len(), 1);
-    assert_eq!(page.page.entries[0].get_data(), unicode_data);
+    assert_eq!(page.page.len(), 1);
+    assert_eq!(entry_values(&page)[0], unicode_data);
 }
 
 // Integration tests
@@ -661,9 +690,9 @@ fn integration_full_write_read_cycle() {
         .get_page(price_desc)
         .expect("price page not found");
 
-    assert_eq!(id_page.page.entries[0].get_data(), "123");
-    assert_eq!(name_page.page.entries[0].get_data(), "Widget");
-    assert_eq!(price_page.page.entries[0].get_data(), "19.99");
+    assert_eq!(entry_values(&id_page)[0], "123");
+    assert_eq!(entry_values(&name_page)[0], "Widget");
+    assert_eq!(entry_values(&price_page)[0], "19.99");
 }
 
 #[test]
@@ -709,10 +738,10 @@ fn integration_write_update_read() {
     let desc = directory.latest_in_table("inventory", "stock").unwrap();
     let page = page_handler.get_page(desc).unwrap();
 
-    assert_eq!(page.page.entries.len(), 3);
-    assert_eq!(page.page.entries[0].get_data(), "100");
-    assert_eq!(page.page.entries[1].get_data(), "0"); // Updated
-    assert_eq!(page.page.entries[2].get_data(), "75");
+    assert_eq!(page.page.len(), 3);
+    assert_eq!(entry_values(&page)[0], "100");
+    assert_eq!(entry_values(&page)[1], "0"); // Updated
+    assert_eq!(entry_values(&page)[2], "75");
 }
 
 #[test]
@@ -853,10 +882,10 @@ fn integration_append_after_overwrite() {
     let desc = directory.latest_in_table("events", "log").unwrap();
     let page = page_handler.get_page(desc).unwrap();
 
-    assert_eq!(page.page.entries.len(), 3);
-    assert_eq!(page.page.entries[0].get_data(), "modified_event1");
-    assert_eq!(page.page.entries[1].get_data(), "event2");
-    assert_eq!(page.page.entries[2].get_data(), "event3");
+    assert_eq!(page.page.len(), 3);
+    assert_eq!(entry_values(&page)[0], "modified_event1");
+    assert_eq!(entry_values(&page)[1], "event2");
+    assert_eq!(entry_values(&page)[2], "event3");
 }
 
 #[test]
@@ -883,8 +912,8 @@ fn integration_create_table_plan_then_write() {
         .latest_in_table("items", "name")
         .expect("metadata committed");
     let page = page_handler.get_page(desc).expect("page available");
-    assert_eq!(page.page.entries.len(), 1);
-    assert_eq!(page.page.entries[0].get_data(), "widget");
+    assert_eq!(page.page.len(), 1);
+    assert_eq!(entry_values(&page)[0], "widget");
 }
 
 #[test]
@@ -947,12 +976,12 @@ fn integration_mixed_operations_single_job() {
     // After append: [a, B, c, d]
     // After overwrite[0]: [A, B, c, d]
     // After append: [A, B, c, d, e]
-    assert_eq!(page.page.entries.len(), 5);
-    assert_eq!(page.page.entries[0].get_data(), "A");
-    assert_eq!(page.page.entries[1].get_data(), "B");
-    assert_eq!(page.page.entries[2].get_data(), "c");
-    assert_eq!(page.page.entries[3].get_data(), "d");
-    assert_eq!(page.page.entries[4].get_data(), "e");
+    assert_eq!(page.page.len(), 5);
+    assert_eq!(entry_values(&page)[0], "A");
+    assert_eq!(entry_values(&page)[1], "B");
+    assert_eq!(entry_values(&page)[2], "c");
+    assert_eq!(entry_values(&page)[3], "d");
+    assert_eq!(entry_values(&page)[4], "e");
 }
 
 #[test]
@@ -1008,7 +1037,7 @@ fn integration_rapid_sequential_writes() {
     let page = page_handler.get_page(desc).unwrap();
 
     // All 50 entries should be present in order
-    assert_eq!(page.page.entries.len(), 50);
-    assert_eq!(page.page.entries[0].get_data(), "seq_0");
-    assert_eq!(page.page.entries[49].get_data(), "seq_49");
+    assert_eq!(page.page.len(), 50);
+    assert_eq!(entry_values(&page)[0], "seq_0");
+    assert_eq!(entry_values(&page)[49], "seq_49");
 }

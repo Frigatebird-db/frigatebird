@@ -57,8 +57,11 @@ fn debug_distinct_nullable_text_case() {
     println!("ours rows: {:?}", ours.rows);
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(sql).expect("prep duckdb");
-    let column_count = stmt.column_count();
     let mut rows = stmt.query([]).expect("duckdb query");
+    let column_count = rows
+        .as_ref()
+        .expect("statement reference")
+        .column_count();
     let mut duck_rows = Vec::new();
     use duckdb::types::ValueRef;
     while let Some(row) = rows.next().expect("duckdb step") {

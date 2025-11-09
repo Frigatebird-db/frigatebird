@@ -30,12 +30,15 @@ struct Metadata {
 pub struct PageIO {}
 
 impl PageIO {
-    pub fn read_from_path(&self, path: &str, offset: u64) -> PageCacheEntryCompressed {
-        self.read_batch_from_path(path, &[offset])
-            .expect("batch read must succeed")
+    pub fn read_from_path(
+        &self,
+        path: &str,
+        offset: u64,
+    ) -> io::Result<PageCacheEntryCompressed> {
+        self.read_batch_from_path(path, &[offset])?
             .into_iter()
             .next()
-            .expect("batch must return exactly one page")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "missing page data"))
     }
 
     #[cfg(target_os = "linux")]

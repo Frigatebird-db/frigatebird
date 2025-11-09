@@ -24,11 +24,19 @@ pub fn delete_row(
 
         let mut updated = (*page_arc).clone();
         let idx = row_idx as usize;
-        if idx >= updated.page.entries.len() {
+        let mut new_len = descriptor.entry_count;
+        let mut in_bounds = true;
+        updated.mutate_disk_page(|disk_page| {
+            if idx >= disk_page.entries.len() {
+                in_bounds = false;
+                return;
+            }
+            disk_page.entries.remove(idx);
+            new_len = disk_page.entries.len() as u64;
+        });
+        if !in_bounds {
             return Err(other_error(format!("row {row_idx} out of bounds")));
         }
-        updated.page.entries.remove(idx);
-        let new_len = updated.page.entries.len() as u64;
         handler.write_back_uncompressed(&descriptor.id, updated);
         handler
             .update_entry_count_in_table(table, &column.name, new_len)

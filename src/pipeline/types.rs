@@ -67,11 +67,15 @@ impl PipelineStep {
 
         let mut base_row = 0usize;
         for page in pages {
-            let entries = &page.page.entries;
+            let page_len = page.page.len();
             let mut passing_rows = Vec::new();
 
-            for (i, entry) in entries.iter().enumerate() {
+            for i in 0..page_len {
                 let row_id = base_row + i;
+                let entry = match page.page.entry_at(i) {
+                    Some(entry) => entry,
+                    None => continue,
+                };
                 let value = entry.get_data();
                 if self
                     .filters
@@ -88,7 +92,7 @@ impl PipelineStep {
                 }
             }
 
-            base_row += entries.len();
+            base_row += page_len;
         }
         let _ = self.current_producer.send(Vec::new());
     }

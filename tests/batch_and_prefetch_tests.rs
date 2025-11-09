@@ -3,7 +3,9 @@ use idk_uwu_ig::cache::page_cache::{
 };
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDescriptor, PageDirectory, TableMetaStore};
+use idk_uwu_ig::metadata_store::{
+    PageDescriptor, PageDirectory, TableMetaStore, ROWS_PER_PAGE_GROUP,
+};
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
@@ -112,7 +114,7 @@ fn ensure_pages_cached_already_cached() {
         .register_page("col1", "test.db".to_string(), 0)
         .unwrap();
     let page = create_test_page(5);
-    handler.write_back_uncompressed(&desc.id, PageCacheEntryUncompressed { page });
+    handler.write_back_uncompressed(&desc.id, PageCacheEntryUncompressed::from_disk_page(page));
 
     // Call again - should be no-op
     handler.ensure_pages_cached(&[desc.id.clone()]);
@@ -151,11 +153,11 @@ fn compress_alternating_pattern() {
         }
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(decompressed.page.entries.len(), 100);
+    assert_eq!(decompressed.len(), 100);
 }
 
 #[test]
@@ -169,11 +171,11 @@ fn compress_random_binary_data() {
         page.add_entry(Entry::new(&random_like));
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(decompressed.page.entries.len(), 50);
+    assert_eq!(decompressed.len(), 50);
 }
 
 #[test]
@@ -187,7 +189,7 @@ fn compress_degenerate_case_all_same_char() {
     }
 
     let original_size = bincode::serialize(&page).unwrap().len();
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
 
     // Should compress extremely well
@@ -274,14 +276,19 @@ fn column_chain_handles_many_versions() {
     let directory = Arc::new(PageDirectory::new(store));
 
     for i in 0..20 {
+        let entry_count = if i == 19 {
+            ROWS_PER_PAGE_GROUP / 2
+        } else {
+            ROWS_PER_PAGE_GROUP
+        };
         directory
             .register_page_with_sizes(
                 "col1",
                 format!("test{}.db", i),
                 i * 1024,
                 256 * 1024,
-                (i + 1) as u64,
-                (i + 1) as u64,
+                entry_count,
+                entry_count,
             )
             .unwrap();
     }
@@ -289,10 +296,11 @@ fn column_chain_handles_many_versions() {
     let latest = directory.latest("col1").unwrap();
     assert_eq!(latest.disk_path, "test19.db");
     assert_eq!(latest.offset, 19 * 1024);
-    assert_eq!(latest.entry_count, 20);
+    assert_eq!(latest.entry_count, ROWS_PER_PAGE_GROUP / 2);
 
-    let slices = directory.locate_range("col1", 0, 400);
+    let total_rows = 19 * ROWS_PER_PAGE_GROUP + (ROWS_PER_PAGE_GROUP / 2);
+    let slices = directory.locate_range("col1", 0, total_rows.saturating_sub(1));
     assert_eq!(slices.len(), 20);
-    assert_eq!(slices[0].descriptor.entry_count, 1);
-    assert_eq!(slices[19].descriptor.entry_count, 20);
+    assert_eq!(slices[0].descriptor.entry_count, ROWS_PER_PAGE_GROUP);
+    assert_eq!(slices[19].descriptor.entry_count, ROWS_PER_PAGE_GROUP / 2);
 }

@@ -1,3 +1,4 @@
+pub mod batch;
 mod aggregates;
 mod expressions;
 mod grouping_helpers;
@@ -10,15 +11,20 @@ mod scan_helpers;
 mod values;
 mod window_helpers;
 
+use self::batch::ColumnarPage;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
-use crate::metadata_store::{ColumnCatalog, PageDirectory};
+use crate::metadata_store::{ColumnCatalog, PageDescriptor, PageDirectory};
 use crate::ops_handler::{
     create_table_from_plan, delete_row, insert_sorted_row, overwrite_row, read_row,
 };
 use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
+use crate::writer::{
+    ColumnUpdate, DirectBlockAllocator, DirectoryMetadataClient, MetadataClient, PageAllocator,
+    UpdateJob, UpdateOp, Writer,
+};
 use sqlparser::ast::{
     Assignment, BinaryOperator, Expr, FromTable, FunctionArg, FunctionArgExpr, GroupByExpr, Ident,
     ObjectName, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
@@ -33,7 +39,10 @@ use aggregates::{
     AggregateDataset, AggregateProjectionPlan, MaterializedColumns, WindowResultMap,
     evaluate_aggregate_outputs, plan_aggregate_projection, select_item_contains_aggregate,
 };
-use expressions::{evaluate_row_expr, evaluate_scalar_expression, evaluate_selection_expr};
+use expressions::{
+    evaluate_row_expr, evaluate_scalar_expression, evaluate_selection_expr,
+    evaluate_selection_on_page,
+};
 use grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
 use helpers::{
     collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
@@ -355,13 +364,34 @@ const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
 pub struct SqlExecutor {
     page_handler: Arc<PageHandler>,
     page_directory: Arc<PageDirectory>,
+    writer: Arc<Writer>,
+    use_writer_inserts: bool,
 }
 
 impl SqlExecutor {
     pub fn new(page_handler: Arc<PageHandler>, page_directory: Arc<PageDirectory>) -> Self {
+        Self::new_with_writer_mode(page_handler, page_directory, true)
+    }
+
+    pub fn new_with_writer_mode(
+        page_handler: Arc<PageHandler>,
+        page_directory: Arc<PageDirectory>,
+        use_writer_inserts: bool,
+    ) -> Self {
+        let allocator: Arc<dyn PageAllocator> =
+            Arc::new(DirectBlockAllocator::new().expect("allocator init failed"));
+        let metadata_client: Arc<dyn MetadataClient> =
+            Arc::new(DirectoryMetadataClient::new(Arc::clone(&page_directory)));
+        let writer = Arc::new(Writer::new(
+            Arc::clone(&page_handler),
+            allocator,
+            metadata_client,
+        ));
         Self {
             page_handler,
             page_directory,
+            writer,
+            use_writer_inserts,
         }
     }
 
@@ -1086,6 +1116,122 @@ impl SqlExecutor {
     }
 
     fn execute_insert(&self, statement: Statement) -> Result<(), SqlExecutionError> {
+        if self.use_writer_inserts {
+            self.execute_insert_writer(statement)
+        } else {
+            self.execute_insert_legacy(statement)
+        }
+    }
+
+    fn execute_insert_writer(&self, statement: Statement) -> Result<(), SqlExecutionError> {
+        let Statement::Insert {
+            table_name,
+            columns: specified_columns,
+            source,
+            ..
+        } = statement
+        else {
+            unreachable!("matched Insert above");
+        };
+
+        let table = object_name_to_string(&table_name);
+        let query = source
+            .as_ref()
+            .ok_or_else(|| SqlExecutionError::Unsupported("INSERT without VALUES".into()))?;
+
+        let SetExpr::Values(values) = query.body.as_ref() else {
+            return Err(SqlExecutionError::Unsupported(
+                "only INSERT ... VALUES is supported".into(),
+            ));
+        };
+
+        let catalog = self
+            .page_directory
+            .table_catalog(&table)
+            .ok_or_else(|| SqlExecutionError::TableNotFound(table.clone()))?;
+        let columns: Vec<ColumnCatalog> = catalog.columns().to_vec();
+
+        let mut column_ordinals: HashMap<String, usize> = HashMap::new();
+        for column in &columns {
+            column_ordinals.insert(column.name.clone(), column.ordinal);
+        }
+
+        let specified_ordinals: Vec<usize> = if specified_columns.is_empty() {
+            (0..columns.len()).collect()
+        } else {
+            specified_columns
+                .iter()
+                .map(|ident| {
+                    let name = ident.value.clone();
+                    column_ordinals.get(&name).copied().ok_or_else(|| {
+                        SqlExecutionError::ColumnMismatch {
+                            table: table.clone(),
+                            column: name,
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let sort_indices: Vec<usize> = catalog.sort_key().iter().map(|col| col.ordinal).collect();
+        if sort_indices.is_empty() {
+            return Err(SqlExecutionError::Unsupported(
+                "INSERT currently requires ORDER BY tables".into(),
+            ));
+        }
+        for row in &values.rows {
+            if row.len() != specified_ordinals.len() {
+                return Err(SqlExecutionError::ValueMismatch(format!(
+                    "expected {} values, got {}",
+                    specified_ordinals.len(),
+                    row.len()
+                )));
+            }
+
+            let mut row_values: Vec<Option<String>> = vec![None; columns.len()];
+            for (expr, &ordinal) in row.iter().zip(&specified_ordinals) {
+                let literal = expr_to_string(expr)?;
+                row_values[ordinal] = Some(literal);
+            }
+
+            for &ordinal in &sort_indices {
+                if row_values[ordinal].is_none() {
+                    return Err(SqlExecutionError::ValueMismatch(format!(
+                        "missing value for sort column {}",
+                        columns[ordinal].name
+                    )));
+                }
+            }
+
+            let final_row: Vec<String> = row_values
+                .into_iter()
+                .map(|value| value.unwrap_or_default())
+                .collect();
+
+            let column_update = ColumnUpdate::new(
+                "*",
+                vec![UpdateOp::BufferRow {
+                    row: final_row,
+                }],
+            );
+            let job = UpdateJob::new(table.clone(), vec![column_update]);
+            self.writer.submit(job).map_err(|err| {
+                SqlExecutionError::OperationFailed(format!(
+                    "failed to submit insert job: {err:?}"
+                ))
+            })?;
+        }
+
+        if !values.rows.is_empty() {
+            self.writer
+                .flush_table(&table)
+                .map_err(|err| SqlExecutionError::OperationFailed(format!("flush failed: {err:?}")))?;
+        }
+
+        Ok(())
+    }
+
+    fn execute_insert_legacy(&self, statement: Statement) -> Result<(), SqlExecutionError> {
         let Statement::Insert {
             table_name,
             columns: specified_columns,
@@ -1546,8 +1692,10 @@ impl SqlExecutor {
             let mut page = Page::new();
             page.page_metadata = descriptor.id.clone();
             page.entries.push(Entry::new(&row[column.ordinal]));
-            self.page_handler
-                .write_back_uncompressed(&descriptor.id, PageCacheEntryUncompressed { page });
+            self.page_handler.write_back_uncompressed(
+                &descriptor.id,
+                PageCacheEntryUncompressed::from_disk_page(page),
+            );
             self.page_handler
                 .update_entry_count_in_table(table, &column.name, 1)
                 .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
@@ -1577,7 +1725,8 @@ impl SqlExecutor {
                 .page_handler
                 .get_page(descriptor.clone())
                 .ok_or_else(|| SqlExecutionError::OperationFailed("unable to load page".into()))?;
-            let entries = &page.page.entries;
+            let disk_page = page.page.as_disk_page();
+            let entries = disk_page.entries;
             if entries.is_empty() {
                 continue;
             }
@@ -1645,6 +1794,149 @@ impl SqlExecutor {
     }
 
     fn scan_rows_via_full_table(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        required_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&Expr>,
+        column_ordinals: &HashMap<String, usize>,
+    ) -> Result<Vec<u64>, SqlExecutionError> {
+        match self.scan_and_filter_vectorized(
+            table,
+            columns,
+            required_ordinals,
+            selection_expr,
+            column_ordinals,
+        ) {
+            Ok(rows) => Ok(rows),
+            Err(SqlExecutionError::Unsupported(_)) => self.scan_rows_rowwise(
+                table,
+                columns,
+                required_ordinals,
+                selection_expr,
+                column_ordinals,
+            ),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn scan_and_filter_vectorized(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        required_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&Expr>,
+        column_ordinals: &HashMap<String, usize>,
+    ) -> Result<Vec<u64>, SqlExecutionError> {
+        if columns.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let leading_column = &columns[0].name;
+        let lead_pages = self.page_handler.list_pages_in_table(table, leading_column);
+        if lead_pages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut predicate_columns = BTreeSet::new();
+        if let Some(expr) = selection_expr {
+            collect_expr_column_names(expr, &mut predicate_columns);
+            if predicate_columns.is_empty() {
+                return Err(SqlExecutionError::Unsupported(
+                    "vectorized scan requires column references in the predicate".into(),
+                ));
+            }
+        }
+
+        let mut descriptor_map: HashMap<String, Vec<PageDescriptor>> = HashMap::new();
+        if selection_expr.is_some() {
+            for column in &predicate_columns {
+                let descriptors = self.page_handler.list_pages_in_table(table, column);
+                if descriptors.len() != lead_pages.len() {
+                    return Err(SqlExecutionError::Unsupported(
+                        "vectorized scan requires aligned page descriptors across columns".into(),
+                    ));
+                }
+                descriptor_map.insert(column.clone(), descriptors);
+            }
+        }
+
+        let mut base_row = 0u64;
+        let mut matching_rows = Vec::new();
+
+        for (idx, descriptor) in lead_pages.iter().enumerate() {
+            let page_row_count = descriptor.entry_count as usize;
+
+            if selection_expr.is_none() {
+                for local_idx in 0..page_row_count {
+                    matching_rows.push(base_row + local_idx as u64);
+                }
+            } else {
+                let mut column_pages: Vec<(String, Arc<PageCacheEntryUncompressed>)> =
+                    Vec::with_capacity(predicate_columns.len());
+
+                for column in &predicate_columns {
+                    let descriptors = descriptor_map.get(column).ok_or_else(|| {
+                        SqlExecutionError::OperationFailed(format!(
+                            "missing page descriptors for column {column}"
+                        ))
+                    })?;
+                    let column_descriptor = descriptors.get(idx).ok_or_else(|| {
+                        SqlExecutionError::OperationFailed(format!(
+                            "descriptor misalignment for column {column}"
+                        ))
+                    })?;
+                    let page = self
+                        .page_handler
+                        .get_page(column_descriptor.clone())
+                        .ok_or_else(|| {
+                            SqlExecutionError::OperationFailed(format!(
+                                "unable to load page {} for column {column}",
+                                column_descriptor.id
+                            ))
+                        })?;
+                    column_pages.push((column.clone(), page));
+                }
+
+                let mut page_refs: HashMap<String, &ColumnarPage> =
+                    HashMap::with_capacity(predicate_columns.len());
+                for (name, page_arc) in &column_pages {
+                    page_refs.insert(name.clone(), &page_arc.page);
+                }
+
+                let num_rows = page_refs
+                    .values()
+                    .next()
+                    .map(|page| page.len())
+                    .unwrap_or(page_row_count);
+                let bitmap = match evaluate_selection_on_page(
+                    selection_expr.expect("selection expression is present"),
+                    &page_refs,
+                ) {
+                    Ok(bitmap) => bitmap,
+                    Err(SqlExecutionError::Unsupported(_)) => {
+                        return Err(SqlExecutionError::Unsupported(
+                            "vectorized predicate evaluation not supported for expression".into(),
+                        ));
+                    }
+                    Err(err) => return Err(err),
+                };
+                drop(column_pages);
+
+                for local_idx in bitmap.ones_indices() {
+                    if local_idx < num_rows {
+                        matching_rows.push(base_row + local_idx as u64);
+                    }
+                }
+            }
+
+            base_row += descriptor.entry_count;
+        }
+
+        Ok(matching_rows)
+    }
+
+    fn scan_rows_rowwise(
         &self,
         table: &str,
         columns: &[ColumnCatalog],

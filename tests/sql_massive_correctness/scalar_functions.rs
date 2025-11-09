@@ -141,9 +141,21 @@ fn width_bucket_function() {
         "SELECT \
             id, \
             price, \
-            CAST(LEAST(FLOOR((price - 0) / ((1000 - 0) / 10.0)), 10 - 1) + 1 AS BIGINT) AS price_bucket, \
+            CAST( \
+                CASE \
+                    WHEN price < 0 THEN 0 \
+                    WHEN price > 1000 THEN 10 + 1 \
+                    WHEN price = 1000 THEN 10 \
+                    ELSE FLOOR((price - 0) / ((1000 - 0) / 10.0)) + 1 \
+                END AS BIGINT) AS price_bucket, \
             quantity, \
-            CAST(LEAST(FLOOR((quantity - 0) / ((5000 - 0) / 20.0)), 20 - 1) + 1 AS BIGINT) AS qty_bucket \
+            CAST( \
+                CASE \
+                    WHEN quantity < 0 THEN 0 \
+                    WHEN quantity > 5000 THEN 20 + 1 \
+                    WHEN quantity = 5000 THEN 20 \
+                    ELSE FLOOR((quantity - 0) / ((5000 - 0) / 20.0)) + 1 \
+                END AS BIGINT) AS qty_bucket \
          FROM {table} \
          WHERE id <= 100 \
          ORDER BY id \

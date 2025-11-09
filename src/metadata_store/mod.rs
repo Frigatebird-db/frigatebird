@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 pub const DEFAULT_TABLE: &str = "_default";
+pub const ROWS_PER_PAGE_GROUP: u64 = 1024;
 
 fn split_table_column(identifier: &str) -> (&str, &str) {
     if let Some(pos) = identifier.find('.') {
@@ -54,6 +55,7 @@ pub struct TableDefinition {
     pub name: String,
     pub columns: Vec<ColumnDefinition>,
     pub sort_key: Vec<String>,
+    pub rows_per_page_group: u64,
 }
 
 impl TableDefinition {
@@ -66,6 +68,7 @@ impl TableDefinition {
             name: name.into(),
             columns,
             sort_key,
+            rows_per_page_group: ROWS_PER_PAGE_GROUP,
         }
     }
 }
@@ -85,6 +88,7 @@ pub struct TableCatalog {
     columns: Vec<ColumnCatalog>,
     column_index: HashMap<String, usize>,
     sort_key_ordinals: Vec<usize>,
+    pub rows_per_page_group: u64,
 }
 
 impl TableCatalog {
@@ -93,12 +97,14 @@ impl TableCatalog {
         columns: Vec<ColumnCatalog>,
         column_index: HashMap<String, usize>,
         sort_key_ordinals: Vec<usize>,
+        rows_per_page_group: u64,
     ) -> Self {
         TableCatalog {
             name,
             columns,
             column_index,
             sort_key_ordinals,
+            rows_per_page_group,
         }
     }
 
@@ -201,22 +207,17 @@ impl PageDescriptor {
 #[derive(Clone, Debug)]
 struct ColumnChain {
     pages: Vec<PageDescriptor>,
-    prefix_entries: Vec<u64>,
 }
 
 impl ColumnChain {
     fn new() -> Self {
         ColumnChain {
             pages: Vec::with_capacity(8),
-            prefix_entries: Vec::with_capacity(8),
         }
     }
 
     fn push(&mut self, descriptor: PageDescriptor) {
-        let prev = self.prefix_entries.last().copied().unwrap_or(0);
-        let next = prev + descriptor.entry_count;
         self.pages.push(descriptor);
-        self.prefix_entries.push(next);
     }
 
     fn replace_last(&mut self, descriptor: PageDescriptor) {
@@ -225,50 +226,19 @@ impl ColumnChain {
             return;
         }
 
-        let old_count = self.pages.last().map(|p| p.entry_count).unwrap_or(0);
-        let delta = descriptor.entry_count as i64 - old_count as i64;
-
         if let Some(last_page) = self.pages.last_mut() {
             *last_page = descriptor;
         }
-
-        if delta != 0 {
-            let len = self.prefix_entries.len();
-            apply_delta_suffix(&mut self.prefix_entries[len - 1..], delta);
-        }
-
-        let new_entry_count = self.pages.last().map(|p| p.entry_count).unwrap_or(0);
-        let base = if self.prefix_entries.len() >= 2 {
-            self.prefix_entries[self.prefix_entries.len() - 2]
-        } else {
-            0
-        };
-
-        if let Some(last_prefix) = self.prefix_entries.last_mut() {
-            *last_prefix = base + new_entry_count;
-        }
     }
 
-    fn total_entries(&self) -> u64 {
-        self.prefix_entries.last().copied().unwrap_or(0)
-    }
+    fn total_entries(&self, rows_per_page_group: u64) -> u64 {
+        if self.pages.is_empty() {
+            return 0;
+        }
 
-    fn find_page_index(&self, row: u64) -> Option<usize> {
-        let total = self.total_entries();
-        if row >= total {
-            return None;
-        }
-        let mut lo = 0;
-        let mut hi = self.prefix_entries.len();
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if self.prefix_entries[mid] <= row {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        Some(lo)
+        let full_groups = self.pages.len().saturating_sub(1) as u64;
+        let last_page_entries = self.pages.last().map(|p| p.entry_count).unwrap_or(0);
+        full_groups * rows_per_page_group + last_page_entries
     }
 
     fn last(&self) -> Option<PageDescriptor> {
@@ -279,84 +249,15 @@ impl ColumnChain {
         self.pages.clone()
     }
 
-    fn locate_row(&self, row: u64) -> Option<RowLocation> {
-        let page_index = self.find_page_index(row)?;
-        let page = self.pages[page_index].clone();
-        let previous_prefix = if page_index == 0 {
-            0
-        } else {
-            self.prefix_entries[page_index - 1]
-        };
-        let page_row_index = row.saturating_sub(previous_prefix);
-        Some(RowLocation {
-            descriptor: page,
-            page_row_index,
-        })
-    }
-
     fn update_last_entry_count(&mut self, entry_count: u64) -> Option<PageDescriptor> {
         if self.pages.is_empty() {
             return None;
         }
         let last_idx = self.pages.len() - 1;
         self.pages[last_idx].entry_count = entry_count;
-        let base = if last_idx == 0 {
-            0
-        } else {
-            self.prefix_entries[last_idx - 1]
-        };
-        if let Some(prefix) = self.prefix_entries.get_mut(last_idx) {
-            *prefix = base + entry_count;
-        }
         self.pages.last().cloned()
     }
 
-    fn locate_range(&self, start_row: u64, end_row: u64) -> Vec<PageSlice> {
-        if self.pages.is_empty() || start_row > end_row {
-            return Vec::new();
-        }
-
-        let total = self.total_entries();
-        if total == 0 || start_row >= total {
-            return Vec::new();
-        }
-
-        let clamped_end = end_row.min(total.saturating_sub(1));
-        let start_idx = match self.find_page_index(start_row) {
-            Some(idx) => idx,
-            None => return Vec::new(),
-        };
-        let end_idx = match self.find_page_index(clamped_end) {
-            Some(idx) => idx,
-            None => return Vec::new(),
-        };
-
-        let mut slices = Vec::with_capacity(end_idx - start_idx + 1);
-        for idx in start_idx..=end_idx {
-            let prev = if idx == 0 {
-                0
-            } else {
-                self.prefix_entries[idx - 1]
-            };
-            let page_start = if idx == start_idx {
-                start_row.saturating_sub(prev)
-            } else {
-                0
-            };
-            let page_end_exclusive = if idx == end_idx {
-                (clamped_end.saturating_sub(prev)) + 1
-            } else {
-                self.pages[idx].entry_count
-            };
-            slices.push(PageSlice {
-                descriptor: self.pages[idx].clone(),
-                start_row_offset: page_start,
-                end_row_offset: page_end_exclusive.min(self.pages[idx].entry_count),
-            });
-        }
-
-        slices
-    }
 }
 
 /// Describes where a logical row falls within a page.
@@ -418,6 +319,7 @@ impl TableMetaStore {
                 }],
                 column_index,
                 Vec::new(),
+                ROWS_PER_PAGE_GROUP,
             );
             self.tables.insert(DEFAULT_TABLE.to_string(), catalog);
             self.column_chains.insert(
@@ -444,6 +346,7 @@ impl TableMetaStore {
             name,
             columns,
             sort_key,
+            rows_per_page_group,
         } = definition;
 
         if self.tables.contains_key(&name) {
@@ -503,6 +406,7 @@ impl TableMetaStore {
             catalog_columns,
             column_index,
             sort_key_ordinals,
+            rows_per_page_group,
         );
         self.tables.insert(name, catalog);
         Ok(())
@@ -574,10 +478,24 @@ impl TableMetaStore {
     }
 
     pub fn locate_row(&self, table: &str, column: &str, row: u64) -> Option<RowLocation> {
+        let catalog = self.tables.get(table)?;
+        let rows_per_page_group = catalog.rows_per_page_group;
+
         let key = TableColumnKey::new(table, column);
-        self.column_chains
-            .get(&key)
-            .and_then(|chain| chain.locate_row(row))
+        let chain = self.column_chains.get(&key)?;
+
+        if row >= chain.total_entries(rows_per_page_group) {
+            return None;
+        }
+
+        let page_index = (row / rows_per_page_group) as usize;
+        let descriptor = chain.pages.get(page_index)?.clone();
+        let page_row_index = row % rows_per_page_group;
+
+        Some(RowLocation {
+            descriptor,
+            page_row_index,
+        })
     }
 
     pub fn locate_range(
@@ -587,11 +505,59 @@ impl TableMetaStore {
         start_row: u64,
         end_row: u64,
     ) -> Vec<PageSlice> {
+        let catalog = match self.tables.get(table) {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let rows_per_page_group = catalog.rows_per_page_group;
+
         let key = TableColumnKey::new(table, column);
-        self.column_chains
-            .get(&key)
-            .map(|chain| chain.locate_range(start_row, end_row))
-            .unwrap_or_default()
+        let chain = match self.column_chains.get(&key) {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+
+        if chain.pages.is_empty() || start_row > end_row {
+            return Vec::new();
+        }
+
+        let total = chain.total_entries(rows_per_page_group);
+        if total == 0 || start_row >= total {
+            return Vec::new();
+        }
+
+        let clamped_end_row = end_row.min(total.saturating_sub(1));
+        let start_page_idx = (start_row / rows_per_page_group) as usize;
+        let end_page_idx = (clamped_end_row / rows_per_page_group) as usize;
+
+        let mut slices = Vec::with_capacity(end_page_idx - start_page_idx + 1);
+        for idx in start_page_idx..=end_page_idx {
+            let descriptor = match chain.pages.get(idx) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+
+            let slice_start_offset = if idx == start_page_idx {
+                start_row % rows_per_page_group
+            } else {
+                0
+            };
+
+            let mut slice_end_offset = if idx == end_page_idx {
+                (clamped_end_row % rows_per_page_group) + 1
+            } else {
+                rows_per_page_group
+            };
+            slice_end_offset = slice_end_offset.min(descriptor.entry_count);
+
+            slices.push(PageSlice {
+                descriptor,
+                start_row_offset: slice_start_offset,
+                end_row_offset: slice_end_offset,
+            });
+        }
+
+        slices
     }
 
     pub fn register_page(
@@ -936,58 +902,4 @@ impl PageDirectory {
             .map_err(|_| CatalogError::StoreUnavailable)?;
         guard.update_latest_entry_count(table, column, entry_count)
     }
-}
-
-#[inline]
-fn apply_delta_suffix(entries: &mut [u64], delta: i64) {
-    if delta == 0 || entries.is_empty() {
-        return;
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::arch::is_x86_feature_detected!("avx2") && entries.len() >= 8 {
-            unsafe {
-                add_delta_suffix_avx2(entries, delta);
-            }
-            return;
-        }
-    }
-
-    apply_delta_suffix_scalar(entries, delta);
-}
-
-#[inline]
-fn apply_delta_suffix_scalar(entries: &mut [u64], delta: i64) {
-    if delta >= 0 {
-        let delta_u = delta as u64;
-        for value in entries {
-            *value = value.wrapping_add(delta_u);
-        }
-    } else {
-        let delta_u = (-delta) as u64;
-        for value in entries {
-            *value = value.wrapping_sub(delta_u);
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn add_delta_suffix_avx2(entries: &mut [u64], delta: i64) {
-    use std::arch::x86_64::{
-        __m256i, _mm256_add_epi64, _mm256_loadu_si256, _mm256_set1_epi64x, _mm256_storeu_si256,
-    };
-
-    let delta_vec = _mm256_set1_epi64x(delta);
-    let mut chunks = entries.chunks_exact_mut(4);
-    for chunk in &mut chunks {
-        let ptr = chunk.as_mut_ptr() as *mut __m256i;
-        let current = _mm256_loadu_si256(ptr as *const __m256i);
-        let updated = _mm256_add_epi64(current, delta_vec);
-        _mm256_storeu_si256(ptr, updated);
-    }
-
-    let remainder = chunks.into_remainder();
-    apply_delta_suffix_scalar(remainder, delta);
 }
