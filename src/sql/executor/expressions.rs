@@ -11,7 +11,7 @@ use super::values::{
     compare_strs, is_encoded_null, scalar_from_f64,
 };
 use crate::metadata_store::TableCatalog;
-use sqlparser::ast::{BinaryOperator, Expr, Function, UnaryOperator, Value};
+use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -520,7 +520,9 @@ pub(super) fn evaluate_row_expr(
         ),
         Expr::Function(function) => {
             if function.over.is_some() {
-                evaluate_window_function(function, row_idx, dataset)
+                Err(SqlExecutionError::Unsupported(
+                    "window functions are not supported in row expressions".into(),
+                ))
             } else {
                 evaluate_row_function(function, row_idx, dataset)
             }
@@ -677,21 +679,6 @@ fn evaluate_row_case_expr(
     } else {
         Ok(ScalarValue::Null)
     }
-}
-
-fn evaluate_window_function(
-    function: &Function,
-    row_idx: u64,
-    dataset: &AggregateDataset,
-) -> Result<ScalarValue, SqlExecutionError> {
-    let key = function.to_string();
-    let position = dataset.row_position(row_idx).ok_or_else(|| {
-        SqlExecutionError::Unsupported("window functions are not supported in this context".into())
-    })?;
-    dataset
-        .window_value(&key, position)
-        .cloned()
-        .ok_or_else(|| SqlExecutionError::OperationFailed("window result out of bounds".into()))
 }
 
 pub(super) fn evaluate_selection_expr(
@@ -1237,6 +1224,18 @@ fn resolve_batch_column(
     batch: &ColumnarBatch,
     catalog: &TableCatalog,
 ) -> Result<ColumnarPage, SqlExecutionError> {
+    if let Some(&ordinal) = batch.aliases.get(name) {
+        return batch
+            .columns
+            .get(&ordinal)
+            .cloned()
+            .ok_or_else(|| {
+                SqlExecutionError::OperationFailed(format!(
+                    "missing computed column {name} in vectorized batch"
+                ))
+            });
+    }
+
     let column = catalog.column(name).ok_or_else(|| SqlExecutionError::ColumnMismatch {
         table: catalog.name.clone(),
         column: name.to_string(),

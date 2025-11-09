@@ -210,10 +210,11 @@ pub struct ColumnarPage {
     pub num_rows: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Default)]
 pub struct ColumnarBatch {
     pub columns: HashMap<usize, ColumnarPage>,
     pub num_rows: usize,
+    pub aliases: HashMap<String, usize>,
 }
 
 impl ColumnarBatch {
@@ -221,6 +222,7 @@ impl ColumnarBatch {
         Self {
             columns: HashMap::new(),
             num_rows: 0,
+            aliases: HashMap::new(),
         }
     }
 
@@ -228,6 +230,7 @@ impl ColumnarBatch {
         Self {
             columns: HashMap::with_capacity(capacity),
             num_rows: 0,
+            aliases: HashMap::new(),
         }
     }
 
@@ -242,6 +245,60 @@ impl ColumnarBatch {
         ColumnarBatch {
             columns,
             num_rows: indices.len(),
+            aliases: self.aliases.clone(),
+        }
+    }
+
+    pub fn slice(&self, start: usize, end: usize) -> Self {
+        if start >= end || start >= self.num_rows {
+            return ColumnarBatch::new();
+        }
+        let end = end.min(self.num_rows);
+        let mut columns = HashMap::with_capacity(self.columns.len());
+        for (ordinal, page) in &self.columns {
+            columns.insert(*ordinal, page.slice(start, end));
+        }
+        ColumnarBatch {
+            columns,
+            num_rows: end - start,
+            aliases: self.aliases.clone(),
+        }
+    }
+
+    pub fn append(&mut self, other: &Self) {
+        if other.num_rows == 0 {
+            return;
+        }
+        if self.columns.is_empty() {
+            *self = other.clone();
+            return;
+        }
+        for (ordinal, page) in &other.columns {
+            self.columns
+                .entry(*ordinal)
+                .and_modify(|existing| existing.append(page))
+                .or_insert_with(|| page.clone());
+        }
+        self.num_rows += other.num_rows;
+        if self.aliases != other.aliases {
+            for (alias, ordinal) in &other.aliases {
+                self.aliases.insert(alias.clone(), *ordinal);
+            }
+        }
+    }
+
+    pub fn filter_by_bitmap(&self, bitmap: &Bitmap) -> Self {
+        if bitmap.count_ones() == self.num_rows {
+            return self.clone();
+        }
+        let mut columns = HashMap::with_capacity(self.columns.len());
+        for (ordinal, page) in &self.columns {
+            columns.insert(*ordinal, page.filter_by_bitmap(bitmap));
+        }
+        ColumnarBatch {
+            columns,
+            num_rows: bitmap.count_ones(),
+            aliases: self.aliases.clone(),
         }
     }
 }
@@ -474,6 +531,53 @@ impl ColumnarPage {
             data,
             null_bitmap,
             num_rows: indices.len(),
+        }
+    }
+
+    pub fn slice(&self, start: usize, end: usize) -> Self {
+        if start >= end || start >= self.num_rows {
+            return self.empty_like();
+        }
+        let end = end.min(self.num_rows);
+        let len = end - start;
+        let mut null_bitmap = Bitmap::new(len);
+        let data = match &self.data {
+            ColumnData::Int64(values) => {
+                let mut sliced = Vec::with_capacity(len);
+                for (out_idx, idx) in (start..end).enumerate() {
+                    sliced.push(values[idx]);
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Int64(sliced)
+            }
+            ColumnData::Float64(values) => {
+                let mut sliced = Vec::with_capacity(len);
+                for (out_idx, idx) in (start..end).enumerate() {
+                    sliced.push(values[idx]);
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Float64(sliced)
+            }
+            ColumnData::Text(values) => {
+                let mut sliced = Vec::with_capacity(len);
+                for (out_idx, idx) in (start..end).enumerate() {
+                    sliced.push(values[idx].clone());
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Text(sliced)
+            }
+        };
+        ColumnarPage {
+            page_metadata: self.page_metadata.clone(),
+            data,
+            null_bitmap,
+            num_rows: len,
         }
     }
 

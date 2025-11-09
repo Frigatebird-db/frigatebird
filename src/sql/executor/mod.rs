@@ -12,7 +12,7 @@ mod scan_helpers;
 mod values;
 mod window_helpers;
 
-use self::batch::{ColumnarBatch, ColumnarPage};
+use self::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{ColumnCatalog, PageDescriptor, PageDirectory, TableCatalog};
@@ -27,35 +27,33 @@ use crate::writer::{
     UpdateJob, UpdateOp, Writer,
 };
 use sqlparser::ast::{
-    Assignment, BinaryOperator, Expr, FromTable, FunctionArg, FunctionArgExpr, GroupByExpr, Ident,
-    ObjectName, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
-    TableWithJoins, UnaryOperator, Value, WindowFrameBound, WindowFrameUnits, WindowType,
+    Assignment, BinaryOperator, Expr, FromTable, GroupByExpr, Ident, ObjectName, Offset,
+    OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,
+    UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use aggregates::{
     AggregateDataset, AggregateFunctionKind, AggregateFunctionPlan, AggregateProjection,
-    AggregateProjectionPlan, AggregateState, AggregationHashTable, MaterializedColumns,
-    WindowResultMap, evaluate_aggregate_outputs, plan_aggregate_projection,
-    select_item_contains_aggregate, vectorized_average_update, vectorized_count_star_update,
-    vectorized_count_value_update, vectorized_sum_update,
+    AggregateProjectionPlan, AggregateState, AggregationHashTable, evaluate_aggregate_outputs,
+    plan_aggregate_projection, select_item_contains_aggregate, vectorized_average_update,
+    vectorized_count_star_update, vectorized_count_value_update, vectorized_sum_update,
 };
 use expressions::{
-    evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
-    evaluate_selection_expr, evaluate_selection_on_page,
+    evaluate_expression_on_batch, evaluate_row_expr, evaluate_selection_expr,
+    evaluate_selection_on_page,
 };
 use grouping_helpers::{evaluate_group_key, evaluate_group_keys_on_batch, evaluate_having, validate_group_by};
 use helpers::{
     collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
-    object_name_matches_table, object_name_to_string, parse_interval_seconds, parse_limit,
-    parse_offset, table_with_joins_to_name, wildcard_options_supported,
+    object_name_to_string, parse_limit, parse_offset, table_with_joins_to_name,
 };
 use ordering::{
-    NullsPlacement, OrderClause, OrderKey, build_group_order_key, build_order_keys_on_batch,
-    build_row_order_key, compare_order_keys, sort_batch_in_memory, sort_rows_logical,
+    NullsPlacement, OrderClause, OrderKey, build_group_order_key, compare_order_keys,
+    sort_batch_in_memory, sort_rows_logical,
 };
 use projection_helpers::{build_projection, materialize_columns};
 use scan_helpers::collect_sort_key_filters;
@@ -63,8 +61,8 @@ use values::{
     CachedValue, ScalarValue, combine_numeric, compare_scalar_values, compare_strs, scalar_from_f64,
 };
 use window_helpers::{
-    collect_window_function_plans, collect_window_plans_from_expr, compute_window_results,
-    plan_order_clauses,
+    collect_window_function_plans, collect_window_plans_from_expr, ensure_common_partition,
+    plan_order_clauses, rewrite_window_expressions, WindowOperator,
 };
 
 #[derive(Debug)]
@@ -464,6 +462,52 @@ fn projection_expressions_from_plan(plan: &ProjectionPlan, columns: &[ColumnCata
         .collect()
 }
 
+fn rewrite_projection_plan_for_windows(
+    plan: &mut ProjectionPlan,
+    alias_map: &HashMap<String, String>,
+) -> Result<(), SqlExecutionError> {
+    for item in &mut plan.items {
+        if let ProjectionItem::Computed { expr } = item {
+            rewrite_window_expressions(expr, alias_map)?;
+        }
+    }
+    Ok(())
+}
+
+fn assign_window_display_aliases(
+    plans: &mut [WindowFunctionPlan],
+    projection_plan: &ProjectionPlan,
+) {
+    use std::collections::VecDeque;
+    use sqlparser::ast::Expr;
+
+    let mut key_to_indices: HashMap<String, VecDeque<usize>> = HashMap::new();
+    for (idx, plan) in plans.iter().enumerate() {
+        key_to_indices
+            .entry(plan.key.clone())
+            .or_default()
+            .push_back(idx);
+    }
+
+    for (idx, item) in projection_plan.items.iter().enumerate() {
+        let expr = match item {
+            ProjectionItem::Computed { expr } => expr,
+            ProjectionItem::Direct { .. } => continue,
+        };
+        if let Expr::Function(function) = expr {
+            if function.over.is_none() {
+                continue;
+            }
+            let key = function.to_string();
+            if let Some(indices) = key_to_indices.get_mut(&key) {
+                if let Some(plan_idx) = indices.pop_front() {
+                    plans[plan_idx].display_alias = Some(projection_plan.headers[idx].clone());
+                }
+            }
+        }
+    }
+}
+
 fn resolve_group_by_exprs(
     group_by: &GroupByExpr,
     projection_exprs: &[Expr],
@@ -647,6 +691,9 @@ struct WindowFunctionPlan {
     order_by: Vec<OrderByExpr>,
     arg: Option<Expr>,
     default_expr: Option<Expr>,
+    result_ordinal: usize,
+    result_alias: String,
+    display_alias: Option<String>,
 }
 
 #[derive(Clone)]
@@ -662,6 +709,7 @@ enum RangePreceding {
 }
 
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
+const WINDOW_BATCH_CHUNK_SIZE: usize = 1_024;
 
 pub struct SqlExecutor {
     page_handler: Arc<PageHandler>,
@@ -859,7 +907,6 @@ impl SqlExecutor {
             Some(expr) => (expr, true),
             None => (Expr::Value(Value::Boolean(true)), false),
         };
-
         let sort_columns_refs = catalog.sort_key();
         if sort_columns_refs.is_empty() {
             return Err(SqlExecutionError::Unsupported(
@@ -1017,6 +1064,40 @@ impl SqlExecutor {
         } else {
             None
         };
+
+        if !window_plans.is_empty() {
+            let projection_plan = projection_plan_opt
+                .take()
+                .ok_or_else(|| {
+                    SqlExecutionError::Unsupported(
+                        "window queries require an explicit projection plan".into(),
+                    )
+                })?;
+            let partition_exprs = ensure_common_partition(&window_plans)?;
+            let vectorized_selection_expr = if has_selection {
+                Some(&selection_expr)
+            } else {
+                None
+            };
+            let window_plans_vec = std::mem::take(&mut window_plans);
+            return self.execute_vectorized_window_query(
+                &table_name,
+                &catalog,
+                &columns,
+                projection_plan,
+                window_plans_vec,
+                partition_exprs,
+                &required_ordinals,
+                vectorized_selection_expr,
+                &column_ordinals,
+                &order_clauses,
+                result_columns.clone(),
+                limit_expr.clone(),
+                offset_expr.clone(),
+                distinct_flag,
+                qualify.clone(),
+            );
+        }
 
         let can_run_vectorized_projection = !needs_aggregation
             && qualify.is_none()
@@ -1233,8 +1314,6 @@ impl SqlExecutor {
                 rows: matching_rows.as_slice(),
                 materialized: &materialized,
                 column_ordinals: &column_ordinals,
-                row_positions: None,
-                window_results: None,
                 masked_exprs: None,
                 prefer_exact_numeric,
             };
@@ -1264,8 +1343,6 @@ impl SqlExecutor {
                             rows: rows.as_slice(),
                             materialized: &materialized,
                             column_ordinals: &column_ordinals,
-                            row_positions: None,
-                            window_results: None,
                             masked_exprs: Some(grouping.masked_exprs.as_slice()),
                             prefer_exact_numeric,
                         };
@@ -1292,8 +1369,6 @@ impl SqlExecutor {
                     rows: matching_rows.as_slice(),
                     materialized: &materialized,
                     column_ordinals: &column_ordinals,
-                    row_positions: None,
-                    window_results: None,
                     masked_exprs: None,
                     prefer_exact_numeric,
                 };
@@ -1343,91 +1418,6 @@ impl SqlExecutor {
             });
         }
 
-        let mut window_results_map: Option<WindowResultMap> = None;
-        let mut row_positions_map: Option<HashMap<u64, usize>> = None;
-        if !window_plans.is_empty() {
-            let results = compute_window_results(
-                &window_plans,
-                matching_rows.as_slice(),
-                &materialized,
-                &column_ordinals,
-            )?;
-            let positions = matching_rows
-                .iter()
-                .enumerate()
-                .map(|(idx, row)| (*row, idx))
-                .collect::<HashMap<u64, usize>>();
-            row_positions_map = Some(positions);
-            window_results_map = Some(results);
-
-            if apply_selection_late {
-                if let Some(results_map) = window_results_map.as_mut() {
-                    let window_dataset = AggregateDataset {
-                        rows: matching_rows.as_slice(),
-                        materialized: &materialized,
-                        column_ordinals: &column_ordinals,
-                        row_positions: None,
-                        window_results: None,
-                        masked_exprs: None,
-                        prefer_exact_numeric: false,
-                    };
-
-                    for plan in &window_plans {
-                        if let WindowFunctionKind::Sum { frame } = &plan.kind {
-                            if !selection_set.is_empty() {
-                                if let SumWindowFrame::Rows { preceding } = frame {
-                                    if preceding.is_some() {
-                                        continue;
-                                    }
-                                } else {
-                                    continue;
-                                }
-                                if let Some(values) = results_map.get_mut(&plan.key) {
-                                    if let Some(arg_expr) = &plan.arg {
-                                        for (idx, &row_idx) in matching_rows.iter().enumerate() {
-                                            if !selection_set.contains(&row_idx) {
-                                                continue;
-                                            }
-                                            let partition_key = evaluate_group_key(
-                                                &plan.partition_by,
-                                                row_idx,
-                                                &window_dataset,
-                                            )?;
-                                            let mut running_sum = 0.0;
-                                            let mut found_value = false;
-                                            for &candidate_row in matching_rows.iter().take(idx + 1) {
-                                                let candidate_key = evaluate_group_key(
-                                                    &plan.partition_by,
-                                                    candidate_row,
-                                                    &window_dataset,
-                                                )?;
-                                                if candidate_key == partition_key {
-                                                    let value = evaluate_row_expr(
-                                                        arg_expr,
-                                                        candidate_row,
-                                                        &window_dataset,
-                                                    )?;
-                                                    if let Some(num) = value.as_f64() {
-                                                        running_sum += num;
-                                                        found_value = true;
-                                                    }
-                                                }
-                                            }
-                                            if found_value {
-                                                values[idx] = scalar_from_f64(running_sum);
-                                            } else {
-                                                values[idx] = ScalarValue::Null;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         let no_selected_rows = apply_selection_late && selection_set.is_empty();
         if (!apply_selection_late && matching_rows.is_empty()) || no_selected_rows {
             return Ok(SelectResult {
@@ -1438,15 +1428,12 @@ impl SqlExecutor {
 
         let projection_plan = projection_plan_opt.expect("projection plan required");
         let mut rows = Vec::with_capacity(matching_rows.len());
-        let dataset_required =
-            projection_plan.needs_dataset() || qualify.is_some() || !window_plans.is_empty();
+        let dataset_required = projection_plan.needs_dataset() || qualify.is_some();
         let dataset_holder = if dataset_required {
             Some(AggregateDataset {
                 rows: matching_rows.as_slice(),
                 materialized: &materialized,
                 column_ordinals: &column_ordinals,
-                row_positions: row_positions_map.as_ref(),
-                window_results: window_results_map.as_ref(),
                 masked_exprs: None,
                 prefer_exact_numeric: false,
             })
@@ -1584,27 +1571,7 @@ impl SqlExecutor {
             batch = sort_batch_in_memory(&batch, order_clauses, catalog)?;
         }
 
-        let mut final_batch = ColumnarBatch::with_capacity(projection_plan.items.len());
-        final_batch.num_rows = batch.num_rows;
-
-        for (idx, item) in projection_plan.items.iter().enumerate() {
-            let column_page = match item {
-                ProjectionItem::Direct { ordinal } => batch
-                    .columns
-                    .get(ordinal)
-                    .cloned()
-                    .ok_or_else(|| {
-                        SqlExecutionError::OperationFailed(format!(
-                            "missing column ordinal {ordinal} in vectorized batch"
-                        ))
-                    })?,
-                ProjectionItem::Computed { expr } => {
-                    evaluate_expression_on_batch(expr, &batch, catalog)?
-                }
-            };
-            final_batch.columns.insert(idx, column_page);
-        }
-
+        let final_batch = self.build_projection_batch(&batch, projection_plan, catalog)?;
         let mut rows = self.transpose_batch_to_rows(&final_batch)?;
 
         if distinct_flag {
@@ -1626,6 +1593,180 @@ impl SqlExecutor {
             columns: result_columns,
             rows: final_rows,
         })
+    }
+
+    fn execute_vectorized_window_query(
+        &self,
+        table: &str,
+        catalog: &TableCatalog,
+        columns: &[ColumnCatalog],
+        mut projection_plan: ProjectionPlan,
+        mut window_plans: Vec<WindowFunctionPlan>,
+        partition_exprs: Vec<Expr>,
+        required_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&Expr>,
+        column_ordinals: &HashMap<String, usize>,
+        order_clauses: &[OrderClause],
+        result_columns: Vec<String>,
+        limit_expr: Option<Expr>,
+        offset_expr: Option<Offset>,
+        distinct_flag: bool,
+        mut qualify_expr: Option<Expr>,
+    ) -> Result<SelectResult, SqlExecutionError> {
+        if projection_plan.items.is_empty() {
+            return Err(SqlExecutionError::Unsupported(
+                "projection required for window queries".into(),
+            ));
+        }
+
+        assign_window_display_aliases(window_plans.as_mut_slice(), &projection_plan);
+        let mut alias_map: HashMap<String, String> = HashMap::with_capacity(window_plans.len());
+        let mut next_ordinal = columns
+            .iter()
+            .map(|column| column.ordinal)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        for (idx, plan) in window_plans.iter_mut().enumerate() {
+            let alias = format!("__window_col_{idx}");
+            plan.result_ordinal = next_ordinal;
+            plan.result_alias = alias.clone();
+            alias_map.insert(plan.key.clone(), alias);
+            next_ordinal += 1;
+        }
+
+        rewrite_projection_plan_for_windows(&mut projection_plan, &alias_map)?;
+        if let Some(expr) = qualify_expr.as_mut() {
+            rewrite_window_expressions(expr, &alias_map)?;
+        }
+        let mut final_order_clauses = order_clauses.to_vec();
+        for clause in &mut final_order_clauses {
+            rewrite_window_expressions(&mut clause.expr, &alias_map)?;
+        }
+
+        let mut batch = self.scan_and_filter_vectorized(
+            table,
+            columns,
+            required_ordinals,
+            selection_expr,
+            column_ordinals,
+        )?;
+        if batch.num_rows == 0 {
+            return Ok(SelectResult {
+                columns: result_columns,
+                rows: Vec::new(),
+            });
+        }
+
+        if !partition_exprs.is_empty() {
+            let partition_clauses: Vec<OrderClause> = partition_exprs
+                .iter()
+                .map(|expr| OrderClause {
+                    expr: expr.clone(),
+                    descending: false,
+                    nulls: NullsPlacement::Default,
+                })
+                .collect();
+            batch = sort_batch_in_memory(&batch, &partition_clauses, catalog)?;
+        }
+
+        let chunks = chunk_batch(&batch, WINDOW_BATCH_CHUNK_SIZE);
+        let mut operator =
+            WindowOperator::new(chunks.into_iter(), window_plans, partition_exprs, catalog);
+        let mut processed_batches = Vec::new();
+        while let Some(processed) = operator.next_batch()? {
+            processed_batches.push(processed);
+        }
+        if processed_batches.is_empty() {
+            return Ok(SelectResult {
+                columns: result_columns,
+                rows: Vec::new(),
+            });
+        }
+        let mut processed_batch = merge_batches(processed_batches);
+
+        if let Some(expr) = qualify_expr {
+            processed_batch = self.apply_qualify_filter(processed_batch, &expr, catalog)?;
+            if processed_batch.num_rows == 0 {
+                return Ok(SelectResult {
+                    columns: result_columns,
+                    rows: Vec::new(),
+                });
+            }
+        }
+
+        if !final_order_clauses.is_empty() {
+            processed_batch = sort_batch_in_memory(&processed_batch, &final_order_clauses, catalog)?;
+        }
+
+        let final_batch =
+            self.build_projection_batch(&processed_batch, &projection_plan, catalog)?;
+        let mut rows = self.transpose_batch_to_rows(&final_batch)?;
+
+        if distinct_flag {
+            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
+            rows.retain(|row| seen.insert(row.clone()));
+        }
+
+        let offset = parse_offset(offset_expr)?;
+        let limit = parse_limit(limit_expr)?;
+        let start = offset.min(rows.len());
+        let end = if let Some(limit) = limit {
+            start.saturating_add(limit).min(rows.len())
+        } else {
+            rows.len()
+        };
+        let final_rows = rows[start..end].to_vec();
+
+        Ok(SelectResult {
+            columns: result_columns,
+            rows: final_rows,
+        })
+    }
+
+    fn build_projection_batch(
+        &self,
+        batch: &ColumnarBatch,
+        projection_plan: &ProjectionPlan,
+        catalog: &TableCatalog,
+    ) -> Result<ColumnarBatch, SqlExecutionError> {
+        let mut final_batch = ColumnarBatch::with_capacity(projection_plan.items.len());
+        final_batch.num_rows = batch.num_rows;
+        for (idx, item) in projection_plan.items.iter().enumerate() {
+            let column_page = match item {
+                ProjectionItem::Direct { ordinal } => batch
+                    .columns
+                    .get(ordinal)
+                    .cloned()
+                    .ok_or_else(|| {
+                        SqlExecutionError::OperationFailed(format!(
+                            "missing column ordinal {ordinal} in vectorized batch"
+                        ))
+                    })?,
+                ProjectionItem::Computed { expr } => {
+                    evaluate_expression_on_batch(expr, batch, catalog)?
+                }
+            };
+            final_batch.columns.insert(idx, column_page);
+        }
+        Ok(final_batch)
+    }
+
+    fn apply_qualify_filter(
+        &self,
+        batch: ColumnarBatch,
+        expr: &Expr,
+        catalog: &TableCatalog,
+    ) -> Result<ColumnarBatch, SqlExecutionError> {
+        let filter_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
+        let bitmap = boolean_bitmap_from_page(&filter_page)?;
+        if bitmap.count_ones() == batch.num_rows {
+            return Ok(batch);
+        }
+        if bitmap.count_ones() == 0 {
+            return Ok(ColumnarBatch::new());
+        }
+        Ok(batch.filter_by_bitmap(&bitmap))
     }
 
     fn execute_vectorized_aggregation(
@@ -2874,4 +3015,52 @@ impl SqlExecutor {
         }
         Ok(0)
     }
+}
+
+fn boolean_bitmap_from_page(page: &ColumnarPage) -> Result<Bitmap, SqlExecutionError> {
+    match &page.data {
+        ColumnData::Text(values) => {
+            let mut bitmap = Bitmap::new(page.len());
+            for (idx, value) in values.iter().enumerate() {
+                if page.null_bitmap.is_set(idx) {
+                    continue;
+                }
+                if value.eq_ignore_ascii_case("true") {
+                    bitmap.set(idx);
+                }
+            }
+            Ok(bitmap)
+        }
+        _ => Err(SqlExecutionError::Unsupported(
+            "QUALIFY expressions must produce boolean results".into(),
+        )),
+    }
+}
+
+fn chunk_batch(batch: &ColumnarBatch, chunk_size: usize) -> Vec<ColumnarBatch> {
+    if batch.num_rows == 0 {
+        return Vec::new();
+    }
+    if batch.num_rows <= chunk_size {
+        return vec![batch.clone()];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < batch.num_rows {
+        let end = (start + chunk_size).min(batch.num_rows);
+        chunks.push(batch.slice(start, end));
+        start = end;
+    }
+    chunks
+}
+
+fn merge_batches(mut batches: Vec<ColumnarBatch>) -> ColumnarBatch {
+    if batches.is_empty() {
+        return ColumnarBatch::new();
+    }
+    let mut merged = batches.remove(0);
+    for batch in batches {
+        merged.append(&batch);
+    }
+    merged
 }
