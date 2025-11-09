@@ -29,7 +29,7 @@ use crate::writer::{
 use sqlparser::ast::{
     Assignment, BinaryOperator, Expr, FromTable, FunctionArg, FunctionArgExpr, GroupByExpr, Ident,
     ObjectName, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
-    TableWithJoins, Value, WindowFrameBound, WindowFrameUnits, WindowType,
+    TableWithJoins, UnaryOperator, Value, WindowFrameBound, WindowFrameUnits, WindowType,
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
@@ -37,11 +37,11 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use aggregates::{
-    AggregateDataset, AggregateFunctionKind, AggregateFunctionPlan, AggregateProjectionPlan,
-    AggregateState, AggregationHashTable, MaterializedColumns, WindowResultMap,
-    evaluate_aggregate_outputs, plan_aggregate_projection, select_item_contains_aggregate,
-    vectorized_average_update, vectorized_count_star_update, vectorized_count_value_update,
-    vectorized_sum_update,
+    AggregateDataset, AggregateFunctionKind, AggregateFunctionPlan, AggregateProjection,
+    AggregateProjectionPlan, AggregateState, AggregationHashTable, MaterializedColumns,
+    WindowResultMap, evaluate_aggregate_outputs, plan_aggregate_projection,
+    select_item_contains_aggregate, vectorized_average_update, vectorized_count_star_update,
+    vectorized_count_value_update, vectorized_sum_update,
 };
 use expressions::{
     evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
@@ -59,7 +59,9 @@ use ordering::{
 };
 use projection_helpers::{build_projection, materialize_columns};
 use scan_helpers::collect_sort_key_filters;
-use values::{CachedValue, ScalarValue, compare_strs, scalar_from_f64};
+use values::{
+    CachedValue, ScalarValue, combine_numeric, compare_scalar_values, compare_strs, scalar_from_f64,
+};
 use window_helpers::{
     collect_window_function_plans, collect_window_plans_from_expr, compute_window_results,
     plan_order_clauses,
@@ -90,6 +92,266 @@ fn literal_value(expr: &Expr) -> Option<Option<String>> {
         Expr::Value(Value::SingleQuotedString(text)) => Some(Some(text.clone())),
         _ => None,
     }
+}
+
+fn projection_item_expr(
+    item: &ProjectionItem,
+    columns: &[ColumnCatalog],
+) -> Result<Expr, SqlExecutionError> {
+    match item {
+        ProjectionItem::Direct { ordinal } => {
+            let column = columns.get(*ordinal).ok_or_else(|| {
+                SqlExecutionError::OperationFailed(format!(
+                    "invalid column ordinal {ordinal} in projection"
+                ))
+            })?;
+            Ok(Expr::Identifier(Ident::new(column.name.clone())))
+        }
+        ProjectionItem::Computed { expr } => Ok(expr.clone()),
+    }
+}
+
+fn build_group_exprs_for_distinct(
+    plan: &ProjectionPlan,
+    columns: &[ColumnCatalog],
+) -> Result<Vec<Expr>, SqlExecutionError> {
+    plan.items
+        .iter()
+        .map(|item| projection_item_expr(item, columns))
+        .collect()
+}
+
+fn ensure_aggregate_plan_for_expr(
+    expr: &Expr,
+    aggregate_plans: &mut Vec<AggregateFunctionPlan>,
+    aggregate_lookup: &mut HashMap<String, usize>,
+) -> Result<Option<usize>, SqlExecutionError> {
+    let key = expr.to_string();
+    if let Some(&idx) = aggregate_lookup.get(&key) {
+        return Ok(Some(idx));
+    }
+    if let Some(plan) = AggregateFunctionPlan::from_expr(expr)? {
+        let idx = aggregate_plans.len();
+        aggregate_plans.push(plan);
+        aggregate_lookup.insert(key, idx);
+        Ok(Some(idx))
+    } else {
+        Ok(None)
+    }
+}
+
+fn ensure_having_aggregate_plans(
+    expr: &Expr,
+    aggregate_plans: &mut Vec<AggregateFunctionPlan>,
+    aggregate_lookup: &mut HashMap<String, usize>,
+) -> Result<(), SqlExecutionError> {
+    if ensure_aggregate_plan_for_expr(expr, aggregate_plans, aggregate_lookup)?.is_some() {
+        return Ok(());
+    }
+    match expr {
+        Expr::BinaryOp { left, right, .. } => {
+            ensure_having_aggregate_plans(left, aggregate_plans, aggregate_lookup)?;
+            ensure_having_aggregate_plans(right, aggregate_plans, aggregate_lookup)?;
+        }
+        Expr::UnaryOp { expr, .. } | Expr::Nested(expr) => {
+            ensure_having_aggregate_plans(expr, aggregate_plans, aggregate_lookup)?;
+        }
+        Expr::Between { expr, low, high, .. } => {
+            ensure_having_aggregate_plans(expr, aggregate_plans, aggregate_lookup)?;
+            ensure_having_aggregate_plans(low, aggregate_plans, aggregate_lookup)?;
+            ensure_having_aggregate_plans(high, aggregate_plans, aggregate_lookup)?;
+        }
+        Expr::InList { expr, list, .. } => {
+            ensure_having_aggregate_plans(expr, aggregate_plans, aggregate_lookup)?;
+            for item in list {
+                ensure_having_aggregate_plans(item, aggregate_plans, aggregate_lookup)?;
+            }
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(op) = operand {
+                ensure_having_aggregate_plans(op, aggregate_plans, aggregate_lookup)?;
+            }
+            for condition in conditions {
+                ensure_having_aggregate_plans(condition, aggregate_plans, aggregate_lookup)?;
+            }
+            for result in results {
+                ensure_having_aggregate_plans(result, aggregate_plans, aggregate_lookup)?;
+            }
+            if let Some(else_expr) = else_result {
+                ensure_having_aggregate_plans(else_expr, aggregate_plans, aggregate_lookup)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+struct HavingEvalContext<'a> {
+    aggregate_plans: &'a [AggregateFunctionPlan],
+    aggregate_lookup: &'a HashMap<String, usize>,
+    group_expr_lookup: &'a HashMap<String, usize>,
+    group_key: &'a GroupKey,
+    states: &'a [AggregateState],
+}
+
+fn evaluate_having_expression(
+    expr: &Expr,
+    ctx: &HavingEvalContext,
+) -> Result<ScalarValue, SqlExecutionError> {
+    match expr {
+        Expr::Identifier(ident) => group_value_as_scalar(&ident.value, ctx),
+        Expr::CompoundIdentifier(idents) => {
+            if let Some(last) = idents.last() {
+                group_value_as_scalar(&last.value, ctx)
+            } else {
+                Err(SqlExecutionError::Unsupported(
+                    "empty compound identifier in HAVING clause".into(),
+                ))
+            }
+        }
+        Expr::Value(Value::Number(value, _)) => value
+            .parse::<f64>()
+            .map(scalar_from_f64)
+            .map_err(|_| SqlExecutionError::Unsupported("invalid numeric literal".into())),
+        Expr::Value(Value::SingleQuotedString(text)) => Ok(ScalarValue::Text(text.clone())),
+        Expr::Value(Value::Boolean(flag)) => Ok(ScalarValue::Bool(*flag)),
+        Expr::Value(Value::Null) => Ok(ScalarValue::Null),
+        Expr::BinaryOp { left, op, right } => {
+            let lhs = evaluate_having_expression(left, ctx)?;
+            let rhs = evaluate_having_expression(right, ctx)?;
+            match op {
+                BinaryOperator::Plus => combine_numeric(&lhs, &rhs, |a, b| a + b).ok_or_else(|| {
+                    SqlExecutionError::Unsupported("non-numeric addition in HAVING".into())
+                }),
+                BinaryOperator::Minus => {
+                    combine_numeric(&lhs, &rhs, |a, b| a - b).ok_or_else(|| {
+                        SqlExecutionError::Unsupported("non-numeric subtraction in HAVING".into())
+                    })
+                }
+                BinaryOperator::Multiply => {
+                    combine_numeric(&lhs, &rhs, |a, b| a * b).ok_or_else(|| {
+                        SqlExecutionError::Unsupported("non-numeric multiplication in HAVING".into())
+                    })
+                }
+                BinaryOperator::Divide => combine_numeric(&lhs, &rhs, |a, b| a / b)
+                    .ok_or_else(|| {
+                        SqlExecutionError::Unsupported("non-numeric division in HAVING".into())
+                    }),
+                BinaryOperator::Modulo => combine_numeric(&lhs, &rhs, |a, b| a % b)
+                    .ok_or_else(|| {
+                        SqlExecutionError::Unsupported("non-numeric modulo in HAVING".into())
+                    }),
+                BinaryOperator::And => Ok(ScalarValue::Bool(
+                    lhs.as_bool().unwrap_or(false) && rhs.as_bool().unwrap_or(false),
+                )),
+                BinaryOperator::Or => Ok(ScalarValue::Bool(
+                    lhs.as_bool().unwrap_or(false) || rhs.as_bool().unwrap_or(false),
+                )),
+                BinaryOperator::Xor => Ok(ScalarValue::Bool(
+                    lhs.as_bool().unwrap_or(false) ^ rhs.as_bool().unwrap_or(false),
+                )),
+                BinaryOperator::Eq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::NotEq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord != Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::Gt => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Greater)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::GtEq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Greater || ord == Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::Lt => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Less)
+                        .unwrap_or(false),
+                )),
+                BinaryOperator::LtEq => Ok(ScalarValue::Bool(
+                    compare_scalar_values(&lhs, &rhs)
+                        .map(|ord| ord == Ordering::Less || ord == Ordering::Equal)
+                        .unwrap_or(false),
+                )),
+                _ => Err(SqlExecutionError::Unsupported(
+                    "operator not supported in HAVING".into(),
+                )),
+            }
+        }
+        Expr::UnaryOp { op, expr } => {
+            let value = evaluate_having_expression(expr, ctx)?;
+            match op {
+                UnaryOperator::Plus => Ok(value),
+                UnaryOperator::Minus => {
+                    let num = value.as_f64().ok_or_else(|| {
+                        SqlExecutionError::Unsupported(
+                            "unary minus requires numeric operand in HAVING".into(),
+                        )
+                    })?;
+                    Ok(scalar_from_f64(-num))
+                }
+                UnaryOperator::Not => Ok(ScalarValue::Bool(!value.as_bool().unwrap_or(false))),
+                _ => Err(SqlExecutionError::Unsupported(
+                    "unsupported unary operator in HAVING".into(),
+                )),
+            }
+        }
+        Expr::Nested(inner) => evaluate_having_expression(inner, ctx),
+        Expr::Function(_) => aggregate_value_as_scalar(expr, ctx),
+        _ => Err(SqlExecutionError::Unsupported(
+            "HAVING expression is not supported in vectorized mode".into(),
+        )),
+    }
+}
+
+fn group_value_as_scalar(
+    ident: &str,
+    ctx: &HavingEvalContext<'_>,
+) -> Result<ScalarValue, SqlExecutionError> {
+    let idx = ctx.group_expr_lookup.get(ident).ok_or_else(|| {
+        SqlExecutionError::Unsupported(format!(
+            "HAVING references non-grouped column {ident}"
+        ))
+    })?;
+    let value = ctx.group_key.value_at(*idx).unwrap_or(None);
+    Ok(match value {
+        Some(text) => ScalarValue::Text(text),
+        None => ScalarValue::Null,
+    })
+}
+
+fn aggregate_value_as_scalar(
+    expr: &Expr,
+    ctx: &HavingEvalContext<'_>,
+) -> Result<ScalarValue, SqlExecutionError> {
+    let key = expr.to_string();
+    let slot = ctx.aggregate_lookup.get(&key).ok_or_else(|| {
+        SqlExecutionError::Unsupported(format!(
+            "aggregate {key} missing from vectorized aggregation"
+        ))
+    })?;
+    let state = ctx.states.get(*slot).ok_or_else(|| {
+        SqlExecutionError::OperationFailed("missing aggregate state for HAVING".into())
+    })?;
+    ctx.aggregate_plans[*slot]
+        .scalar_value(state)
+        .ok_or_else(|| {
+            SqlExecutionError::Unsupported(format!(
+                "unable to evaluate aggregate {key} in HAVING"
+            ))
+        })
 }
 
 impl std::fmt::Display for SqlExecutionError {
@@ -798,7 +1060,6 @@ impl SqlExecutor {
 
         let can_run_vectorized_aggregation = needs_aggregation
             && !distinct_flag
-            && having.is_none()
             && order_clauses.is_empty()
             && sort_key_filters.is_none()
             && !apply_selection_late
@@ -823,11 +1084,53 @@ impl SqlExecutor {
                     result_columns.clone(),
                     limit_expr.clone(),
                     offset_expr.clone(),
+                    having.as_ref(),
                 ) {
                     Ok(result) => return Ok(result),
                     Err(SqlExecutionError::Unsupported(_)) => {}
                     Err(err) => return Err(err),
                 }
+            }
+        }
+
+        if distinct_flag
+            && !needs_aggregation
+            && projection_plan_opt.is_some()
+            && order_clauses.is_empty()
+            && window_plans.is_empty()
+            && qualify.is_none()
+        {
+            if let Some(projection_plan) = &projection_plan_opt {
+                let group_exprs = build_group_exprs_for_distinct(projection_plan, &columns)?;
+                let outputs: Vec<AggregateProjection> = projection_plan
+                    .items
+                    .iter()
+                    .map(|item| {
+                        Ok(AggregateProjection {
+                            expr: projection_item_expr(item, &columns)?,
+                        })
+                    })
+                    .collect::<Result<_, SqlExecutionError>>()?;
+                let synthetic_plan = AggregateProjectionPlan {
+                    outputs,
+                    required_ordinals: projection_plan.required_ordinals.clone(),
+                    headers: projection_plan.headers.clone(),
+                };
+
+                return self.execute_vectorized_aggregation(
+                    &table_name,
+                    &catalog,
+                    &columns,
+                    &synthetic_plan,
+                    &group_exprs,
+                    &projection_plan.required_ordinals,
+                    scan_selection_expr,
+                    &column_ordinals,
+                    result_columns,
+                    limit_expr,
+                    offset_expr,
+                    None,
+                );
             }
         }
 
@@ -1338,6 +1641,7 @@ impl SqlExecutor {
         result_columns: Vec<String>,
         limit_expr: Option<Expr>,
         offset_expr: Option<Offset>,
+        having_expr: Option<&Expr>,
     ) -> Result<SelectResult, SqlExecutionError> {
         let batch = self.scan_and_filter_vectorized(
             table,
@@ -1357,19 +1661,24 @@ impl SqlExecutor {
             }
         }
 
+        let mut group_expr_lookup: HashMap<String, usize> = HashMap::new();
+        for (idx, expr) in group_exprs.iter().enumerate() {
+            group_expr_lookup.insert(expr.to_string(), idx);
+        }
+
         let mut aggregate_plans: Vec<AggregateFunctionPlan> = Vec::new();
+        let mut aggregate_expr_lookup: HashMap<String, usize> = HashMap::new();
         let mut output_kinds: Vec<VectorAggregationOutput> =
             Vec::with_capacity(aggregate_plan.outputs.len());
 
         for projection in &aggregate_plan.outputs {
-            match AggregateFunctionPlan::from_expr(&projection.expr)? {
-                Some(plan) => {
-                    let slot_index = aggregate_plans.len();
-                    aggregate_plans.push(plan);
-                    output_kinds.push(VectorAggregationOutput::Aggregate { slot_index });
-                    continue;
-                }
-                None => {}
+            if let Some(slot_index) = ensure_aggregate_plan_for_expr(
+                &projection.expr,
+                &mut aggregate_plans,
+                &mut aggregate_expr_lookup,
+            )? {
+                output_kinds.push(VectorAggregationOutput::Aggregate { slot_index });
+                continue;
             }
 
             if let Some(idx) = find_group_expr_index(&projection.expr, group_exprs) {
@@ -1383,15 +1692,17 @@ impl SqlExecutor {
             }
 
             return Err(SqlExecutionError::Unsupported(
-                "vectorized aggregation only supports direct group expressions, literals, and simple aggregates"
-                    .into(),
+                    "vectorized aggregation only supports direct group expressions, literals, and simple aggregates"
+                        .into(),
             ));
         }
 
-        if aggregate_plans.is_empty() {
-            return Err(SqlExecutionError::Unsupported(
-                "vectorized aggregation requires at least one aggregate function".into(),
-            ));
+        if let Some(expr) = having_expr {
+            ensure_having_aggregate_plans(
+                expr,
+                &mut aggregate_plans,
+                &mut aggregate_expr_lookup,
+            )?;
         }
 
         let state_template: Vec<AggregateState> =
@@ -1474,6 +1785,29 @@ impl SqlExecutor {
 
         if group_order.is_empty() {
             group_order.extend(hash_table.keys().cloned());
+        }
+
+        if let Some(expr) = having_expr {
+            let mut filtered_order = Vec::with_capacity(group_order.len());
+            for key in group_order {
+                let states = hash_table.get(&key).ok_or_else(|| {
+                    SqlExecutionError::OperationFailed(
+                        "missing aggregate state for group".into(),
+                    )
+                })?;
+                let ctx = HavingEvalContext {
+                    aggregate_plans: &aggregate_plans,
+                    aggregate_lookup: &aggregate_expr_lookup,
+                    group_expr_lookup: &group_expr_lookup,
+                    group_key: &key,
+                    states,
+                };
+                let predicate = evaluate_having_expression(expr, &ctx)?;
+                if predicate.as_bool().unwrap_or(false) {
+                    filtered_order.push(key);
+                }
+            }
+            group_order = filtered_order;
         }
 
         let mut rows: Vec<Vec<Option<String>>> = Vec::with_capacity(group_order.len());

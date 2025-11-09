@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 pub const DEFAULT_TABLE: &str = "_default";
-pub const ROWS_PER_PAGE_GROUP: u64 = 1024;
+pub const ROWS_PER_PAGE_GROUP: u64 = 8192;
 
 fn split_table_column(identifier: &str) -> (&str, &str) {
     if let Some(pos) = identifier.find('.') {
