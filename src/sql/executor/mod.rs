@@ -4,6 +4,7 @@ mod expressions;
 mod grouping_helpers;
 mod helpers;
 mod ordering;
+mod spill;
 mod projection_helpers;
 mod row_functions;
 mod scalar_functions;
@@ -53,8 +54,8 @@ use helpers::{
     parse_offset, table_with_joins_to_name, wildcard_options_supported,
 };
 use ordering::{
-    NullsPlacement, OrderClause, OrderKey, build_group_order_key, build_row_order_key,
-    compare_order_keys, sort_rows_logical,
+    NullsPlacement, OrderClause, OrderKey, build_group_order_key, build_order_keys_on_batch,
+    build_row_order_key, compare_order_keys, sort_batch_in_memory, sort_rows_logical,
 };
 use projection_helpers::{build_projection, materialize_columns};
 use scan_helpers::collect_sort_key_filters;
@@ -759,8 +760,8 @@ impl SqlExecutor {
             && qualify.is_none()
             && window_plans.is_empty()
             && sort_key_filters.is_none()
-            && order_clauses.is_empty()
-            && projection_plan_opt.is_some();
+            && projection_plan_opt.is_some()
+            && (order_clauses.is_empty() || !distinct_flag);
 
         if can_run_vectorized_projection {
             if let Some(projection_plan) = &projection_plan_opt {
@@ -772,6 +773,7 @@ impl SqlExecutor {
                     &required_ordinals,
                     scan_selection_expr,
                     &column_ordinals,
+                    &order_clauses,
                     result_columns.clone(),
                     limit_expr.clone(),
                     offset_expr.clone(),
@@ -1254,12 +1256,13 @@ impl SqlExecutor {
         required_ordinals: &BTreeSet<usize>,
         selection_expr: Option<&Expr>,
         column_ordinals: &HashMap<String, usize>,
+        order_clauses: &[OrderClause],
         result_columns: Vec<String>,
         limit_expr: Option<Expr>,
         offset_expr: Option<Offset>,
         distinct_flag: bool,
     ) -> Result<SelectResult, SqlExecutionError> {
-        let batch = self.scan_and_filter_vectorized(
+        let mut batch = self.scan_and_filter_vectorized(
             table,
             columns,
             required_ordinals,
@@ -1272,6 +1275,10 @@ impl SqlExecutor {
                 columns: result_columns,
                 rows: Vec::new(),
             });
+        }
+
+        if !order_clauses.is_empty() {
+            batch = sort_batch_in_memory(&batch, order_clauses, catalog)?;
         }
 
         let mut final_batch = ColumnarBatch::with_capacity(projection_plan.items.len());
@@ -1341,6 +1348,14 @@ impl SqlExecutor {
         )?;
 
         let group_keys = evaluate_group_keys_on_batch(group_exprs, &batch, catalog)?;
+
+        let mut seen_group_order: HashSet<GroupKey> = HashSet::new();
+        let mut group_order: Vec<GroupKey> = Vec::new();
+        for key in &group_keys {
+            if seen_group_order.insert(key.clone()) {
+                group_order.push(key.clone());
+            }
+        }
 
         let mut aggregate_plans: Vec<AggregateFunctionPlan> = Vec::new();
         let mut output_kinds: Vec<VectorAggregationOutput> =
@@ -1450,11 +1465,22 @@ impl SqlExecutor {
         }
 
         if hash_table.is_empty() && group_exprs.is_empty() {
-            hash_table.insert(GroupKey::empty(), state_template.clone());
+            let key = GroupKey::empty();
+            hash_table.insert(key.clone(), state_template.clone());
+            if seen_group_order.insert(key.clone()) {
+                group_order.push(key);
+            }
         }
 
-        let mut rows: Vec<Vec<Option<String>>> = Vec::with_capacity(hash_table.len());
-        for (key, states) in hash_table.into_iter() {
+        if group_order.is_empty() {
+            group_order.extend(hash_table.keys().cloned());
+        }
+
+        let mut rows: Vec<Vec<Option<String>>> = Vec::with_capacity(group_order.len());
+        for key in group_order {
+            let states = hash_table.get(&key).ok_or_else(|| {
+                SqlExecutionError::OperationFailed("missing aggregate state for group".into())
+            })?;
             let mut row = Vec::with_capacity(output_kinds.len());
             for kind in &output_kinds {
                 match kind {
