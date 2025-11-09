@@ -1,7 +1,9 @@
 use super::SqlExecutionError;
 use super::aggregates::{AggregateDataset, MaterializedColumns};
-use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
+use super::batch::{ColumnarBatch, ColumnarPage, ColumnData};
+use super::expressions::{evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression};
 use super::values::{ScalarValue, compare_scalar_values, compare_strs, format_float};
+use crate::metadata_store::TableCatalog;
 use sqlparser::ast::Expr;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -176,5 +178,62 @@ fn scalar_to_string(value: &ScalarValue) -> String {
                 "false".into()
             }
         }
+    }
+}
+
+pub(super) fn build_order_keys_on_batch(
+    clauses: &[OrderClause],
+    batch: &ColumnarBatch,
+    catalog: &TableCatalog,
+) -> Result<Vec<OrderKey>, SqlExecutionError> {
+    if clauses.is_empty() || batch.num_rows == 0 {
+        return Ok(vec![OrderKey { values: Vec::new() }; batch.num_rows]);
+    }
+
+    let mut evaluated_columns: Vec<ColumnarPage> = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        evaluated_columns.push(evaluate_expression_on_batch(&clause.expr, batch, catalog)?);
+    }
+
+    let mut keys = Vec::with_capacity(batch.num_rows);
+    for row_idx in 0..batch.num_rows {
+        let mut values = Vec::with_capacity(clauses.len());
+        for column in &evaluated_columns {
+            values.push(column_scalar_value(column, row_idx));
+        }
+        keys.push(OrderKey { values });
+    }
+    Ok(keys)
+}
+
+pub(super) fn sort_batch_in_memory(
+    batch: &ColumnarBatch,
+    clauses: &[OrderClause],
+    catalog: &TableCatalog,
+) -> Result<ColumnarBatch, SqlExecutionError> {
+    if clauses.is_empty() || batch.num_rows <= 1 {
+        return Ok(batch.clone());
+    }
+
+    let order_keys = build_order_keys_on_batch(clauses, batch, catalog)?;
+    let mut indices: Vec<usize> = (0..batch.num_rows).collect();
+    indices.sort_unstable_by(|&left, &right| {
+        compare_order_keys(&order_keys[left], &order_keys[right], clauses)
+    });
+    Ok(batch.gather(&indices))
+}
+
+fn column_scalar_from_text(value: &str) -> ScalarValue {
+    ScalarValue::Text(value.to_string())
+}
+
+fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
+    if page.null_bitmap.is_set(idx) {
+        return ScalarValue::Null;
+    }
+    match &page.data {
+        ColumnData::Int64(values) => ScalarValue::Int(values[idx] as i128),
+        ColumnData::Float64(values) => ScalarValue::Float(values[idx]),
+        ColumnData::Text(values) => column_scalar_from_text(&values[idx]),
     }
 }

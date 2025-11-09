@@ -230,6 +230,20 @@ impl ColumnarBatch {
             num_rows: 0,
         }
     }
+
+    pub fn gather(&self, indices: &[usize]) -> Self {
+        if indices.is_empty() {
+            return ColumnarBatch::new();
+        }
+        let mut columns = HashMap::with_capacity(self.columns.len());
+        for (ordinal, page) in &self.columns {
+            columns.insert(*ordinal, page.gather(indices));
+        }
+        ColumnarBatch {
+            columns,
+            num_rows: indices.len(),
+        }
+    }
 }
 
 impl ColumnarPage {
@@ -415,6 +429,52 @@ impl ColumnarPage {
         }
         self.null_bitmap.extend_from(&other.null_bitmap);
         self.num_rows += other.num_rows;
+    }
+
+    pub fn gather(&self, indices: &[usize]) -> Self {
+        if indices.is_empty() {
+            return self.empty_like();
+        }
+        let mut null_bitmap = Bitmap::new(indices.len());
+        let data = match &self.data {
+            ColumnData::Int64(values) => {
+                let mut collected = Vec::with_capacity(indices.len());
+                for (out_idx, &idx) in indices.iter().enumerate() {
+                    collected.push(values[idx]);
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Int64(collected)
+            }
+            ColumnData::Float64(values) => {
+                let mut collected = Vec::with_capacity(indices.len());
+                for (out_idx, &idx) in indices.iter().enumerate() {
+                    collected.push(values[idx]);
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Float64(collected)
+            }
+            ColumnData::Text(values) => {
+                let mut collected = Vec::with_capacity(indices.len());
+                for (out_idx, &idx) in indices.iter().enumerate() {
+                    collected.push(values[idx].clone());
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Text(collected)
+            }
+        };
+
+        ColumnarPage {
+            page_metadata: self.page_metadata.clone(),
+            data,
+            null_bitmap,
+            num_rows: indices.len(),
+        }
     }
 
     pub fn from_literal_f64(value: f64, num_rows: usize) -> Self {
