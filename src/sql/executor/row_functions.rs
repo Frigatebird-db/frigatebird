@@ -156,7 +156,9 @@ pub(super) fn evaluate_row_function(
 
             let bucket = if value < low {
                 0
-            } else if value >= high {
+            } else if value > high {
+                buckets + 1
+            } else if (value - high).abs() < f64::EPSILON {
                 buckets
             } else {
                 let step = (high - low) / buckets as f64;

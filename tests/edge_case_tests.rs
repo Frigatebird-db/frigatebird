@@ -201,11 +201,11 @@ fn compressor_zero_byte_page() {
     let compressor = Compressor::new();
     let page = Page::new(); // Empty page
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(decompressed.page.entries.len(), 0);
+    assert_eq!(decompressed.len(), 0);
 }
 
 #[test]
@@ -218,14 +218,14 @@ fn compressor_single_byte_entries() {
         page.add_entry(Entry::new("a"));
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page: page.clone() });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page.clone()));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(decompressed.page.entries.len(), 100);
+    assert_eq!(decompressed.len(), 100);
     assert_eq!(
-        uncompressed.page.entries.len(),
-        decompressed.page.entries.len()
+        uncompressed.page.len(),
+        decompressed.len()
     );
 }
 
@@ -366,7 +366,7 @@ fn compressor_highly_repetitive_data() {
     }
 
     let original_size = bincode::serialize(&page).unwrap().len();
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
 
     // Highly repetitive data should compress very well

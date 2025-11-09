@@ -35,10 +35,17 @@ pub fn overwrite_row(
 
         let mut updated = (*page_arc).clone();
         let idx = row_idx as usize;
-        if idx >= updated.page.entries.len() {
+        let mut in_bounds = true;
+        updated.mutate_disk_page(|disk_page| {
+            if idx >= disk_page.entries.len() {
+                in_bounds = false;
+                return;
+            }
+            disk_page.entries[idx] = Entry::new(&new_values[column.ordinal]);
+        });
+        if !in_bounds {
             return Err(other_error(format!("row {row_idx} out of bounds")));
         }
-        updated.page.entries[idx] = Entry::new(&new_values[column.ordinal]);
         handler.write_back_uncompressed(&descriptor.id, updated);
     }
 
@@ -70,10 +77,18 @@ pub fn update_column_entry_in_table(
         .ok_or_else(|| "unable to load page")?;
 
     let mut updated = (*page_arc).clone();
-    if (row as usize) >= updated.page.entries.len() {
+    let mut in_bounds = true;
+    updated.mutate_disk_page(|disk_page| {
+        let idx = row as usize;
+        if idx >= disk_page.entries.len() {
+            in_bounds = false;
+            return;
+        }
+        disk_page.entries[idx] = Entry::new(data);
+    });
+    if !in_bounds {
         return Ok(false);
     }
-    updated.page.entries[row as usize] = Entry::new(data);
 
     handler.write_back_uncompressed(&page_meta.id, updated);
 

@@ -43,7 +43,11 @@ pub fn setup_executor() -> ExecutorHarness {
         Arc::new(Compressor::new()),
     ));
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
-    let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
+    let executor = SqlExecutor::new_with_writer_mode(
+        Arc::clone(&handler),
+        Arc::clone(&directory),
+        false,
+    );
     ExecutorHarness {
         executor,
         handler,

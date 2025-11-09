@@ -36,7 +36,9 @@ pub fn upsert_data_into_table_column(
         .ok_or_else(|| "unable to load page")?;
 
     let mut updated = (*page_arc).clone();
-    updated.page.add_entry(Entry::new(data));
+    updated.mutate_disk_page(|disk_page| {
+        disk_page.add_entry(Entry::new(data));
+    });
 
     handler.write_back_uncompressed(&page_meta.id, updated);
 
@@ -58,9 +60,12 @@ pub fn sorted_insert_single_column(
         .ok_or_else(|| "unable to load page")?;
 
     let mut updated = (*page_arc).clone();
-    let insert_idx = binary_search_insert_index(&updated.page.entries, data);
-    updated.page.entries.insert(insert_idx, Entry::new(data));
-    let new_entry_count = updated.page.entries.len() as u64;
+    let mut new_entry_count = page_meta.entry_count;
+    updated.mutate_disk_page(|disk_page| {
+        let insert_idx = binary_search_insert_index(&disk_page.entries, data);
+        disk_page.entries.insert(insert_idx, Entry::new(data));
+        new_entry_count = disk_page.entries.len() as u64;
+    });
 
     handler.write_back_uncompressed(&page_meta.id, updated);
     handler
@@ -155,11 +160,12 @@ pub fn sorted_insert_row(
             .ok_or_else(|| other_error("unable to load page data"))?;
 
         let mut updated = (*page_arc).clone();
-        let insert_pos = insert_idx.min(updated.page.entries.len());
-        updated
-            .page
-            .entries
-            .insert(insert_pos, Entry::new(&final_row[ordinal]));
+        updated.mutate_disk_page(|disk_page| {
+            let insert_pos = insert_idx.min(disk_page.entries.len());
+            disk_page
+                .entries
+                .insert(insert_pos, Entry::new(&final_row[ordinal]));
+        });
 
         handler.write_back_uncompressed(&descriptor.id, updated);
         handler

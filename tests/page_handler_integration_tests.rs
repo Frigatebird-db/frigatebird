@@ -161,9 +161,7 @@ fn page_materializer_get_cached_hit() {
         let mut cache = uncompressed_cache.write().unwrap();
         cache.add(
             "page1",
-            PageCacheEntryUncompressed {
-                page: create_test_page(5),
-            },
+            PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
         );
     }
 
@@ -182,7 +180,7 @@ fn page_materializer_write_back() {
     let materializer = PageMaterializer::new(Arc::clone(&uncompressed_cache), compressor);
 
     let page = create_test_page(3);
-    materializer.write_back("page1", PageCacheEntryUncompressed { page });
+    materializer.write_back("page1", PageCacheEntryUncompressed::from_disk_page(page));
 
     let cache = uncompressed_cache.read().unwrap();
     assert!(cache.has("page1"));
@@ -197,7 +195,7 @@ fn page_materializer_materialize_one() {
         PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor));
 
     let page = create_test_page(5);
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
     let compressed = Arc::new(compressor.compress(uncompressed));
 
     let result = materializer.materialize_one("page1", compressed);
@@ -219,7 +217,7 @@ fn page_materializer_materialize_many() {
     let mut items = vec![];
     for i in 0..5 {
         let page = create_test_page(i + 1);
-        let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+        let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
         let compressed = Arc::new(compressor.compress(uncompressed));
         items.push((format!("page{}", i), compressed));
     }
@@ -242,9 +240,7 @@ fn page_materializer_collect_cached() {
         for i in 0..3 {
             cache.add(
                 &format!("page{}", i),
-                PageCacheEntryUncompressed {
-                    page: create_test_page(i + 1),
-                },
+                PageCacheEntryUncompressed::from_disk_page(create_test_page(i + 1)),
             );
         }
     }
@@ -357,9 +353,7 @@ fn page_handler_ensure_pages_cached_already_in_cache() {
         let mut cache = uncompressed_cache.write().unwrap();
         cache.add(
             &id,
-            PageCacheEntryUncompressed {
-                page: create_test_page(5),
-            },
+            PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
         );
     }
 
@@ -464,7 +458,7 @@ fn page_handler_write_back_uncompressed() {
     let handler = PageHandler::new(locator, fetcher, materializer);
 
     let page = create_test_page(10);
-    handler.write_back_uncompressed("page1", PageCacheEntryUncompressed { page });
+    handler.write_back_uncompressed("page1", PageCacheEntryUncompressed::from_disk_page(page));
 
     let cache = uncompressed_cache.read().unwrap();
     assert!(cache.has("page1"));
