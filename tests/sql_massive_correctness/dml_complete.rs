@@ -139,7 +139,6 @@ fn distinct_with_multiple_columns_and_aggregates() {
 }
 
 #[test]
-#[ignore = "QUALIFY with complex conditions may hang"]
 fn qualify_with_row_number() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
@@ -165,7 +164,6 @@ fn qualify_with_row_number() {
 }
 
 #[test]
-#[ignore = "QUALIFY with complex conditions may hang"]
 fn qualify_with_rank() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
@@ -191,7 +189,6 @@ fn qualify_with_rank() {
 }
 
 #[test]
-#[ignore = "QUALIFY with complex conditions may hang"]
 fn qualify_with_complex_condition() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
