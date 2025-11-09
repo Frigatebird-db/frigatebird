@@ -43,16 +43,26 @@ pub fn setup_executor() -> ExecutorHarness {
         Arc::new(Compressor::new()),
     ));
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
+    let use_writer = should_use_writer_inserts();
     let executor = SqlExecutor::new_with_writer_mode(
         Arc::clone(&handler),
         Arc::clone(&directory),
-        false,
+        use_writer,
     );
     ExecutorHarness {
         executor,
         handler,
         directory,
     }
+}
+
+fn should_use_writer_inserts() -> bool {
+    const DEFAULT_TEST_ROWS: usize = 1000;
+    let rows = env::var("SATORI_MASSIVE_FIXTURE_ROWS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TEST_ROWS);
+    rows > idk_uwu_ig::metadata_store::ROWS_PER_PAGE_GROUP as usize
 }
 
 #[derive(Clone, Copy)]

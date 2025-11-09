@@ -130,10 +130,11 @@ pub fn sorted_insert_row(
         .collect();
 
     let leading_column_name = &columns[sort_ordinals[0]].name;
-    let row_count = handler
-        .locate_latest_in_table(table, leading_column_name)
+    let row_count: usize = handler
+        .list_pages_in_table(table, leading_column_name)
+        .iter()
         .map(|desc| desc.entry_count as usize)
-        .unwrap_or(0);
+        .sum();
 
     let insert_idx = find_insert_position(
         handler,

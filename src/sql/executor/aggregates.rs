@@ -151,6 +151,30 @@ impl AggregateFunctionPlan {
             _ => None,
         }
     }
+
+    pub(super) fn scalar_value(&self, state: &AggregateState) -> Option<ScalarValue> {
+        match (&self.kind, state) {
+            (
+                AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr,
+                AggregateState::Count(count),
+            ) => Some(ScalarValue::Int(*count as i128)),
+            (AggregateFunctionKind::Sum, AggregateState::Sum { total, seen }) => {
+                if *seen {
+                    Some(ScalarValue::Float(*total))
+                } else {
+                    None
+                }
+            }
+            (AggregateFunctionKind::Average, AggregateState::Average { sum, count }) => {
+                if *count == 0 {
+                    None
+                } else {
+                    Some(ScalarValue::Float(*sum / *count as f64))
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 fn extract_single_arg(function: &Function) -> Result<Expr, SqlExecutionError> {
