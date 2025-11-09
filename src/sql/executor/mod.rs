@@ -1637,28 +1637,13 @@ impl SqlExecutor {
         let limit = parse_limit(limit_expr)?;
 
         if distinct_flag {
-            let mut rows = batch_to_rows(&final_batch);
-            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
-            rows.retain(|row| seen.insert(row.clone()));
-
-            let start = offset.min(rows.len());
-            let end = if let Some(limit) = limit {
-                start.saturating_add(limit).min(rows.len())
-            } else {
-                rows.len()
-            };
-            let final_rows = rows[start..end].to_vec();
-
-            let batch = rows_to_batch(final_rows);
-            let batches = if batch.num_rows == 0 {
-                Vec::new()
-            } else {
-                vec![batch]
-            };
-
+            let deduped =
+                deduplicate_batches(vec![final_batch], projection_plan.items.len());
+            let limited_batches =
+                self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
             return Ok(SelectResult {
                 columns: result_columns,
-                batches,
+                batches: limited_batches,
             });
         }
 
@@ -1785,26 +1770,13 @@ impl SqlExecutor {
         let limit = parse_limit(limit_expr)?;
 
         if distinct_flag {
-            let mut rows = batch_to_rows(&final_batch);
-            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
-            rows.retain(|row| seen.insert(row.clone()));
-
-            let start = offset.min(rows.len());
-            let end = if let Some(limit) = limit {
-                start.saturating_add(limit).min(rows.len())
-            } else {
-                rows.len()
-            };
-            let final_rows = rows[start..end].to_vec();
-            let batch = rows_to_batch(final_rows);
-            let batches = if batch.num_rows == 0 {
-                Vec::new()
-            } else {
-                vec![batch]
-            };
+            let deduped =
+                deduplicate_batches(vec![final_batch], projection_plan.items.len());
+            let limited_batches =
+                self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
             return Ok(SelectResult {
                 columns: result_columns,
-                batches,
+                batches: limited_batches,
             });
         }
 
