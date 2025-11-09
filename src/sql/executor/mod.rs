@@ -383,10 +383,28 @@ impl From<crate::sql::models::PlannerError> for SqlExecutionError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SelectResult {
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<Option<String>>>,
+    pub batches: Vec<ColumnarBatch>,
+}
+
+impl SelectResult {
+    pub fn rows(&self) -> Vec<Vec<Option<String>>> {
+        batches_to_rows(&self.batches)
+    }
+
+    pub fn into_rows(self) -> Vec<Vec<Option<String>>> {
+        batches_to_rows(&self.batches)
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.batches.iter().map(|batch| batch.num_rows).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.batches.iter().all(|batch| batch.num_rows == 0)
+    }
 }
 
 struct ProjectionPlan {
@@ -1240,7 +1258,7 @@ impl SqlExecutor {
         if candidate_rows.is_empty() && !needs_aggregation {
             return Ok(SelectResult {
                 columns: result_columns,
-                rows: Vec::new(),
+                batches: Vec::new(),
             });
         }
 
@@ -1287,7 +1305,7 @@ impl SqlExecutor {
             if selection_set.is_empty() && !needs_aggregation {
                 return Ok(SelectResult {
                     columns: result_columns,
-                    rows: Vec::new(),
+                    batches: Vec::new(),
                 });
             }
         }
@@ -1413,10 +1431,16 @@ impl SqlExecutor {
                 .iter()
                 .map(|row| row.values.clone())
                 .collect();
+            let batch = rows_to_batch(final_rows);
+            let batches = if batch.num_rows == 0 {
+                Vec::new()
+            } else {
+                vec![batch]
+            };
 
             return Ok(SelectResult {
                 columns: result_columns,
-                rows: final_rows,
+                batches,
             });
         }
 
@@ -1424,7 +1448,7 @@ impl SqlExecutor {
         if (!apply_selection_late && matching_rows.is_empty()) || no_selected_rows {
             return Ok(SelectResult {
                 columns: result_columns,
-                rows: Vec::new(),
+                batches: Vec::new(),
             });
         }
 
@@ -1508,50 +1532,17 @@ impl SqlExecutor {
             rows.len()
         };
         let final_rows = rows[start..end].to_vec();
+        let batch = rows_to_batch(final_rows);
+        let batches = if batch.num_rows == 0 {
+            Vec::new()
+        } else {
+            vec![batch]
+        };
 
         Ok(SelectResult {
             columns: result_columns,
-            rows: final_rows,
+            batches,
         })
-    }
-
-    fn transpose_batch_to_rows(
-        &self,
-        batch: &ColumnarBatch,
-    ) -> Result<Vec<Vec<Option<String>>>, SqlExecutionError> {
-        if batch.num_rows == 0 {
-            return Ok(Vec::new());
-        }
-        let column_count = batch.columns.len();
-        let mut rows = Vec::with_capacity(batch.num_rows);
-        for row_idx in 0..batch.num_rows {
-            let mut row = Vec::with_capacity(column_count);
-            for column_idx in 0..column_count {
-                let column = batch.columns.get(&column_idx).ok_or_else(|| {
-                    SqlExecutionError::OperationFailed(format!(
-                        "missing projection column at index {column_idx}"
-                    ))
-                })?;
-                row.push(column.value_as_string(row_idx));
-            }
-            rows.push(row);
-        }
-        Ok(rows)
-    }
-
-    fn transpose_batches_to_rows(
-        &self,
-        batches: &[ColumnarBatch],
-    ) -> Result<Vec<Vec<Option<String>>>, SqlExecutionError> {
-        let mut rows = Vec::new();
-        for batch in batches {
-            if batch.num_rows == 0 {
-                continue;
-            }
-            let mut chunk_rows = self.transpose_batch_to_rows(batch)?;
-            rows.append(&mut chunk_rows);
-        }
-        Ok(rows)
     }
 
     fn execute_vectorized_projection(
@@ -1580,7 +1571,7 @@ impl SqlExecutor {
         if batch.num_rows == 0 || batch.columns.is_empty() {
             return Ok(SelectResult {
                 columns: result_columns,
-                rows: Vec::new(),
+                batches: Vec::new(),
             });
         }
 
@@ -1595,7 +1586,7 @@ impl SqlExecutor {
         let limit = parse_limit(limit_expr)?;
 
         if distinct_flag {
-            let mut rows = self.transpose_batch_to_rows(&final_batch)?;
+            let mut rows = batch_to_rows(&final_batch);
             let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
             rows.retain(|row| seen.insert(row.clone()));
 
@@ -1607,19 +1598,24 @@ impl SqlExecutor {
             };
             let final_rows = rows[start..end].to_vec();
 
+            let batch = rows_to_batch(final_rows);
+            let batches = if batch.num_rows == 0 {
+                Vec::new()
+            } else {
+                vec![batch]
+            };
+
             return Ok(SelectResult {
                 columns: result_columns,
-                rows: final_rows,
+                batches,
             });
         }
 
         let limited_batches =
             self.apply_limit_offset(std::iter::once(final_batch), offset, limit)?;
-        let final_rows = self.transpose_batches_to_rows(&limited_batches)?;
-
         Ok(SelectResult {
             columns: result_columns,
-            rows: final_rows,
+            batches: limited_batches,
         })
     }
 
@@ -1682,7 +1678,7 @@ impl SqlExecutor {
         if batch.num_rows == 0 {
             return Ok(SelectResult {
                 columns: result_columns,
-                rows: Vec::new(),
+                batches: Vec::new(),
             });
         }
 
@@ -1708,7 +1704,7 @@ impl SqlExecutor {
         if processed_batches.is_empty() {
             return Ok(SelectResult {
                 columns: result_columns,
-                rows: Vec::new(),
+                batches: Vec::new(),
             });
         }
         let mut processed_batch = merge_batches(processed_batches);
@@ -1718,7 +1714,7 @@ impl SqlExecutor {
             if processed_batch.num_rows == 0 {
                 return Ok(SelectResult {
                     columns: result_columns,
-                    rows: Vec::new(),
+                    batches: Vec::new(),
                 });
             }
         }
@@ -1738,7 +1734,7 @@ impl SqlExecutor {
         let limit = parse_limit(limit_expr)?;
 
         if distinct_flag {
-            let mut rows = self.transpose_batch_to_rows(&final_batch)?;
+            let mut rows = batch_to_rows(&final_batch);
             let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
             rows.retain(|row| seen.insert(row.clone()));
 
@@ -1749,20 +1745,23 @@ impl SqlExecutor {
                 rows.len()
             };
             let final_rows = rows[start..end].to_vec();
-
+            let batch = rows_to_batch(final_rows);
+            let batches = if batch.num_rows == 0 {
+                Vec::new()
+            } else {
+                vec![batch]
+            };
             return Ok(SelectResult {
                 columns: result_columns,
-                rows: final_rows,
+                batches,
             });
         }
 
         let limited_batches =
             self.apply_limit_offset(std::iter::once(final_batch), offset, limit)?;
-        let final_rows = self.transpose_batches_to_rows(&limited_batches)?;
-
         Ok(SelectResult {
             columns: result_columns,
-            rows: final_rows,
+            batches: limited_batches,
         })
     }
 
@@ -2144,11 +2143,10 @@ impl SqlExecutor {
         let limit = parse_limit(limit_expr)?;
         let limited_batches =
             self.apply_limit_offset(std::iter::once(result_batch), offset, limit)?;
-        let final_rows = self.transpose_batches_to_rows(&limited_batches)?;
 
         Ok(SelectResult {
             columns: result_columns,
-            rows: final_rows,
+            batches: limited_batches,
         })
     }
 
@@ -3216,6 +3214,54 @@ fn strings_to_text_column(values: Vec<Option<String>>) -> ColumnarPage {
         null_bitmap,
         num_rows: len,
     }
+}
+
+fn rows_to_batch(rows: Vec<Vec<Option<String>>>) -> ColumnarBatch {
+    if rows.is_empty() {
+        return ColumnarBatch::new();
+    }
+
+    let column_count = rows[0].len();
+    let mut batch = ColumnarBatch::with_capacity(column_count);
+    batch.num_rows = rows.len();
+    for column_idx in 0..column_count {
+        let mut column_values = Vec::with_capacity(rows.len());
+        for row in &rows {
+            column_values.push(row.get(column_idx).cloned().unwrap_or(None));
+        }
+        batch
+            .columns
+            .insert(column_idx, strings_to_text_column(column_values));
+    }
+    batch
+}
+
+fn batch_to_rows(batch: &ColumnarBatch) -> Vec<Vec<Option<String>>> {
+    if batch.num_rows == 0 {
+        return Vec::new();
+    }
+    let column_count = batch.columns.len();
+    let mut rows = Vec::with_capacity(batch.num_rows);
+    for row_idx in 0..batch.num_rows {
+        let mut row = Vec::with_capacity(column_count);
+        for column_idx in 0..column_count {
+            let column = batch
+                .columns
+                .get(&column_idx)
+                .expect("missing projection column in batch");
+            row.push(column.value_as_string(row_idx));
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+fn batches_to_rows(batches: &[ColumnarBatch]) -> Vec<Vec<Option<String>>> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        rows.extend(batch_to_rows(batch));
+    }
+    rows
 }
 
 fn chunk_batch(batch: &ColumnarBatch, chunk_size: usize) -> Vec<ColumnarBatch> {

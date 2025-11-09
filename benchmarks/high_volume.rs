@@ -282,7 +282,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Returned {} rows in {}",
-        result.rows.len(),
+        result.rows().len(),
         format_duration(duration)
     );
 
@@ -302,7 +302,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Returned {} rows in {}",
-        result.rows.len(),
+        result.rows().len(),
         format_duration(duration)
     );
 
@@ -315,7 +315,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Returned {} rows in {}",
-        result.rows.len(),
+        result.rows().len(),
         format_duration(duration)
     );
 
@@ -328,7 +328,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Returned {} rows in {}",
-        result.rows.len(),
+        result.rows().len(),
         format_duration(duration)
     );
 
@@ -341,7 +341,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Count: {} in {}",
-        result.rows[0][0].as_ref().unwrap(),
+        result.rows()[0][0].as_ref().unwrap(),
         format_duration(duration)
     );
 
@@ -354,7 +354,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Count: {} in {}",
-        result.rows[0][0].as_ref().unwrap(),
+        result.rows()[0][0].as_ref().unwrap(),
         format_duration(duration)
     );
 
@@ -367,7 +367,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Returned {} rows in {}",
-        result.rows.len(),
+        result.rows().len(),
         format_duration(duration)
     );
 
@@ -387,7 +387,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Returned {} rows in {}",
-        result.rows.len(),
+        result.rows().len(),
         format_duration(duration)
     );
 
@@ -400,7 +400,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Returned {} distinct values in {}",
-        result.rows.len(),
+        result.rows().len(),
         format_duration(duration)
     );
 
@@ -422,7 +422,7 @@ fn main() {
     let duration = start.elapsed();
     println!(
         "  ✓ Returned {} rows in {}",
-        result.rows.len(),
+        result.rows().len(),
         format_duration(duration)
     );
 
@@ -448,7 +448,7 @@ fn main() {
         .expect("Verify update failed");
     println!(
         "  ✓ Verified {} rows updated",
-        result.rows[0][0].as_ref().unwrap()
+        result.rows()[0][0].as_ref().unwrap()
     );
 
     // STEP 5: Delete Benchmark
@@ -473,7 +473,7 @@ fn main() {
         .expect("Count after delete failed");
     println!(
         "  ✓ Total rows after delete: {}",
-        result.rows[0][0].as_ref().unwrap()
+        result.rows()[0][0].as_ref().unwrap()
     );
 
     // Final Summary

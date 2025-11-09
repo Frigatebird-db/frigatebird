@@ -225,7 +225,7 @@ fn sql_executor_query_returns_projected_rows() {
         .expect("simple select query");
     assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
     assert_eq!(
-        result.rows,
+        result.rows(),
         vec![vec![Some("2".to_string()), Some("Bob".to_string())]]
     );
 
@@ -233,7 +233,7 @@ fn sql_executor_query_returns_projected_rows() {
         .query("SELECT name AS nickname FROM users WHERE id = 3")
         .expect("alias projection");
     assert_eq!(alias_result.columns, vec!["nickname".to_string()]);
-    assert_eq!(alias_result.rows, vec![vec![Some("Cara".to_string())]]);
+    assert_eq!(alias_result.rows(), vec![vec![Some("Cara".to_string())]]);
 
     let wildcard_result = executor
         .query("SELECT u.* FROM users u WHERE id = 1")
@@ -243,7 +243,7 @@ fn sql_executor_query_returns_projected_rows() {
         vec!["id".to_string(), "name".to_string()]
     );
     assert_eq!(
-        wildcard_result.rows,
+        wildcard_result.rows(),
         vec![vec![Some("1".to_string()), Some("Alice".to_string())]]
     );
 }
@@ -268,7 +268,7 @@ fn sql_executor_query_limit_offset_respected() {
         .query("SELECT name FROM users WHERE id = 1 LIMIT 1 OFFSET 1")
         .expect("limit/offset query");
     assert_eq!(result.columns, vec!["name".to_string()]);
-    assert_eq!(result.rows, vec![vec![Some("Alicia".to_string())]]);
+    assert_eq!(result.rows(), vec![vec![Some("Alicia".to_string())]]);
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn sql_executor_query_requires_sort_predicate() {
         .query("SELECT name FROM users WHERE name = 'Alice'")
         .expect("missing sort predicate now scans");
     assert_eq!(result.columns, vec!["name".to_string()]);
-    assert_eq!(result.rows, vec![vec![Some("Alice".to_string())]]);
+    assert_eq!(result.rows(), vec![vec![Some("Alice".to_string())]]);
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn sql_executor_query_projects_expressions() {
         .query("SELECT id + 1 FROM users WHERE id = 1")
         .expect("expression projection should work");
     assert_eq!(result.columns, vec!["id + 1"]);
-    assert_eq!(result.rows, vec![vec![Some("2".to_string())]]);
+    assert_eq!(result.rows(), vec![vec![Some("2".to_string())]]);
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn sql_executor_query_group_by_table_prefix() {
         .expect("group by query");
     assert_eq!(result.columns, vec!["region", "SUM(amount)"]);
     assert_eq!(
-        result.rows,
+        result.rows(),
         vec![
             vec![Some("east".to_string()), Some("30".to_string())],
             vec![Some("west".to_string()), Some("15".to_string())],
@@ -411,7 +411,7 @@ fn sql_executor_query_supports_comparison_predicates() {
         .expect("comparison predicates");
     assert_eq!(result.columns, vec!["name".to_string()]);
     assert_eq!(
-        result.rows,
+        result.rows(),
         vec![
             vec![Some("Beatrice".to_string())],
             vec![Some("Cara".to_string())]
@@ -440,7 +440,7 @@ fn sql_executor_query_supports_like_predicates() {
         .expect("LIKE predicate");
     assert_eq!(result.columns, vec!["name".to_string()]);
     assert_eq!(
-        result.rows,
+        result.rows(),
         vec![
             vec![Some("Alfred".to_string())],
             vec![Some("Allison".to_string())]
@@ -450,7 +450,7 @@ fn sql_executor_query_supports_like_predicates() {
     let ilike = executor
         .query("SELECT name FROM users WHERE id = 1 AND name ILIKE 'al%'")
         .expect("ILIKE predicate");
-    assert_eq!(ilike.rows.len(), 2);
+    assert_eq!(ilike.rows().len(), 2);
 }
 
 #[test]
@@ -471,7 +471,7 @@ fn sql_executor_query_handles_nulls() {
         .query("SELECT name FROM users WHERE id = 1")
         .expect("null handling");
     assert_eq!(result.columns, vec!["name".to_string()]);
-    assert_eq!(result.rows, vec![vec![None], vec![Some("Bob".to_string())]]);
+    assert_eq!(result.rows(), vec![vec![None], vec![Some("Bob".to_string())]]);
 }
 
 #[test]
@@ -503,7 +503,7 @@ fn sql_executor_numeric_aggregates() {
         ]
     );
     assert_eq!(
-        counts.rows,
+        counts.rows(),
         vec![vec![
             Some("5".to_string()),
             Some("4".to_string()),
@@ -515,7 +515,7 @@ fn sql_executor_numeric_aggregates() {
         .query("SELECT SUM(value), AVG(value), MIN(value), MAX(value) FROM numbers WHERE id = 1")
         .expect("sum aggregates");
     assert_eq!(
-        sums.rows,
+        sums.rows(),
         vec![vec![
             Some("100".to_string()),
             Some("25".to_string()),
@@ -528,46 +528,46 @@ fn sql_executor_numeric_aggregates() {
         .query("SELECT VARIANCE(value), STDDEV(value) FROM numbers WHERE id = 1")
         .expect("variance/stddev");
     assert_eq!(
-        variance.rows,
+        variance.rows(),
         vec![vec![Some("125".to_string()), Some("11.18034".to_string())]]
     );
 
     let percentile = executor
         .query("SELECT percentile_cont(0.5, value) FROM numbers WHERE id = 1")
         .expect("percentile");
-    assert_eq!(percentile.rows, vec![vec![Some("25".to_string())]]);
+    assert_eq!(percentile.rows(), vec![vec![Some("25".to_string())]]);
 
     let filtered = executor
         .query("SELECT SUM(CASE WHEN value > 20 THEN 1 ELSE 0 END) FROM numbers WHERE id = 1")
         .expect("filtered sum");
-    println!("filtered rows: {:?}", filtered.rows);
-    assert_eq!(filtered.rows, vec![vec![Some("2".to_string())]]);
+    println!("filtered rows: {:?}", filtered.rows());
+    assert_eq!(filtered.rows(), vec![vec![Some("2".to_string())]]);
 
     let count_filtered = executor
         .query("SELECT COUNT(*) FROM numbers WHERE id = 1 AND value > 20")
         .expect("count filtered");
-    println!("count filtered: {:?}", count_filtered.rows);
-    assert_eq!(count_filtered.rows, vec![vec![Some("2".to_string())]]);
+    println!("count filtered: {:?}", count_filtered.rows());
+    assert_eq!(count_filtered.rows(), vec![vec![Some("2".to_string())]]);
 
     let null_count = executor
         .query("SELECT COUNT(*) - COUNT(value) FROM numbers WHERE id = 1")
         .expect("null count");
-    assert_eq!(null_count.rows, vec![vec![Some("1".to_string())]]);
+    assert_eq!(null_count.rows(), vec![vec![Some("1".to_string())]]);
 
     let rounded = executor
         .query("SELECT ROUND(AVG(value), 1) FROM numbers WHERE id = 1")
         .expect("rounded avg");
-    assert_eq!(rounded.rows, vec![vec![Some("25".to_string())]]);
+    assert_eq!(rounded.rows(), vec![vec![Some("25".to_string())]]);
 
     let width_bucket_avg = executor
         .query("SELECT AVG(width_bucket(value, 0, 50, 5)) FROM numbers WHERE id = 1")
         .expect("width bucket");
-    assert_eq!(width_bucket_avg.rows, vec![vec![Some("3.5".to_string())]]);
+    assert_eq!(width_bucket_avg.rows(), vec![vec![Some("3.5".to_string())]]);
 
     let empty = executor
         .query("SELECT COUNT(*) FROM numbers WHERE id = 2")
         .expect("empty aggregate");
-    assert_eq!(empty.rows, vec![vec![Some("0".to_string())]]);
+    assert_eq!(empty.rows(), vec![vec![Some("0".to_string())]]);
 }
 
 fn assert_rows_sorted(rows: &[Vec<String>], sort_indices: &[usize]) {

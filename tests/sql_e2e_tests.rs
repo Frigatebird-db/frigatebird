@@ -50,9 +50,9 @@ fn test_e2e_create_insert_update_delete_full_lifecycle() {
     let result = executor
         .query("SELECT name, price, stock FROM products WHERE id = '1'")
         .expect("select after insert");
-    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows().len(), 1);
     assert_eq!(
-        result.rows[0],
+        result.rows()[0],
         vec![
             Some("Laptop".to_string()),
             Some("999.99".to_string()),
@@ -70,7 +70,7 @@ fn test_e2e_create_insert_update_delete_full_lifecycle() {
         .query("SELECT name, price, stock FROM products WHERE id = '1'")
         .expect("select after update");
     assert_eq!(
-        result.rows[0],
+        result.rows()[0],
         vec![
             Some("Laptop".to_string()),
             Some("899.99".to_string()),
@@ -87,7 +87,7 @@ fn test_e2e_create_insert_update_delete_full_lifecycle() {
     let result = executor
         .query("SELECT COUNT(*) FROM products WHERE id = '1'")
         .expect("count after delete");
-    assert_eq!(result.rows[0], vec![Some("0".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("0".to_string())]);
 }
 
 #[test]
@@ -118,21 +118,21 @@ fn test_e2e_math_functions_comprehensive() {
         .query("SELECT AVG(ABS(value)) FROM numbers WHERE id = '1'")
         .expect("abs");
     // |-42.7| + |3.14159| + |10| + |100| = 42.7 + 3.14159 + 10 + 100 = 155.84159, avg = 38.96
-    assert!(result.rows[0][0].as_ref().unwrap().starts_with("38.96"));
+    assert!(result.rows()[0][0].as_ref().unwrap().starts_with("38.96"));
 
     // Test ROUND
     let result = executor
         .query("SELECT ROUND(AVG(value), 2) FROM numbers WHERE id = '1'")
         .expect("round");
     // (-42.7 + 3.14159 + 10 + 100) / 4 ≈ 17.6
-    assert!(result.rows[0][0].as_ref().unwrap().starts_with("17.6"));
+    assert!(result.rows()[0][0].as_ref().unwrap().starts_with("17.6"));
 
     // Test that CEIL and FLOOR work (tested individually elsewhere, here just verify avg is reasonable)
     let result = executor
         .query("SELECT AVG(value) FROM numbers WHERE id = '1'")
         .expect("avg for bounds check");
     // Average should be around 17.6
-    let avg_val = result.rows[0][0].as_ref().unwrap().parse::<f64>().unwrap();
+    let avg_val = result.rows()[0][0].as_ref().unwrap().parse::<f64>().unwrap();
     assert!(avg_val > 17.0 && avg_val < 18.0);
 
     // Test POWER - sum of squares
@@ -140,7 +140,7 @@ fn test_e2e_math_functions_comprehensive() {
         .query("SELECT ROUND(SUM(POWER(value, 2)), 2) FROM numbers WHERE id = '1'")
         .expect("power");
     // (-42.7)^2 + (3.14159)^2 + 10^2 + 100^2 = 1823.29 + 9.87 + 100 + 10000 = 11933.16
-    assert!(result.rows[0][0].as_ref().unwrap().starts_with("11933"));
+    assert!(result.rows()[0][0].as_ref().unwrap().starts_with("11933"));
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn test_e2e_aggregate_functions_complete() {
         .query("SELECT COUNT(*), SUM(amount), AVG(amount), MIN(amount), MAX(amount) FROM sales WHERE id = '1'")
         .expect("all aggregates");
     assert_eq!(
-        result.rows[0],
+        result.rows()[0],
         vec![
             Some("4".to_string()),
             Some("500".to_string()),
@@ -189,19 +189,19 @@ fn test_e2e_aggregate_functions_complete() {
     let result = executor
         .query("SELECT VARIANCE(amount), ROUND(STDDEV(amount), 2) FROM sales WHERE id = '1'")
         .expect("variance/stddev");
-    assert_eq!(result.rows[0][0], Some("3125".to_string()));
-    assert_eq!(result.rows[0][1], Some("55.9".to_string()));
+    assert_eq!(result.rows()[0][0], Some("3125".to_string()));
+    assert_eq!(result.rows()[0][1], Some("55.9".to_string()));
 
     // Test PERCENTILE_CONT
     let result = executor
         .query("SELECT percentile_cont(0.5, amount) FROM sales WHERE id = '1'")
         .expect("median");
-    assert_eq!(result.rows[0], vec![Some("125".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("125".to_string())]);
 
     let result = executor
         .query("SELECT percentile_cont(0.25, amount) FROM sales WHERE id = '1'")
         .expect("25th percentile");
-    assert_eq!(result.rows[0], vec![Some("87.5".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("87.5".to_string())]);
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn test_e2e_width_bucket_function() {
     let result = executor
         .query("SELECT AVG(width_bucket(score, 0, 100, 5)) FROM scores WHERE id = '1'")
         .expect("avg width_bucket");
-    assert_eq!(result.rows[0], vec![Some("3.5".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("3.5".to_string())]);
 }
 
 #[test]
@@ -265,25 +265,25 @@ fn test_e2e_null_handling() {
     let result = executor
         .query("SELECT COUNT(*) FROM data WHERE id = '1'")
         .expect("count all");
-    assert_eq!(result.rows[0], vec![Some("3".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("3".to_string())]);
 
     // Test COUNT(value) excludes nulls
     let result = executor
         .query("SELECT COUNT(value) FROM data WHERE id = '1'")
         .expect("count non-null");
-    assert_eq!(result.rows[0], vec![Some("2".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("2".to_string())]);
 
     // Test SUM excludes nulls
     let result = executor
         .query("SELECT SUM(value) FROM data WHERE id = '1'")
         .expect("sum");
-    assert_eq!(result.rows[0], vec![Some("40".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("40".to_string())]);
 
     // Test AVG excludes nulls (40/2 = 20)
     let result = executor
         .query("SELECT AVG(value) FROM data WHERE id = '1'")
         .expect("avg");
-    assert_eq!(result.rows[0], vec![Some("20".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("20".to_string())]);
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn test_e2e_exp_ln_log_functions() {
         .query("SELECT ROUND(AVG(EXP(value)), 2) FROM math WHERE id = '1'")
         .expect("exp");
     // e^1 + e^2 + e^10 + e^100 is huge, so this should be a large number
-    assert!(result.rows[0][0].as_ref().unwrap().parse::<f64>().unwrap() > 1000.0);
+    assert!(result.rows()[0][0].as_ref().unwrap().parse::<f64>().unwrap() > 1000.0);
 
     // Test LN - average of ln(value)
     let result = executor
@@ -322,7 +322,7 @@ fn test_e2e_exp_ln_log_functions() {
         .expect("ln");
     // ln(1)=0, ln(2)≈0.693, ln(10)≈2.303, ln(100)≈4.605
     // avg ≈ 1.9
-    assert!(result.rows[0][0].as_ref().unwrap().starts_with("1.9"));
+    assert!(result.rows()[0][0].as_ref().unwrap().starts_with("1.9"));
 
     // Test LOG base 10
     let result = executor
@@ -330,7 +330,7 @@ fn test_e2e_exp_ln_log_functions() {
         .expect("log");
     // log10(1)=0, log10(2)≈0.301, log10(10)=1, log10(100)=2
     // avg ≈ 0.825
-    assert!(result.rows[0][0].as_ref().unwrap().starts_with("0.825"));
+    assert!(result.rows()[0][0].as_ref().unwrap().starts_with("0.825"));
 }
 
 #[test]
@@ -360,14 +360,14 @@ fn test_e2e_combined_functions_and_case() {
     let result = executor
         .query("SELECT SUM(CASE WHEN amount > 20 THEN 1 ELSE 0 END) FROM values WHERE id = '1'")
         .expect("case sum");
-    assert_eq!(result.rows[0], vec![Some("2".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("2".to_string())]);
 
     // Test combined math functions
     let result = executor
         .query("SELECT ROUND(AVG(POWER(amount, 2)), 2) FROM values WHERE id = '1'")
         .expect("avg of squares");
     // (100 + 400 + 900 + 1600) / 4 = 3000 / 4 = 750
-    assert_eq!(result.rows[0], vec![Some("750".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("750".to_string())]);
 }
 
 #[test]
@@ -394,14 +394,14 @@ fn test_e2e_multiple_inserts_updates_deletes() {
     let result = executor
         .query("SELECT COUNT(*) FROM inventory WHERE id = '1'")
         .expect("count");
-    assert_eq!(result.rows[0], vec![Some("5".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("5".to_string())]);
 
     // Verify sum
     let result = executor
         .query("SELECT SUM(quantity) FROM inventory WHERE id = '1'")
         .expect("sum");
     // 10 + 20 + 30 + 40 + 50 = 150
-    assert_eq!(result.rows[0], vec![Some("150".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("150".to_string())]);
 
     // Update all quantities (double them)
     for i in 1..=5 {
@@ -419,7 +419,7 @@ fn test_e2e_multiple_inserts_updates_deletes() {
         .query("SELECT SUM(quantity) FROM inventory WHERE id = '1'")
         .expect("sum after update");
     // 20 + 40 + 60 + 80 + 100 = 300
-    assert_eq!(result.rows[0], vec![Some("300".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("300".to_string())]);
 
     // Delete half the items
     for i in 1..=2 {
@@ -435,14 +435,14 @@ fn test_e2e_multiple_inserts_updates_deletes() {
     let result = executor
         .query("SELECT COUNT(*) FROM inventory WHERE id = '1'")
         .expect("count after delete");
-    assert_eq!(result.rows[0], vec![Some("3".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("3".to_string())]);
 
     // Verify sum
     let result = executor
         .query("SELECT SUM(quantity) FROM inventory WHERE id = '1'")
         .expect("sum after delete");
     // 60 + 80 + 100 = 240
-    assert_eq!(result.rows[0], vec![Some("240".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("240".to_string())]);
 }
 
 #[test]
@@ -466,18 +466,18 @@ fn test_select_on_non_sort_column_filters() {
     let result = executor
         .query("SELECT COUNT(*) FROM tasks WHERE status = 'done'")
         .expect("count done");
-    assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0], vec![Some("2".to_string())]);
+    assert_eq!(result.rows().len(), 1);
+    assert_eq!(result.rows()[0], vec![Some("2".to_string())]);
 
     let result = executor
         .query("SELECT COUNT(*) FROM tasks WHERE status = 'pending'")
         .expect("count pending");
-    assert_eq!(result.rows[0], vec![Some("1".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("1".to_string())]);
 
     let result = executor
         .query("SELECT COUNT(*) FROM tasks WHERE status = 'done' OR status = 'pending'")
         .expect("count combined");
-    assert_eq!(result.rows[0], vec![Some("3".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("3".to_string())]);
 }
 
 #[test]
@@ -501,30 +501,30 @@ fn test_select_without_where_and_order_by() {
     let result = executor
         .query("SELECT COUNT(*) FROM jobs")
         .expect("select without where");
-    assert_eq!(result.rows[0], vec![Some("3".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("3".to_string())]);
 
     let result = executor
         .query("SELECT id FROM jobs ORDER BY id")
         .expect("select order by sort key");
-    assert_eq!(result.rows.len(), 3);
-    assert_eq!(result.rows[0], vec![Some("1".to_string())]);
-    assert_eq!(result.rows[1], vec![Some("2".to_string())]);
-    assert_eq!(result.rows[2], vec![Some("3".to_string())]);
+    assert_eq!(result.rows().len(), 3);
+    assert_eq!(result.rows()[0], vec![Some("1".to_string())]);
+    assert_eq!(result.rows()[1], vec![Some("2".to_string())]);
+    assert_eq!(result.rows()[2], vec![Some("3".to_string())]);
 
     let result = executor
         .query("SELECT id, status FROM jobs ORDER BY id DESC")
         .expect("select order by desc");
-    assert_eq!(result.rows.len(), 3);
+    assert_eq!(result.rows().len(), 3);
     assert_eq!(
-        result.rows[0],
+        result.rows()[0],
         vec![Some("3".to_string()), Some("done".to_string())]
     );
     assert_eq!(
-        result.rows[1],
+        result.rows()[1],
         vec![Some("2".to_string()), Some("pending".to_string())]
     );
     assert_eq!(
-        result.rows[2],
+        result.rows()[2],
         vec![Some("1".to_string()), Some("open".to_string())]
     );
 }
@@ -554,7 +554,7 @@ fn test_update_and_delete_with_non_sort_filters() {
     let result = executor
         .query("SELECT payload FROM tickets WHERE id = '2'")
         .expect("select updated row");
-    assert_eq!(result.rows[0], vec![Some("updated".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("updated".to_string())]);
 
     executor
         .execute("DELETE FROM tickets WHERE status = 'open' OR status = 'done'")
@@ -563,12 +563,12 @@ fn test_update_and_delete_with_non_sort_filters() {
     let result = executor
         .query("SELECT COUNT(*) FROM tickets")
         .expect("count remaining");
-    assert_eq!(result.rows[0], vec![Some("1".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("1".to_string())]);
 
     let result = executor
         .query("SELECT id FROM tickets")
         .expect("select remaining row");
-    assert_eq!(result.rows, vec![vec![Some("2".to_string())]]);
+    assert_eq!(result.rows(), vec![vec![Some("2".to_string())]]);
 }
 
 #[test]
@@ -595,7 +595,7 @@ fn test_update_and_delete_without_where() {
     let result = executor
         .query("SELECT COUNT(*) FROM bulk WHERE status = 'closed'")
         .expect("count closed");
-    assert_eq!(result.rows[0], vec![Some("5".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("5".to_string())]);
 
     executor
         .execute("DELETE FROM bulk")
@@ -604,7 +604,7 @@ fn test_update_and_delete_without_where() {
     let result = executor
         .query("SELECT COUNT(*) FROM bulk")
         .expect("count after delete");
-    assert_eq!(result.rows[0], vec![Some("0".to_string())]);
+    assert_eq!(result.rows()[0], vec![Some("0".to_string())]);
 }
 
 #[test]
@@ -622,7 +622,7 @@ fn test_insert_default_keyword() {
     let result = executor
         .query("SELECT status FROM defaults WHERE id = '1'")
         .expect("select status");
-    assert_eq!(result.rows[0], vec![None]);
+    assert_eq!(result.rows()[0], vec![None]);
 }
 
 #[test]
@@ -647,7 +647,7 @@ fn test_select_distinct_rows() {
         .query("SELECT DISTINCT status FROM distincts")
         .expect("distinct");
     let mut values: Vec<_> = result
-        .rows
+        .rows()
         .into_iter()
         .map(|row| row[0].clone().unwrap())
         .collect();
@@ -657,5 +657,5 @@ fn test_select_distinct_rows() {
     let result = executor
         .query("SELECT DISTINCT status FROM distincts LIMIT 1")
         .expect("distinct limit");
-    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows().len(), 1);
 }
