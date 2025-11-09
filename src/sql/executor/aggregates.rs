@@ -1,13 +1,269 @@
 use super::SqlExecutionError;
+use super::batch::{ColumnarPage, ColumnData};
 use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
 use super::helpers::collect_expr_column_ordinals;
-use super::values::{CachedValue, ScalarValue, scalar_from_f64};
+use super::values::{CachedValue, ScalarValue, format_float, scalar_from_f64};
+use super::GroupKey;
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, SelectItem};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub(super) type MaterializedColumns = HashMap<usize, HashMap<u64, CachedValue>>;
 pub(super) type WindowResultMap = HashMap<String, Vec<ScalarValue>>;
+pub(super) type AggregationHashTable = HashMap<GroupKey, Vec<AggregateState>>;
+
+#[derive(Debug, Clone)]
+pub(super) enum AggregateState {
+    Count(u64),
+    Sum { total: f64, seen: bool },
+    Average { sum: f64, count: u64 },
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum AggregateFunctionKind {
+    CountStar,
+    CountExpr,
+    Sum,
+    Average,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AggregateFunctionPlan {
+    pub(super) kind: AggregateFunctionKind,
+    pub(super) arg: Option<Expr>,
+}
+
+impl AggregateFunctionPlan {
+    pub(super) fn from_expr(expr: &Expr) -> Result<Option<Self>, SqlExecutionError> {
+        if let Expr::Function(function) = expr {
+            Self::from_function(function).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn from_function(function: &Function) -> Result<Self, SqlExecutionError> {
+        if function.over.is_some()
+            || !function.order_by.is_empty()
+            || function.filter.is_some()
+            || function.distinct
+        {
+            return Err(SqlExecutionError::Unsupported(
+                "vectorized aggregation does not support advanced aggregate modifiers".into(),
+            ));
+        }
+
+        let name = function
+            .name
+            .0
+            .last()
+            .map(|ident| ident.value.to_uppercase())
+            .unwrap_or_default();
+
+        match name.as_str() {
+            "COUNT" => {
+                if function.args.is_empty() {
+                    return Ok(Self {
+                        kind: AggregateFunctionKind::CountStar,
+                        arg: None,
+                    });
+                }
+                if function.args.len() == 1 {
+                    match &function.args[0] {
+                        FunctionArg::Unnamed(arg) | FunctionArg::Named { arg, .. } => {
+                            match arg {
+                                FunctionArgExpr::Wildcard => Ok(Self {
+                                    kind: AggregateFunctionKind::CountStar,
+                                    arg: None,
+                                }),
+                                FunctionArgExpr::Expr(expr) => Ok(Self {
+                                    kind: AggregateFunctionKind::CountExpr,
+                                    arg: Some(expr.clone()),
+                                }),
+                                FunctionArgExpr::QualifiedWildcard(_) => Err(
+                                    SqlExecutionError::Unsupported(
+                                        "vectorized COUNT does not support qualified *".into(),
+                                    ),
+                                ),
+                            }
+                        }
+                    }
+                } else {
+                    Err(SqlExecutionError::Unsupported(
+                        "COUNT expects a single argument".into(),
+                    ))
+                }
+            }
+            "SUM" => {
+                let expr = extract_single_arg(function)?;
+                Ok(Self {
+                    kind: AggregateFunctionKind::Sum,
+                    arg: Some(expr),
+                })
+            }
+            "AVG" => {
+                let expr = extract_single_arg(function)?;
+                Ok(Self {
+                    kind: AggregateFunctionKind::Average,
+                    arg: Some(expr),
+                })
+            }
+            _ => Err(SqlExecutionError::Unsupported(format!(
+                "aggregate {} is not supported by vectorized aggregation",
+                name
+            ))),
+        }
+    }
+
+    pub(super) fn initial_state(&self) -> AggregateState {
+        match self.kind {
+            AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr => {
+                AggregateState::Count(0)
+            }
+            AggregateFunctionKind::Sum => AggregateState::Sum {
+                total: 0.0,
+                seen: false,
+            },
+            AggregateFunctionKind::Average => AggregateState::Average { sum: 0.0, count: 0 },
+        }
+    }
+
+    pub(super) fn finalize_value(&self, state: &AggregateState) -> Option<String> {
+        match (&self.kind, state) {
+            (
+                AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr,
+                AggregateState::Count(count),
+            ) => Some(count.to_string()),
+            (AggregateFunctionKind::Sum, AggregateState::Sum { total, seen }) => {
+                if *seen {
+                    Some(format_float(*total))
+                } else {
+                    None
+                }
+            }
+            (AggregateFunctionKind::Average, AggregateState::Average { sum, count }) => {
+                if *count == 0 {
+                    None
+                } else {
+                    Some(format_float(*sum / *count as f64))
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+fn extract_single_arg(function: &Function) -> Result<Expr, SqlExecutionError> {
+    if function.args.len() != 1 {
+        return Err(SqlExecutionError::Unsupported(
+            "aggregate expects a single argument".into(),
+        ));
+    }
+    match &function.args[0] {
+        FunctionArg::Unnamed(arg) | FunctionArg::Named { arg, .. } => match arg {
+            FunctionArgExpr::Expr(expr) => Ok(expr.clone()),
+            _ => Err(SqlExecutionError::Unsupported(
+                "aggregate argument must be an expression".into(),
+            )),
+        },
+    }
+}
+
+fn ensure_state_vec<'a>(
+    hash_table: &'a mut AggregationHashTable,
+    key: &GroupKey,
+    template: &[AggregateState],
+) -> &'a mut Vec<AggregateState> {
+    hash_table
+        .entry(key.clone())
+        .or_insert_with(|| template.to_vec())
+}
+
+pub(super) fn vectorized_count_star_update(
+    hash_table: &mut AggregationHashTable,
+    agg_index: usize,
+    group_keys: &[GroupKey],
+    template: &[AggregateState],
+) {
+    for key in group_keys {
+        if let Some(AggregateState::Count(value)) =
+            ensure_state_vec(hash_table, key, template).get_mut(agg_index)
+        {
+            *value += 1;
+        }
+    }
+}
+
+pub(super) fn vectorized_count_value_update(
+    hash_table: &mut AggregationHashTable,
+    agg_index: usize,
+    group_keys: &[GroupKey],
+    values_page: &ColumnarPage,
+    template: &[AggregateState],
+) {
+    for (row_idx, key) in group_keys.iter().enumerate() {
+        if values_page.null_bitmap.is_set(row_idx) {
+            continue;
+        }
+        if let Some(AggregateState::Count(value)) =
+            ensure_state_vec(hash_table, key, template).get_mut(agg_index)
+        {
+            *value += 1;
+        }
+    }
+}
+
+pub(super) fn vectorized_sum_update(
+    hash_table: &mut AggregationHashTable,
+    agg_index: usize,
+    group_keys: &[GroupKey],
+    values_page: &ColumnarPage,
+    template: &[AggregateState],
+) {
+    for (row_idx, key) in group_keys.iter().enumerate() {
+        if values_page.null_bitmap.is_set(row_idx) {
+            continue;
+        }
+        if let Some(value) = numeric_value(values_page, row_idx) {
+            if let Some(AggregateState::Sum { total, seen }) =
+                ensure_state_vec(hash_table, key, template).get_mut(agg_index)
+            {
+                *total += value;
+                *seen = true;
+            }
+        }
+    }
+}
+
+pub(super) fn vectorized_average_update(
+    hash_table: &mut AggregationHashTable,
+    agg_index: usize,
+    group_keys: &[GroupKey],
+    values_page: &ColumnarPage,
+    template: &[AggregateState],
+) {
+    for (row_idx, key) in group_keys.iter().enumerate() {
+        if values_page.null_bitmap.is_set(row_idx) {
+            continue;
+        }
+        if let Some(value) = numeric_value(values_page, row_idx) {
+            if let Some(AggregateState::Average { sum, count }) =
+                ensure_state_vec(hash_table, key, template).get_mut(agg_index)
+            {
+                *sum += value;
+                *count += 1;
+            }
+        }
+    }
+}
+
+fn numeric_value(page: &ColumnarPage, idx: usize) -> Option<f64> {
+    match &page.data {
+        ColumnData::Int64(values) => values.get(idx).copied().map(|v| v as f64),
+        ColumnData::Float64(values) => values.get(idx).copied(),
+        _ => None,
+    }
+}
 
 pub(super) struct AggregateProjectionPlan {
     pub(super) outputs: Vec<AggregateProjection>,
