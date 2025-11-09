@@ -105,10 +105,10 @@ fn page_many_entries() {
 fn compress_empty_page() {
     let compressor = Compressor::new();
     let page = Page::new();
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
-    assert_eq!(decompressed.page.entries.len(), 0);
+    assert_eq!(decompressed.len(), 0);
 }
 
 #[test]
@@ -116,11 +116,14 @@ fn compress_single_entry_page() {
     let compressor = Compressor::new();
     let mut page = Page::new();
     page.add_entry(Entry::new("test"));
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
-    assert_eq!(decompressed.page.entries.len(), 1);
-    assert_eq!(decompressed.page.entries[0].get_data(), "test");
+    assert_eq!(decompressed.len(), 1);
+    assert_eq!(
+        decompressed.entry_at(0).unwrap().get_data(),
+        "test"
+    );
 }
 
 #[test]
@@ -133,11 +136,11 @@ fn compress_already_compressed_data() {
         page.add_entry(Entry::new(&random_like));
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page: page.clone() });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page.clone()));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(decompressed.page.entries.len(), page.entries.len());
+    assert_eq!(decompressed.len(), page.entries.len());
 }
 
 #[test]
@@ -148,13 +151,13 @@ fn compress_decompress_preserves_order() {
         page.add_entry(Entry::new(&format!("entry_{}", i)));
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed { page: page.clone() });
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page.clone()));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
     for i in 0..100 {
         assert_eq!(
-            decompressed.page.entries[i].get_data(),
+            decompressed.entry_at(i).unwrap().get_data(),
             page.entries[i].get_data()
         );
     }
@@ -346,9 +349,7 @@ fn page_handler_get_pages_duplicate_descriptors() {
         .unwrap();
     handler.write_back_uncompressed(
         &desc.id,
-        PageCacheEntryUncompressed {
-            page: create_test_page(5),
-        },
+        PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
     );
 
     // Request same descriptor multiple times
@@ -368,11 +369,14 @@ fn page_handler_write_back_then_read() {
         .unwrap();
     let page = create_test_page(10);
 
-    handler.write_back_uncompressed(&desc.id, PageCacheEntryUncompressed { page: page.clone() });
+    handler.write_back_uncompressed(
+        &desc.id,
+        PageCacheEntryUncompressed::from_disk_page(page.clone()),
+    );
 
     let results = handler.get_page(desc);
     assert!(results.is_some());
-    assert_eq!(results.unwrap().page.entries.len(), 10);
+    assert_eq!(results.unwrap().page.len(), 10);
 }
 
 #[test]
@@ -390,9 +394,7 @@ fn page_handler_concurrent_write_back_same_id() {
         let handle = thread::spawn(move || {
             handler_clone.write_back_uncompressed(
                 &id,
-                PageCacheEntryUncompressed {
-                    page: create_test_page(i),
-                },
+                PageCacheEntryUncompressed::from_disk_page(create_test_page(i)),
             );
         });
         handles.push(handle);
@@ -420,15 +422,11 @@ fn prefetch_all_pages_k_equals_total() {
 
     handler.write_back_uncompressed(
         &desc1.id,
-        PageCacheEntryUncompressed {
-            page: create_test_page(5),
-        },
+        PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
     );
     handler.write_back_uncompressed(
         &desc2.id,
-        PageCacheEntryUncompressed {
-            page: create_test_page(5),
-        },
+        PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
     );
 
     let page_ids = vec![desc1.id, desc2.id];
@@ -447,9 +445,7 @@ fn prefetch_k_greater_than_total() {
         .unwrap();
     handler.write_back_uncompressed(
         &desc.id,
-        PageCacheEntryUncompressed {
-            page: create_test_page(5),
-        },
+        PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
     );
 
     let page_ids = vec![desc.id];

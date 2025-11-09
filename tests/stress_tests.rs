@@ -395,13 +395,10 @@ fn compressor_stress_concurrent_operations() {
         let handle = thread::spawn(move || {
             for j in 0..100 {
                 let page = create_page(i % 20 + 1);
-                let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+                let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
                 let compressed = comp.compress(Arc::clone(&uncompressed));
                 let decompressed = comp.decompress(Arc::new(compressed));
-                assert_eq!(
-                    uncompressed.page.entries.len(),
-                    decompressed.page.entries.len()
-                );
+                assert_eq!(uncompressed.page.len(), decompressed.len());
             }
         });
         handles.push(handle);
@@ -419,13 +416,10 @@ fn compressor_stress_large_pages() {
     // Compress pages of increasing size
     for size in (100..=10000).step_by(500) {
         let page = create_page(size);
-        let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+        let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
         let compressed = compressor.compress(Arc::clone(&uncompressed));
         let decompressed = compressor.decompress(Arc::new(compressed));
-        assert_eq!(
-            uncompressed.page.entries.len(),
-            decompressed.page.entries.len()
-        );
+        assert_eq!(uncompressed.page.len(), decompressed.len());
     }
 }
 
@@ -438,20 +432,20 @@ fn compressor_stress_pathological_data() {
     for _ in 0..1000 {
         page1.add_entry(Entry::new("\0\0\0\0\0\0\0\0"));
     }
-    let u1 = Arc::new(PageCacheEntryUncompressed { page: page1 });
+    let u1 = Arc::new(PageCacheEntryUncompressed::from_disk_page(page1));
     let c1 = compressor.compress(Arc::clone(&u1));
     let d1 = compressor.decompress(Arc::new(c1));
-    assert_eq!(u1.page.entries.len(), d1.page.entries.len());
+    assert_eq!(u1.page.len(), d1.len());
 
     // Ascending sequence
     let mut page2 = Page::new();
     for i in 0..1000 {
         page2.add_entry(Entry::new(&format!("{:010}", i)));
     }
-    let u2 = Arc::new(PageCacheEntryUncompressed { page: page2 });
+    let u2 = Arc::new(PageCacheEntryUncompressed::from_disk_page(page2));
     let c2 = compressor.compress(Arc::clone(&u2));
     let d2 = compressor.decompress(Arc::new(c2));
-    assert_eq!(u2.page.entries.len(), d2.page.entries.len());
+    assert_eq!(u2.page.len(), d2.len());
 
     // Alternating pattern
     let mut page3 = Page::new();
@@ -462,10 +456,10 @@ fn compressor_stress_pathological_data() {
             page3.add_entry(Entry::new("BBBBBBBBBB"));
         }
     }
-    let u3 = Arc::new(PageCacheEntryUncompressed { page: page3 });
+    let u3 = Arc::new(PageCacheEntryUncompressed::from_disk_page(page3));
     let c3 = compressor.compress(Arc::clone(&u3));
     let d3 = compressor.decompress(Arc::new(c3));
-    assert_eq!(u3.page.entries.len(), d3.page.entries.len());
+    assert_eq!(u3.page.len(), d3.len());
 }
 
 #[test]
@@ -476,13 +470,10 @@ fn compressor_stress_random_size_pages() {
         // Random size between 1 and 1000
         let size = (idk_uwu_ig::entry::current_epoch_millis() % 1000 + 1) as usize;
         let page = create_page(size);
-        let uncompressed = Arc::new(PageCacheEntryUncompressed { page });
+        let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
         let compressed = compressor.compress(Arc::clone(&uncompressed));
         let decompressed = compressor.decompress(Arc::new(compressed));
-        assert_eq!(
-            uncompressed.page.entries.len(),
-            decompressed.page.entries.len()
-        );
+        assert_eq!(uncompressed.page.len(), decompressed.len());
     }
 }
 
@@ -772,7 +763,7 @@ fn chaos_test_everything_concurrent() {
         let handle = thread::spawn(move || {
             for _ in 0..50 {
                 let page = create_page(i + 1);
-                let u = Arc::new(PageCacheEntryUncompressed { page });
+                let u = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
                 let c = comp.compress(Arc::clone(&u));
                 let _ = comp.decompress(Arc::new(c));
             }

@@ -25,6 +25,8 @@ pub enum UpdateOp {
     Append { entry: Entry },
     /// Insert a new entry at the provided logical row, shifting existing entries.
     InsertAt { row: u64, entry: Entry },
+    /// Buffer a fully materialized row for later ingestion.
+    BufferRow { row: Vec<String> },
 }
 
 /// A unit of work handed to the Writer.

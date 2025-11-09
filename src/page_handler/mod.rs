@@ -148,7 +148,16 @@ impl PageFetcher {
             return hit;
         }
 
-        let compressed = self.page_io.read_from_path(&meta.disk_path, meta.offset);
+        let compressed = match self.page_io.read_from_path(&meta.disk_path, meta.offset) {
+            Ok(page) => page,
+            Err(err) => {
+                eprintln!(
+                    "page fetcher: failed to read page {} from {}: {}",
+                    meta.id, meta.disk_path, err
+                );
+                PageCacheEntryCompressed { page: Vec::new() }
+            }
+        };
         {
             let mut cache = self.compressed_page_cache.write().unwrap();
             cache.add(&meta.id, compressed);
@@ -180,10 +189,18 @@ impl PageFetcher {
         // Batch read per unique path
         for (path, items) in by_path.into_iter() {
             let offsets: Vec<u64> = items.iter().map(|(_, m)| m.offset).collect();
-            let pages = self
-                .page_io
-                .read_batch_from_path(&path, &offsets)
-                .expect("batch read must succeed");
+            let pages = match self.page_io.read_batch_from_path(&path, &offsets) {
+                Ok(pages) => pages,
+                Err(err) => {
+                    eprintln!(
+                        "page fetcher: failed batch read from {} ({} offsets): {}",
+                        path,
+                        offsets.len(),
+                        err
+                    );
+                    continue;
+                }
+            };
 
             for ((idx, meta), page) in items.into_iter().zip(pages.into_iter()) {
                 results[idx] = Some((meta.id.clone(), page));
@@ -256,7 +273,9 @@ impl PageMaterializer {
         id: &str,
         compressed: Arc<PageCacheEntryCompressed>,
     ) -> Option<Arc<PageCacheEntryUncompressed>> {
-        let page = self.compressor.decompress(compressed);
+        let page = PageCacheEntryUncompressed {
+            page: self.compressor.decompress(compressed),
+        };
         {
             let mut cache = self.uncompressed_page_cache.write().unwrap();
             cache.add(id, page);
@@ -274,7 +293,9 @@ impl PageMaterializer {
 
         let mut materialized: Vec<(String, PageCacheEntryUncompressed)> = Vec::new();
         for (id, comp) in items.into_iter() {
-            let page = self.compressor.decompress(comp);
+            let page = PageCacheEntryUncompressed {
+                page: self.compressor.decompress(comp),
+            };
             materialized.push((id, page));
         }
 
@@ -371,10 +392,7 @@ impl PageHandler {
     pub fn read_entry_at(&self, table: &str, column: &str, row: u64) -> Option<entry::Entry> {
         let location = self.locate_row_in_table(table, column, row)?;
         let page = self.get_page(location.descriptor.clone())?;
-        page.page
-            .entries
-            .get(location.page_row_index as usize)
-            .cloned()
+        page.page.entry_at(location.page_row_index as usize)
     }
 
     pub fn update_entry_count_in_table(

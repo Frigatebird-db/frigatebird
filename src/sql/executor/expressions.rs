@@ -1,13 +1,14 @@
 use super::SqlExecutionError;
+use super::batch::{Bitmap, ColumnData, ColumnarPage};
 use super::aggregates::{
     AggregateDataset, MaterializedColumns, evaluate_aggregate_function, is_aggregate_function,
 };
-use super::helpers::{is_null_value, like_match, regex_match};
+use super::helpers::{column_name_from_expr, expr_to_string, is_null_value, like_match, regex_match};
 use super::row_functions::evaluate_row_function;
 use super::scalar_functions::evaluate_scalar_function;
 use super::values::{
     CachedValue, ScalarValue, cached_to_scalar, combine_numeric, compare_scalar_values,
-    compare_strs, scalar_from_f64,
+    compare_strs, is_encoded_null, scalar_from_f64,
 };
 use sqlparser::ast::{BinaryOperator, Expr, Function, UnaryOperator, Value};
 use std::borrow::Cow;
@@ -896,5 +897,296 @@ fn column_operand<'a>(
         Some(CachedValue::Null) => Ok(OperandValue::Null),
         Some(CachedValue::Text(text)) => Ok(OperandValue::Text(Cow::Borrowed(text.as_str()))),
         None => Ok(OperandValue::Null),
+    }
+}
+
+pub(super) fn evaluate_selection_on_page(
+    expr: &Expr,
+    pages: &HashMap<String, &ColumnarPage>,
+) -> Result<Bitmap, SqlExecutionError> {
+    let num_rows = pages
+        .values()
+        .next()
+        .map(|page| page.len())
+        .unwrap_or(0);
+
+    if num_rows == 0 {
+        return Ok(Bitmap::new(0));
+    }
+
+    match expr {
+        Expr::BinaryOp { left, op, right } => match op {
+            BinaryOperator::And => {
+                let mut left_bitmap = evaluate_selection_on_page(left, pages)?;
+                let right_bitmap = evaluate_selection_on_page(right, pages)?;
+                left_bitmap.and(&right_bitmap);
+                Ok(left_bitmap)
+            }
+            BinaryOperator::Or => {
+                let mut left_bitmap = evaluate_selection_on_page(left, pages)?;
+                let right_bitmap = evaluate_selection_on_page(right, pages)?;
+                left_bitmap.or(&right_bitmap);
+                Ok(left_bitmap)
+            }
+            BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq => {
+                let (column, literal, normalized_op) =
+                    resolve_column_literal(left, right, op).ok_or_else(|| {
+                        SqlExecutionError::Unsupported(
+                            "vectorized WHERE only supports column-to-literal predicates".into(),
+                        )
+                    })?;
+                let page = pages.get(&column).ok_or_else(|| {
+                    SqlExecutionError::Unsupported(format!(
+                        "column {column} not available for vectorized evaluation"
+                    ))
+                })?;
+                evaluate_column_comparison(&normalized_op, &literal, page)
+            }
+            _ => Err(SqlExecutionError::Unsupported(format!(
+                "vectorized WHERE does not support operator {op:?}"
+            ))),
+        },
+        Expr::UnaryOp { op, expr } => match op {
+            UnaryOperator::Not => {
+                let mut bitmap = evaluate_selection_on_page(expr, pages)?;
+                bitmap.invert();
+                Ok(bitmap)
+            }
+            _ => Err(SqlExecutionError::Unsupported(format!(
+                "vectorized WHERE does not support unary operator {op:?}"
+            ))),
+        },
+        Expr::Nested(inner) => evaluate_selection_on_page(inner, pages),
+        Expr::IsNull(inner) => evaluate_null_predicate(inner, pages, true),
+        Expr::IsNotNull(inner) => evaluate_null_predicate(inner, pages, false),
+        _ => Err(SqlExecutionError::Unsupported(
+            "predicate not supported by vectorized WHERE".into(),
+        )),
+    }
+}
+
+fn resolve_column_literal<'a>(
+    left: &'a Expr,
+    right: &'a Expr,
+    op: &BinaryOperator,
+) -> Option<(String, String, BinaryOperator)> {
+    if let Some(column) = column_name_from_expr(left) {
+        if let Ok(literal) = expr_to_string(right) {
+            return Some((column, literal, op.clone()));
+        }
+    }
+
+    if let Some(column) = column_name_from_expr(right) {
+        if let Ok(literal) = expr_to_string(left) {
+            let swapped = reverse_operator(op)?;
+            return Some((column, literal, swapped));
+        }
+    }
+
+    None
+}
+
+fn reverse_operator(op: &BinaryOperator) -> Option<BinaryOperator> {
+    use BinaryOperator::*;
+    match op {
+        Gt => Some(Lt),
+        GtEq => Some(LtEq),
+        Lt => Some(Gt),
+        LtEq => Some(GtEq),
+        Eq => Some(Eq),
+        NotEq => Some(NotEq),
+        _ => None,
+    }
+}
+
+fn evaluate_null_predicate(
+    expr: &Expr,
+    pages: &HashMap<String, &ColumnarPage>,
+    expect_null: bool,
+) -> Result<Bitmap, SqlExecutionError> {
+    let column = column_name_from_expr(expr).ok_or_else(|| {
+        SqlExecutionError::Unsupported("IS [NOT] NULL requires a column reference".into())
+    })?;
+    let page = pages.get(&column).ok_or_else(|| {
+        SqlExecutionError::Unsupported(format!(
+            "column {column} not available for vectorized NULL check"
+        ))
+    })?;
+    let mut bitmap = Bitmap::new(page.len());
+    for idx in 0..page.len() {
+        if page.null_bitmap.is_set(idx) == expect_null {
+            bitmap.set(idx);
+        }
+    }
+    Ok(bitmap)
+}
+
+fn evaluate_column_comparison(
+    op: &BinaryOperator,
+    literal: &str,
+    page: &ColumnarPage,
+) -> Result<Bitmap, SqlExecutionError> {
+    use BinaryOperator::*;
+    if literal_is_null(literal) {
+        return match op {
+            Eq => {
+                let mut bitmap = Bitmap::new(page.len());
+                for idx in 0..page.len() {
+                    if page.null_bitmap.is_set(idx) {
+                        bitmap.set(idx);
+                    }
+                }
+                Ok(bitmap)
+            }
+            NotEq => {
+                let mut bitmap = Bitmap::new(page.len());
+                for idx in 0..page.len() {
+                    if !page.null_bitmap.is_set(idx) {
+                        bitmap.set(idx);
+                    }
+                }
+                Ok(bitmap)
+            }
+            _ => Err(SqlExecutionError::Unsupported(
+                "comparisons between NULL and literals are not supported in vectorized mode".into(),
+            )),
+        };
+    }
+
+    match (&page.data, op) {
+        (ColumnData::Int64(values), Eq)
+        | (ColumnData::Int64(values), NotEq)
+        | (ColumnData::Int64(values), Gt)
+        | (ColumnData::Int64(values), GtEq)
+        | (ColumnData::Int64(values), Lt)
+        | (ColumnData::Int64(values), LtEq) => {
+            let target = literal.parse::<i64>().map_err(|_| {
+                SqlExecutionError::Unsupported(
+                    "unable to parse literal as INTEGER for vectorized comparison".into(),
+                )
+            })?;
+            Ok(build_numeric_bitmap(
+                values,
+                &page.null_bitmap,
+                op,
+                target as f64,
+            ))
+        }
+        (ColumnData::Float64(values), Eq)
+        | (ColumnData::Float64(values), NotEq)
+        | (ColumnData::Float64(values), Gt)
+        | (ColumnData::Float64(values), GtEq)
+        | (ColumnData::Float64(values), Lt)
+        | (ColumnData::Float64(values), LtEq) => {
+            let target = literal.parse::<f64>().map_err(|_| {
+                SqlExecutionError::Unsupported(
+                    "unable to parse literal as FLOAT for vectorized comparison".into(),
+                )
+            })?;
+            Ok(build_float_bitmap(
+                values,
+                &page.null_bitmap,
+                op,
+                target,
+            ))
+        }
+        (ColumnData::Text(values), Eq)
+        | (ColumnData::Text(values), NotEq)
+        | (ColumnData::Text(values), Gt)
+        | (ColumnData::Text(values), GtEq)
+        | (ColumnData::Text(values), Lt)
+        | (ColumnData::Text(values), LtEq) => {
+            Ok(build_text_bitmap(values, &page.null_bitmap, op, literal))
+        }
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "vectorized operator {op:?} not supported for column type"
+        ))),
+    }
+}
+
+fn literal_is_null(value: &str) -> bool {
+    is_encoded_null(value) || value.eq_ignore_ascii_case("null")
+}
+
+fn build_numeric_bitmap(
+    values: &[i64],
+    nulls: &Bitmap,
+    op: &BinaryOperator,
+    target: f64,
+) -> Bitmap {
+    let mut bitmap = Bitmap::new(values.len());
+    for (idx, value) in values.iter().enumerate() {
+        if nulls.is_set(idx) {
+            continue;
+        }
+        let lhs = *value as f64;
+        if compare_floats(lhs, target, &op) {
+            bitmap.set(idx);
+        }
+    }
+    bitmap
+}
+
+fn build_float_bitmap(
+    values: &[f64],
+    nulls: &Bitmap,
+    op: &BinaryOperator,
+    target: f64,
+) -> Bitmap {
+    let mut bitmap = Bitmap::new(values.len());
+    for (idx, value) in values.iter().enumerate() {
+        if nulls.is_set(idx) {
+            continue;
+        }
+        if compare_floats(*value, target, &op) {
+            bitmap.set(idx);
+        }
+    }
+    bitmap
+}
+
+fn build_text_bitmap(
+    values: &[String],
+    nulls: &Bitmap,
+    op: &BinaryOperator,
+    target: &str,
+) -> Bitmap {
+    let mut bitmap = Bitmap::new(values.len());
+    for (idx, value) in values.iter().enumerate() {
+        if nulls.is_set(idx) {
+            continue;
+        }
+        let ordering = compare_strs(value, target);
+        let matches = match *op {
+            BinaryOperator::Eq => ordering == Ordering::Equal,
+            BinaryOperator::NotEq => ordering != Ordering::Equal,
+            BinaryOperator::Gt => ordering == Ordering::Greater,
+            BinaryOperator::GtEq => ordering == Ordering::Greater || ordering == Ordering::Equal,
+            BinaryOperator::Lt => ordering == Ordering::Less,
+            BinaryOperator::LtEq => ordering == Ordering::Less || ordering == Ordering::Equal,
+            _ => false,
+        };
+        if matches {
+            bitmap.set(idx);
+        }
+    }
+    bitmap
+}
+
+fn compare_floats(lhs: f64, rhs: f64, op: &BinaryOperator) -> bool {
+    use BinaryOperator::*;
+    match *op {
+        Eq => (lhs - rhs).abs() < f64::EPSILON,
+        NotEq => (lhs - rhs).abs() >= f64::EPSILON,
+        Gt => lhs > rhs,
+        GtEq => lhs >= rhs,
+        Lt => lhs < rhs,
+        LtEq => lhs <= rhs,
+        _ => false,
     }
 }

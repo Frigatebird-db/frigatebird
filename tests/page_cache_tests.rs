@@ -217,8 +217,8 @@ fn page_cache_compressed_entry_creation() {
 #[test]
 fn page_cache_uncompressed_entry_creation() {
     let page = create_test_page(1);
-    let uncompressed = PageCacheEntryUncompressed { page };
-    assert_eq!(uncompressed.page.entries.len(), 1);
+    let uncompressed = PageCacheEntryUncompressed::from_disk_page(page);
+    assert_eq!(uncompressed.page.len(), 1);
 }
 
 #[test]
@@ -261,10 +261,7 @@ fn page_cache_clone_entries() {
     assert_eq!(compressed.page, cloned.page);
 
     let page = create_test_page(1);
-    let uncompressed = PageCacheEntryUncompressed { page };
+    let uncompressed = PageCacheEntryUncompressed::from_disk_page(page);
     let cloned_unc = uncompressed.clone();
-    assert_eq!(
-        uncompressed.page.entries.len(),
-        cloned_unc.page.entries.len()
-    );
+    assert_eq!(uncompressed.page.len(), cloned_unc.page.len());
 }

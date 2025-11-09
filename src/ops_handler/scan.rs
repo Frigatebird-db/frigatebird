@@ -40,14 +40,18 @@ pub fn range_scan_table_column_entry(
 
     let mut out: Vec<Entry> = Vec::new();
     for (slice, page_arc) in slices.into_iter().zip(pages.into_iter()) {
-        let entries = &page_arc.page.entries;
         let start = slice.start_row_offset as usize;
         let end = slice.end_row_offset as usize;
-        if start >= entries.len() {
+        let total = page_arc.page.len();
+        if start >= total {
             continue;
         }
-        let end_clamped = end.min(entries.len());
-        out.extend_from_slice(&entries[start..end_clamped]);
+        let end_clamped = end.min(total);
+        for idx in start..end_clamped {
+            if let Some(entry) = page_arc.page.entry_at(idx) {
+                out.push(entry);
+            }
+        }
     }
 
     out
