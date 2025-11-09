@@ -21,7 +21,7 @@ fn empty_result_set() {
 
     let result = executor.query(&sql);
     assert!(result.is_ok(), "Query for empty result failed");
-    let rows = result.unwrap().rows;
+    let rows = result.unwrap().rows();
     assert_eq!(rows.len(), 0, "Expected empty result set");
 }
 
@@ -125,7 +125,7 @@ fn limit_zero() {
         return;
     }
     assert!(result.is_ok(), "LIMIT 0 query failed");
-    let rows = result.unwrap().rows;
+    let rows = result.unwrap().rows();
     assert_eq!(rows.len(), 0, "Expected empty result with LIMIT 0");
 }
 
@@ -163,7 +163,7 @@ fn offset_beyond_result_set() {
         return;
     }
     assert!(result.is_ok(), "Large OFFSET query failed");
-    let rows = result.unwrap().rows;
+    let rows = result.unwrap().rows();
     assert_eq!(rows.len(), 0, "Expected empty result with large OFFSET");
 }
 
@@ -324,7 +324,7 @@ fn aggregate_on_empty_group() {
         return;
     }
     assert!(result.is_ok(), "Aggregate on empty set failed");
-    let rows = result.unwrap().rows;
+    let rows = result.unwrap().rows();
     // Should return one row with COUNT=0, SUM=NULL or 0, AVG=NULL
     println!("Aggregate on empty set: {:?}", rows);
 }

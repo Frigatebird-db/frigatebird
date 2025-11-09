@@ -162,7 +162,7 @@ fn delete_with_simple_where() {
     if result.is_ok() {
         let count_result = result.unwrap();
         // Should be 0 or significantly reduced
-        println!("Rows remaining after DELETE: {:?}", count_result.rows);
+        println!("Rows remaining after DELETE: {:?}", count_result.rows());
     }
 }
 
@@ -191,7 +191,10 @@ fn delete_with_complex_predicate() {
 
     let result = executor.query(&verify_sql);
     if result.is_ok() {
-        println!("Rows remaining after complex DELETE: {:?}", result.unwrap().rows);
+        println!(
+            "Rows remaining after complex DELETE: {:?}",
+            result.unwrap().rows()
+        );
     }
 }
 
@@ -225,7 +228,10 @@ fn delete_with_in_clause() {
 
     let result = executor.query(&verify_sql);
     if result.is_ok() {
-        println!("Rows remaining after DELETE: {:?}", result.unwrap().rows);
+        println!(
+            "Rows remaining after DELETE: {:?}",
+            result.unwrap().rows()
+        );
         // Note: This test may fail due to DELETE implementation issues
         // Expected: 0 rows, but may return non-zero
     }
@@ -267,7 +273,7 @@ fn insert_single_row() {
     let result = executor.query(&verify_sql);
     assert!(result.is_ok(), "SELECT after INSERT failed");
 
-    let rows = result.unwrap().rows;
+    let rows = result.unwrap().rows();
     assert_eq!(rows.len(), 1, "Expected 1 row after INSERT");
 }
 
@@ -310,7 +316,7 @@ fn insert_multiple_rows() {
     let result = executor.query(&verify_sql);
     assert!(result.is_ok(), "COUNT after INSERT failed");
 
-    let rows = result.unwrap().rows;
+    let rows = result.unwrap().rows();
     println!("Rows after multi-INSERT: {:?}", rows);
 }
 
@@ -355,5 +361,5 @@ fn insert_with_nulls() {
     );
     let result = executor.query(&verify_sql);
     assert!(result.is_ok(), "SELECT after NULL INSERT failed");
-    println!("Rows with NULLs: {:?}", result.unwrap().rows);
+    println!("Rows with NULLs: {:?}", result.unwrap().rows());
 }

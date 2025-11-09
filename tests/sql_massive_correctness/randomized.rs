@@ -54,7 +54,7 @@ fn debug_distinct_nullable_text_case() {
     let ExecutorHarness { executor, .. } = harness;
     let sql = "SELECT DISTINCT nullable_text, segment FROM massive_correctness WHERE quantity BETWEEN 2873 AND 3411 ORDER BY quantity DESC, id ASC";
     let ours = executor.query(sql).expect("satori query failed");
-    println!("ours rows: {:?}", ours.rows);
+    println!("ours rows: {:?}", ours.rows());
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(sql).expect("prep duckdb");
     let mut rows = stmt.query([]).expect("duckdb query");
