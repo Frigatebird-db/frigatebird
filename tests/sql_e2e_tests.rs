@@ -3,8 +3,18 @@ use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::SqlExecutor;
+use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutor};
 use std::sync::{Arc, RwLock};
+
+trait ResultRowsExt {
+    fn rows(&self) -> Vec<Vec<Option<String>>>;
+}
+
+impl ResultRowsExt for SelectResult {
+    fn rows(&self) -> Vec<Vec<Option<String>>> {
+        self.row_iter().map(|row| row.to_vec()).collect()
+    }
+}
 
 fn setup_executor() -> (SqlExecutor, Arc<PageHandler>, Arc<PageDirectory>) {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
