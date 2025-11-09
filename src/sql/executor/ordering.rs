@@ -36,8 +36,6 @@ pub(super) fn sort_rows_logical(
         rows: rows.as_slice(),
         materialized,
         column_ordinals,
-        row_positions: None,
-        window_results: None,
         masked_exprs: None,
         prefer_exact_numeric: false,
     };

@@ -1,22 +1,22 @@
-use super::aggregates::{AggregateDataset, MaterializedColumns, WindowResultMap};
-use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
-use super::grouping_helpers::evaluate_group_key;
-use super::helpers::{collect_expr_column_ordinals, parse_interval_seconds};
+use super::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
+use super::expressions::evaluate_expression_on_batch;
+use super::grouping_helpers::evaluate_group_keys_on_batch;
+use super::helpers::parse_interval_seconds;
 use super::ordering::{
-    NullsPlacement, OrderClause, OrderKey, build_row_order_key, compare_order_keys,
+    NullsPlacement, OrderClause, OrderKey, build_order_keys_on_batch, compare_order_keys,
 };
 use super::values::{ScalarValue, scalar_from_f64};
 use super::{
     GroupKey, RangePreceding, SqlExecutionError, SumWindowFrame, WindowFunctionKind,
     WindowFunctionPlan,
 };
-use crate::metadata_store::ColumnCatalog;
+use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, OrderByExpr, SelectItem, Value, WindowFrameBound,
+    Expr, FunctionArg, FunctionArgExpr, Ident, OrderByExpr, SelectItem, Value, WindowFrameBound,
     WindowFrameUnits, WindowType,
 };
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 pub(super) fn plan_order_clauses(
     order_by: &[OrderByExpr],
@@ -306,6 +306,9 @@ pub(super) fn extract_window_plan(
                 order_by: over.order_by.clone(),
                 arg: None,
                 default_expr: None,
+                result_ordinal: 0,
+                result_alias: String::new(),
+                display_alias: None,
             }))
         }
         "RANK" => {
@@ -331,6 +334,9 @@ pub(super) fn extract_window_plan(
                 order_by: over.order_by.clone(),
                 arg: None,
                 default_expr: None,
+                result_ordinal: 0,
+                result_alias: String::new(),
+                display_alias: None,
             }))
         }
         "DENSE_RANK" => {
@@ -356,6 +362,9 @@ pub(super) fn extract_window_plan(
                 order_by: over.order_by.clone(),
                 arg: None,
                 default_expr: None,
+                result_ordinal: 0,
+                result_alias: String::new(),
+                display_alias: None,
             }))
         }
         "SUM" => {
@@ -471,6 +480,9 @@ pub(super) fn extract_window_plan(
                 order_by: over.order_by.clone(),
                 arg: Some(arg_expr),
                 default_expr: None,
+                result_ordinal: 0,
+                result_alias: String::new(),
+                display_alias: None,
             }))
         }
         "LAG" | "LEAD" => {
@@ -560,6 +572,9 @@ pub(super) fn extract_window_plan(
                 order_by: over.order_by.clone(),
                 arg: Some(value_expr),
                 default_expr,
+                result_ordinal: 0,
+                result_alias: String::new(),
+                display_alias: None,
             }))
         }
         "FIRST_VALUE" | "LAST_VALUE" => {
@@ -605,6 +620,9 @@ pub(super) fn extract_window_plan(
                 order_by: over.order_by.clone(),
                 arg: Some(arg_expr),
                 default_expr: None,
+                result_ordinal: 0,
+                result_alias: String::new(),
+                display_alias: None,
             }))
         }
         _ => Err(SqlExecutionError::Unsupported(format!(
@@ -613,102 +631,309 @@ pub(super) fn extract_window_plan(
     }
 }
 
-pub(super) fn compute_window_results(
-    plans: &[WindowFunctionPlan],
-    rows: &[u64],
-    materialized: &MaterializedColumns,
-    column_ordinals: &HashMap<String, usize>,
-) -> Result<WindowResultMap, SqlExecutionError> {
-    let mut results: WindowResultMap = WindowResultMap::new();
-    let mut processed: HashSet<String> = HashSet::new();
-    let base_dataset = AggregateDataset {
-        rows,
-        materialized,
-        column_ordinals,
-        row_positions: None,
-        window_results: None,
-        masked_exprs: None,
-        prefer_exact_numeric: false,
-    };
+pub(super) fn rewrite_window_expressions(
+    expr: &mut Expr,
+    alias_map: &HashMap<String, String>,
+) -> Result<(), SqlExecutionError> {
+    use sqlparser::ast::Expr::*;
 
-    for plan in plans {
-        if !processed.insert(plan.key.clone()) {
-            continue;
+    if alias_map.is_empty() {
+        return Ok(());
+    }
+
+    match expr {
+        Function(function) if function.over.is_some() => {
+            let key = function.to_string();
+            let alias = alias_map.get(&key).ok_or_else(|| {
+                SqlExecutionError::OperationFailed(format!(
+                    "missing window column for expression {key}"
+                ))
+            })?;
+            *expr = Identifier(Ident::new(alias.clone()));
+            Ok(())
         }
-
-        let mut partitions: HashMap<GroupKey, Vec<usize>> = HashMap::new();
-        let mut key_order: Vec<GroupKey> = Vec::new();
-
-        for (idx, &row_idx) in rows.iter().enumerate() {
-            let key = if plan.partition_by.is_empty() {
-                GroupKey { values: Vec::new() }
-            } else {
-                evaluate_group_key(&plan.partition_by, row_idx, &base_dataset)?
-            };
-
-            match partitions.entry(key.clone()) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().push(idx);
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(vec![idx]);
-                    key_order.push(key);
-                }
-            }
+        BinaryOp { left, right, .. } => {
+            rewrite_window_expressions(left, alias_map)?;
+            rewrite_window_expressions(right, alias_map)
         }
-
-        let mut values: Vec<ScalarValue> = vec![ScalarValue::Null; rows.len()];
-        let order_clauses = plan_order_clauses(&plan.order_by, None)?;
-
-        for key in key_order {
-            let indices = partitions.get(&key).expect("partition entries must exist");
-
-            let mut sorted_positions: Vec<usize> = indices.clone();
-            let mut sorted_keys: Vec<OrderKey> = Vec::new();
-            if !order_clauses.is_empty() {
-                let mut keyed: Vec<(OrderKey, usize)> = Vec::with_capacity(indices.len());
-                for &position in indices {
-                    let row_idx = rows[position];
-                    let key = build_row_order_key(&order_clauses, row_idx, &base_dataset)?;
-                    keyed.push((key, position));
-                }
-                keyed.sort_unstable_by(|left, right| {
-                    compare_order_keys(&left.0, &right.0, &order_clauses)
-                });
-                sorted_positions = Vec::with_capacity(keyed.len());
-                sorted_keys = Vec::with_capacity(keyed.len());
-                for (order_key, pos) in keyed {
-                    sorted_keys.push(order_key);
-                    sorted_positions.push(pos);
-                }
+        UnaryOp { expr, .. } => rewrite_window_expressions(expr, alias_map),
+        Nested(inner) => rewrite_window_expressions(inner, alias_map),
+        Between {
+            expr,
+            low,
+            high,
+            ..
+        } => {
+            rewrite_window_expressions(expr, alias_map)?;
+            rewrite_window_expressions(low, alias_map)?;
+            rewrite_window_expressions(high, alias_map)
+        }
+        InList { expr, list, .. } => {
+            rewrite_window_expressions(expr, alias_map)?;
+            for item in list {
+                rewrite_window_expressions(item, alias_map)?;
             }
-
-            match plan.kind {
-                WindowFunctionKind::RowNumber => {
-                    for (rank, position) in sorted_positions.iter().enumerate() {
-                        values[*position] = ScalarValue::Int((rank + 1) as i128);
+            Ok(())
+        }
+        Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(op) = operand {
+                rewrite_window_expressions(op, alias_map)?;
+            }
+            for cond in conditions {
+                rewrite_window_expressions(cond, alias_map)?;
+            }
+            for res in results {
+                rewrite_window_expressions(res, alias_map)?;
+            }
+            if let Some(else_expr) = else_result {
+                rewrite_window_expressions(else_expr, alias_map)?;
+            }
+            Ok(())
+        }
+        Function(function) => {
+            for function_arg in &mut function.args {
+                match function_arg {
+                    FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+                        if let FunctionArgExpr::Expr(inner) = arg {
+                            rewrite_window_expressions(inner, alias_map)?;
+                        }
                     }
+                }
+            }
+            if let Some(filter) = &mut function.filter {
+                rewrite_window_expressions(filter, alias_map)?;
+            }
+            for order in &mut function.order_by {
+                rewrite_window_expressions(&mut order.expr, alias_map)?;
+            }
+            if let Some(WindowType::WindowSpec(spec)) = &mut function.over {
+                for expr in &mut spec.partition_by {
+                    rewrite_window_expressions(expr, alias_map)?;
+                }
+                for order in &mut spec.order_by {
+                    rewrite_window_expressions(&mut order.expr, alias_map)?;
+                }
+            }
+            Ok(())
+        }
+        Cast { expr, .. }
+        | SafeCast { expr, .. }
+        | TryCast { expr, .. }
+        | Convert { expr, .. }
+        | Extract { expr, .. }
+        | Collate { expr, .. }
+        | Ceil { expr, .. }
+        | Floor { expr, .. }
+        | AtTimeZone { timestamp: expr, .. } => rewrite_window_expressions(expr, alias_map),
+        Trim {
+            expr,
+            trim_what,
+            trim_characters,
+            ..
+        } => {
+            rewrite_window_expressions(expr, alias_map)?;
+            if let Some(item) = trim_what {
+                rewrite_window_expressions(item, alias_map)?;
+            }
+            if let Some(chars) = trim_characters {
+                for item in chars {
+                    rewrite_window_expressions(item, alias_map)?;
+                }
+            }
+            Ok(())
+        }
+        Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            rewrite_window_expressions(expr, alias_map)?;
+            if let Some(item) = substring_from {
+                rewrite_window_expressions(item, alias_map)?;
+            }
+            if let Some(item) = substring_for {
+                rewrite_window_expressions(item, alias_map)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+pub(super) fn ensure_common_partition(
+    plans: &[WindowFunctionPlan],
+) -> Result<Vec<Expr>, SqlExecutionError> {
+    if plans.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let reference = plans[0].partition_by.clone();
+    for plan in plans.iter().skip(1) {
+        if plan.partition_by != reference {
+            return Err(SqlExecutionError::Unsupported(
+                "window functions with different PARTITION BY clauses are not supported in vectorized mode".into(),
+            ));
+        }
+    }
+
+    Ok(reference)
+}
+
+pub(super) struct WindowOperator<'a, I>
+where
+    I: Iterator<Item = ColumnarBatch>,
+{
+    input: I,
+    catalog: &'a TableCatalog,
+    window_plans: Vec<WindowFunctionPlan>,
+    partition_exprs: Vec<Expr>,
+    partition_buffer: ColumnarBatch,
+    current_partition_key: Option<GroupKey>,
+    pending_partitions: VecDeque<ColumnarBatch>,
+}
+
+impl<'a, I> WindowOperator<'a, I>
+where
+    I: Iterator<Item = ColumnarBatch>,
+{
+    pub fn new(
+        input: I,
+        window_plans: Vec<WindowFunctionPlan>,
+        partition_exprs: Vec<Expr>,
+        catalog: &'a TableCatalog,
+    ) -> Self {
+        Self {
+            input,
+            catalog,
+            window_plans,
+            partition_exprs,
+            partition_buffer: ColumnarBatch::new(),
+            current_partition_key: None,
+            pending_partitions: VecDeque::new(),
+        }
+    }
+
+    pub fn next_batch(&mut self) -> Result<Option<ColumnarBatch>, SqlExecutionError> {
+        if let Some(batch) = self.pending_partitions.pop_front() {
+            return Ok(Some(batch));
+        }
+
+        while let Some(batch) = self.input.next() {
+            self.consume_batch(batch)?;
+            if let Some(output) = self.pending_partitions.pop_front() {
+                return Ok(Some(output));
+            }
+        }
+
+        if self.partition_buffer.num_rows > 0 {
+            let partition = std::mem::take(&mut self.partition_buffer);
+            self.current_partition_key = None;
+            let processed = self.process_partition(partition)?;
+            return Ok(Some(processed));
+        }
+
+        Ok(None)
+    }
+
+    fn consume_batch(&mut self, batch: ColumnarBatch) -> Result<(), SqlExecutionError> {
+        if batch.num_rows == 0 {
+            return Ok(());
+        }
+
+        let keys = if self.partition_exprs.is_empty() {
+            vec![GroupKey::empty(); batch.num_rows]
+        } else {
+            evaluate_group_keys_on_batch(&self.partition_exprs, &batch, self.catalog)?
+        };
+
+        let mut start = 0;
+        while start < batch.num_rows {
+            let current_key = keys[start].clone();
+            let mut end = start + 1;
+            while end < batch.num_rows && keys[end] == current_key {
+                end += 1;
+            }
+            let chunk = batch.slice(start, end);
+            self.push_chunk(current_key, chunk)?;
+            start = end;
+        }
+        Ok(())
+    }
+
+    fn push_chunk(
+        &mut self,
+        key: GroupKey,
+        chunk: ColumnarBatch,
+    ) -> Result<(), SqlExecutionError> {
+        match &self.current_partition_key {
+            None => {
+                self.current_partition_key = Some(key);
+                self.partition_buffer = chunk;
+            }
+            Some(current) if *current == key => {
+                self.partition_buffer.append(&chunk);
+            }
+            Some(_) => {
+                let completed = std::mem::replace(&mut self.partition_buffer, chunk);
+                let processed = self.process_partition(completed)?;
+                self.pending_partitions.push_back(processed);
+                self.current_partition_key = Some(key);
+            }
+        }
+        Ok(())
+    }
+
+    fn process_partition(
+        &self,
+        mut batch: ColumnarBatch,
+    ) -> Result<ColumnarBatch, SqlExecutionError> {
+        if batch.num_rows == 0 {
+            return Ok(batch);
+        }
+
+        for plan in &self.window_plans {
+            let order_clauses = plan_order_clauses(&plan.order_by, None)?;
+            let (sorted_positions, sorted_keys) =
+                sorted_positions_for_plan(&batch, &order_clauses, self.catalog)?;
+            let mut values = vec![ScalarValue::Null; batch.num_rows];
+
+            match &plan.kind {
+                WindowFunctionKind::RowNumber => {
+                    for (idx, position) in sorted_positions.iter().enumerate() {
+                        values[*position] = ScalarValue::Int((idx + 1) as i128);
+                    }
+                    let column = scalars_to_column(values, WindowResultType::Int)?;
+                    batch.columns.insert(plan.result_ordinal, column);
                 }
                 WindowFunctionKind::Rank => {
                     let mut current_rank: i64 = 1;
                     for (idx, position) in sorted_positions.iter().enumerate() {
-                        if idx > 0 {
-                            if compare_order_keys(
+                        if idx > 0
+                            && !order_clauses.is_empty()
+                            && compare_order_keys(
                                 &sorted_keys[idx - 1],
                                 &sorted_keys[idx],
                                 &order_clauses,
                             ) != Ordering::Equal
-                            {
-                                current_rank = (idx + 1) as i64;
-                            }
+                        {
+                            current_rank = (idx + 1) as i64;
                         }
                         values[*position] = ScalarValue::Int(current_rank as i128);
                     }
+                    let column = scalars_to_column(values, WindowResultType::Int)?;
+                    batch.columns.insert(plan.result_ordinal, column);
                 }
                 WindowFunctionKind::DenseRank => {
                     let mut current_rank: i64 = 1;
                     for (idx, position) in sorted_positions.iter().enumerate() {
                         if idx > 0
+                            && !order_clauses.is_empty()
                             && compare_order_keys(
                                 &sorted_keys[idx - 1],
                                 &sorted_keys[idx],
@@ -719,42 +944,37 @@ pub(super) fn compute_window_results(
                         }
                         values[*position] = ScalarValue::Int(current_rank as i128);
                     }
+                    let column = scalars_to_column(values, WindowResultType::Int)?;
+                    batch.columns.insert(plan.result_ordinal, column);
                 }
-                WindowFunctionKind::Sum { ref frame } => {
-                    let arg_expr = plan.arg.as_ref().expect("sum window must have argument");
-                    let mut running_sum = 0.0;
-                    let mut non_null_count: usize = 0;
-                    let mut window: VecDeque<Option<f64>> = VecDeque::new();
+                WindowFunctionKind::Sum { frame } => {
+                    let arg_expr = plan.arg.as_ref().expect("SUM requires argument");
+                    let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
+                    let numeric_values = scalar_column_to_numeric(&arg_page)?;
+
                     match frame {
                         SumWindowFrame::Rows { preceding } => {
-                            for position in sorted_positions.iter() {
-                                let row_idx = rows[*position];
-                                let value = evaluate_row_expr(arg_expr, row_idx, &base_dataset)?;
-                                let numeric = value.as_f64();
-                                if let Some(num) = numeric {
-                                    running_sum += num;
-                                    non_null_count += 1;
-                                }
-                                if let Some(limit) = preceding {
-                                    window.push_back(numeric);
-                                    while window.len() > limit + 1 {
-                                        if let Some(front) = window.pop_front() {
-                                            if let Some(num) = front {
-                                                running_sum -= num;
-                                                non_null_count -= 1;
-                                            }
-                                        }
+                            for (idx, position) in sorted_positions.iter().enumerate() {
+                                let start = preceding
+                                    .map(|limit| idx.saturating_sub(limit))
+                                    .unwrap_or(0);
+                                let mut running_sum = 0.0;
+                                let mut non_null = 0;
+                                for candidate_idx in start..=idx {
+                                    if let Some(value) =
+                                        numeric_values[sorted_positions[candidate_idx]]
+                                    {
+                                        running_sum += value;
+                                        non_null += 1;
                                     }
                                 }
-                                if non_null_count > 0 {
+                                if non_null > 0 {
                                     values[*position] = scalar_from_f64(running_sum);
-                                } else {
-                                    values[*position] = ScalarValue::Null;
                                 }
                             }
                         }
                         SumWindowFrame::Range { preceding } => {
-                            if sorted_keys.is_empty() {
+                            if order_clauses.is_empty() {
                                 return Err(SqlExecutionError::Unsupported(
                                     "SUM RANGE frame requires ORDER BY clause".into(),
                                 ));
@@ -767,8 +987,7 @@ pub(super) fn compute_window_results(
                                     .and_then(|scalar| scalar.as_f64())
                                     .ok_or_else(|| {
                                         SqlExecutionError::Unsupported(
-                                            "SUM RANGE frame requires numeric ORDER BY expression"
-                                                .into(),
+                                            "SUM RANGE frame requires numeric ORDER BY".into(),
                                         )
                                     })?;
                                 order_values.push(value);
@@ -778,15 +997,15 @@ pub(super) fn compute_window_results(
                                 RangePreceding::Unbounded => None,
                                 RangePreceding::Value(value) => Some(*value),
                             };
+                            let mut running_sum = 0.0;
+                            let mut non_null_count = 0;
                             let mut indexed_window: VecDeque<(usize, Option<f64>)> =
                                 VecDeque::new();
 
                             for (idx, position) in sorted_positions.iter().enumerate() {
-                                let row_idx = rows[*position];
-                                let value = evaluate_row_expr(arg_expr, row_idx, &base_dataset)?;
-                                let numeric = value.as_f64();
-                                if let Some(num) = numeric {
-                                    running_sum += num;
+                                let numeric = numeric_values[*position];
+                                if let Some(value) = numeric {
+                                    running_sum += value;
                                     non_null_count += 1;
                                 }
                                 indexed_window.push_back((idx, numeric));
@@ -798,8 +1017,8 @@ pub(super) fn compute_window_results(
                                     {
                                         let front_order = order_values[front_idx];
                                         if current_order - front_order > span {
-                                            if let Some(num) = front_value {
-                                                running_sum -= num;
+                                            if let Some(value) = front_value {
+                                                running_sum -= value;
                                                 non_null_count -= 1;
                                             }
                                             indexed_window.pop_front();
@@ -811,80 +1030,346 @@ pub(super) fn compute_window_results(
 
                                 if non_null_count > 0 {
                                     values[*position] = scalar_from_f64(running_sum);
-                                } else {
-                                    values[*position] = ScalarValue::Null;
                                 }
                             }
                         }
                     }
+
+                    let column = scalars_to_column(values, WindowResultType::Float)?;
+                    batch.columns.insert(plan.result_ordinal, column);
                 }
                 WindowFunctionKind::Lag { offset } => {
-                    let arg_expr = plan.arg.as_ref().expect("lag window must have argument");
-                    let mut evaluated: Vec<ScalarValue> =
-                        Vec::with_capacity(sorted_positions.len());
-                    for position in &sorted_positions {
-                        let row_idx = rows[*position];
-                        evaluated.push(evaluate_row_expr(arg_expr, row_idx, &base_dataset)?);
-                    }
+                    let arg_expr = plan.arg.as_ref().expect("LAG requires argument");
+                    let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
+                    let arg_values = columnar_page_to_scalars(&arg_page);
+                    let default_values = if let Some(default_expr) = &plan.default_expr {
+                        let default_page =
+                            evaluate_expression_on_batch(default_expr, &batch, self.catalog)?;
+                        Some(columnar_page_to_scalars(&default_page))
+                    } else {
+                        None
+                    };
+
                     for (idx, position) in sorted_positions.iter().enumerate() {
-                        let value = if idx >= offset {
-                            evaluated[idx - offset].clone()
-                        } else if let Some(default_expr) = &plan.default_expr {
-                            evaluate_row_expr(default_expr, rows[*position], &base_dataset)?
+                        let value = if idx >= *offset {
+                            arg_values[sorted_positions[idx - offset]].clone()
+                        } else if let Some(defaults) = &default_values {
+                            defaults[*position].clone()
                         } else {
                             ScalarValue::Null
                         };
                         values[*position] = value;
                     }
+                    let column = scalars_to_column(values, WindowResultType::Template(&arg_page))?;
+                    batch.columns.insert(plan.result_ordinal, column);
                 }
                 WindowFunctionKind::Lead { offset } => {
-                    let arg_expr = plan.arg.as_ref().expect("lead window must have argument");
-                    let mut evaluated: Vec<ScalarValue> =
-                        Vec::with_capacity(sorted_positions.len());
-                    for position in &sorted_positions {
-                        let row_idx = rows[*position];
-                        evaluated.push(evaluate_row_expr(arg_expr, row_idx, &base_dataset)?);
-                    }
+                    let arg_expr = plan.arg.as_ref().expect("LEAD requires argument");
+                    let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
+                    let arg_values = columnar_page_to_scalars(&arg_page);
+                    let default_values = if let Some(default_expr) = &plan.default_expr {
+                        let default_page =
+                            evaluate_expression_on_batch(default_expr, &batch, self.catalog)?;
+                        Some(columnar_page_to_scalars(&default_page))
+                    } else {
+                        None
+                    };
+
                     for (idx, position) in sorted_positions.iter().enumerate() {
-                        let value = if idx + offset < evaluated.len() {
-                            evaluated[idx + offset].clone()
-                        } else if let Some(default_expr) = &plan.default_expr {
-                            evaluate_row_expr(default_expr, rows[*position], &base_dataset)?
+                        let value = if idx + offset < sorted_positions.len() {
+                            arg_values[sorted_positions[idx + offset]].clone()
+                        } else if let Some(defaults) = &default_values {
+                            defaults[*position].clone()
                         } else {
                             ScalarValue::Null
                         };
                         values[*position] = value;
                     }
+                    let column = scalars_to_column(values, WindowResultType::Template(&arg_page))?;
+                    batch.columns.insert(plan.result_ordinal, column);
                 }
                 WindowFunctionKind::FirstValue => {
                     let arg_expr = plan.arg.as_ref().expect("FIRST_VALUE requires argument");
-                    let mut cached: Option<ScalarValue> = None;
+                    let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
+                    let arg_values = columnar_page_to_scalars(&arg_page);
+                    let first_idx = sorted_positions.first().copied().unwrap_or(0);
+                    let first_value = arg_values.get(first_idx).cloned().unwrap_or(ScalarValue::Null);
                     for position in sorted_positions.iter() {
-                        if cached.is_none() {
-                            let row_idx = rows[*position];
-                            cached = Some(evaluate_row_expr(arg_expr, row_idx, &base_dataset)?);
-                        }
-                        values[*position] = cached.clone().unwrap_or(ScalarValue::Null);
+                        values[*position] = first_value.clone();
                     }
+                    let column = scalars_to_column(values, WindowResultType::Template(&arg_page))?;
+                    batch.columns.insert(plan.result_ordinal, column);
                 }
                 WindowFunctionKind::LastValue => {
                     let arg_expr = plan.arg.as_ref().expect("LAST_VALUE requires argument");
-                    let mut evaluated: Vec<ScalarValue> =
-                        Vec::with_capacity(sorted_positions.len());
-                    for position in &sorted_positions {
-                        let row_idx = rows[*position];
-                        evaluated.push(evaluate_row_expr(arg_expr, row_idx, &base_dataset)?);
-                    }
-                    let last_value = evaluated.last().cloned().unwrap_or(ScalarValue::Null);
+                    let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
+                    let arg_values = columnar_page_to_scalars(&arg_page);
+                    let last_idx = sorted_positions.last().copied().unwrap_or(0);
+                    let last_value = arg_values.get(last_idx).cloned().unwrap_or(ScalarValue::Null);
                     for position in sorted_positions.iter() {
                         values[*position] = last_value.clone();
                     }
+                    let column = scalars_to_column(values, WindowResultType::Template(&arg_page))?;
+                    batch.columns.insert(plan.result_ordinal, column);
                 }
+            }
+
+            batch.aliases.insert(plan.result_alias.clone(), plan.result_ordinal);
+            if let Some(alias) = &plan.display_alias {
+                batch.aliases.insert(alias.clone(), plan.result_ordinal);
             }
         }
 
-        results.insert(plan.key.clone(), values);
+        Ok(batch)
+    }
+}
+
+enum WindowResultType<'a> {
+    Int,
+    Float,
+    Template(&'a ColumnarPage),
+}
+
+enum TemplateOutputKind {
+    Int,
+    Float,
+    Text,
+}
+
+fn sorted_positions_for_plan(
+    batch: &ColumnarBatch,
+    clauses: &[OrderClause],
+    catalog: &TableCatalog,
+) -> Result<(Vec<usize>, Vec<OrderKey>), SqlExecutionError> {
+    let mut positions: Vec<usize> = (0..batch.num_rows).collect();
+    if clauses.is_empty() {
+        return Ok((positions, Vec::new()));
     }
 
-    Ok(results)
+    let keys = build_order_keys_on_batch(clauses, batch, catalog)?;
+    positions.sort_by(|left, right| {
+        let ordering = compare_order_keys(&keys[*left], &keys[*right], clauses);
+        if ordering == Ordering::Equal {
+            left.cmp(right)
+        } else {
+            ordering
+        }
+    });
+    let mut sorted_keys = Vec::with_capacity(batch.num_rows);
+    for &pos in &positions {
+        sorted_keys.push(keys[pos].clone());
+    }
+    Ok((positions, sorted_keys))
+}
+
+fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
+    if page.null_bitmap.is_set(idx) {
+        return ScalarValue::Null;
+    }
+    match &page.data {
+        ColumnData::Int64(values) => ScalarValue::Int(values[idx] as i128),
+        ColumnData::Float64(values) => ScalarValue::Float(values[idx]),
+        ColumnData::Text(values) => ScalarValue::Text(values[idx].clone()),
+    }
+}
+
+fn scalar_column_to_numeric(page: &ColumnarPage) -> Result<Vec<Option<f64>>, SqlExecutionError> {
+    let mut values = Vec::with_capacity(page.len());
+    match &page.data {
+        ColumnData::Int64(ints) => {
+            for (idx, value) in ints.iter().enumerate() {
+                if page.null_bitmap.is_set(idx) {
+                    values.push(None);
+                } else {
+                    values.push(Some(*value as f64));
+                }
+            }
+        }
+        ColumnData::Float64(floats) => {
+            for (idx, value) in floats.iter().enumerate() {
+                if page.null_bitmap.is_set(idx) {
+                    values.push(None);
+                } else {
+                    values.push(Some(*value));
+                }
+            }
+        }
+        _ => {
+            return Err(SqlExecutionError::Unsupported(
+                "SUM window requires numeric argument".into(),
+            ));
+        }
+    }
+    Ok(values)
+}
+
+fn columnar_page_to_scalars(page: &ColumnarPage) -> Vec<ScalarValue> {
+    let mut values = Vec::with_capacity(page.len());
+    for idx in 0..page.len() {
+        values.push(column_scalar_value(page, idx));
+    }
+    values
+}
+
+fn scalars_to_column(
+    values: Vec<ScalarValue>,
+    kind: WindowResultType<'_>,
+) -> Result<ColumnarPage, SqlExecutionError> {
+    let len = values.len();
+    let mut null_bitmap = Bitmap::new(len);
+    match kind {
+        WindowResultType::Int => {
+            let mut data = Vec::with_capacity(len);
+            for (idx, value) in values.iter().enumerate() {
+                match value {
+                    ScalarValue::Null => {
+                        null_bitmap.set(idx);
+                        data.push(0);
+                    }
+                    ScalarValue::Int(int_value) => data.push(*int_value as i64),
+                    _ => {
+                        return Err(SqlExecutionError::Unsupported(
+                            "expected integer window result".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(ColumnarPage {
+                page_metadata: String::new(),
+                data: ColumnData::Int64(data),
+                null_bitmap,
+                num_rows: len,
+            })
+        }
+        WindowResultType::Float => {
+            let mut data = Vec::with_capacity(len);
+            for (idx, value) in values.iter().enumerate() {
+                match value {
+                    ScalarValue::Null => {
+                        null_bitmap.set(idx);
+                        data.push(0.0);
+                    }
+                    ScalarValue::Float(float_value) => data.push(*float_value),
+                    ScalarValue::Int(int_value) => data.push(*int_value as f64),
+                    _ => {
+                        return Err(SqlExecutionError::Unsupported(
+                            "expected numeric window result".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(ColumnarPage {
+                page_metadata: String::new(),
+                data: ColumnData::Float64(data),
+                null_bitmap,
+                num_rows: len,
+            })
+        }
+        WindowResultType::Template(template) => match &template.data {
+            ColumnData::Int64(_) | ColumnData::Float64(_) | ColumnData::Text(_) => {
+                let target_kind = determine_template_kind(template, &values);
+                match target_kind {
+                    TemplateOutputKind::Int => {
+                        let mut data = Vec::with_capacity(len);
+                        for (idx, value) in values.iter().enumerate() {
+                            match value {
+                                ScalarValue::Null => {
+                                    null_bitmap.set(idx);
+                                    data.push(0);
+                                }
+                                ScalarValue::Int(int_value) => data.push(*int_value as i64),
+                                _ => {
+                                    return Err(SqlExecutionError::Unsupported(
+                                        "window result type mismatch".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(ColumnarPage {
+                            page_metadata: String::new(),
+                            data: ColumnData::Int64(data),
+                            null_bitmap,
+                            num_rows: len,
+                        })
+                    }
+                    TemplateOutputKind::Float => {
+                        let mut data = Vec::with_capacity(len);
+                        for (idx, value) in values.iter().enumerate() {
+                            match value {
+                                ScalarValue::Null => {
+                                    null_bitmap.set(idx);
+                                    data.push(0.0);
+                                }
+                                ScalarValue::Float(float_value) => data.push(*float_value),
+                                ScalarValue::Int(int_value) => data.push(*int_value as f64),
+                                _ => {
+                                    return Err(SqlExecutionError::Unsupported(
+                                        "window result type mismatch".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(ColumnarPage {
+                            page_metadata: String::new(),
+                            data: ColumnData::Float64(data),
+                            null_bitmap,
+                            num_rows: len,
+                        })
+                    }
+                    TemplateOutputKind::Text => {
+                        let mut data = Vec::with_capacity(len);
+                        for (idx, value) in values.iter().enumerate() {
+                            match value {
+                                ScalarValue::Null => {
+                                    null_bitmap.set(idx);
+                                    data.push(String::new());
+                                }
+                                ScalarValue::Text(text) => data.push(text.clone()),
+                                _ => data.push(scalar_to_string(value)),
+                            }
+                        }
+                        Ok(ColumnarPage {
+                            page_metadata: String::new(),
+                            data: ColumnData::Text(data),
+                            null_bitmap,
+                            num_rows: len,
+                        })
+                    }
+                }
+            }
+        },
+    }
+}
+
+fn determine_template_kind(
+    template: &ColumnarPage,
+    values: &[ScalarValue],
+) -> TemplateOutputKind {
+    if matches!(template.data, ColumnData::Text(_))
+        || values.iter().any(|value| matches!(value, ScalarValue::Text(_)))
+    {
+        return TemplateOutputKind::Text;
+    }
+    if matches!(template.data, ColumnData::Float64(_))
+        || values.iter().any(|value| matches!(value, ScalarValue::Float(_)))
+    {
+        return TemplateOutputKind::Float;
+    }
+    TemplateOutputKind::Int
+}
+
+fn scalar_to_string(value: &ScalarValue) -> String {
+    match value {
+        ScalarValue::Null => String::new(),
+        ScalarValue::Int(value) => value.to_string(),
+        ScalarValue::Float(value) => value.to_string(),
+        ScalarValue::Text(text) => text.clone(),
+        ScalarValue::Bool(flag) => {
+            if *flag {
+                "true".into()
+            } else {
+                "false".into()
+            }
+        }
+    }
 }
