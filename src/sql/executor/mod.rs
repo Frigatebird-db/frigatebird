@@ -390,14 +390,14 @@ pub struct SelectResult {
     pub columns: Vec<String>,
     pub batches: Vec<ColumnarBatch>,
 }
-
+ 
 impl SelectResult {
-    pub fn rows(&self) -> Vec<Vec<Option<String>>> {
-        batches_to_rows(&self.batches)
-    }
-
-    pub fn into_rows(self) -> Vec<Vec<Option<String>>> {
-        batches_to_rows(&self.batches)
+    pub fn row_iter(&self) -> RowIter<'_> {
+        RowIter {
+            result: self,
+            batch_idx: 0,
+            row_idx: 0,
+        }
     }
 
     pub fn row_count(&self) -> usize {
@@ -3267,6 +3267,63 @@ fn strings_to_text_column(values: Vec<Option<String>>) -> ColumnarPage {
     }
 }
 
+pub struct RowIter<'a> {
+    result: &'a SelectResult,
+    batch_idx: usize,
+    row_idx: usize,
+}
+
+impl<'a> Iterator for RowIter<'a> {
+    type Item = RowView<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.batch_idx < self.result.batches.len() {
+            let batch = &self.result.batches[self.batch_idx];
+            if self.row_idx >= batch.num_rows {
+                self.batch_idx += 1;
+                self.row_idx = 0;
+                continue;
+            }
+            let view = RowView {
+                batch,
+                row_idx: self.row_idx,
+                column_count: self.result.columns.len(),
+            };
+            self.row_idx += 1;
+            return Some(view);
+        }
+        None
+    }
+}
+
+pub struct RowView<'a> {
+    batch: &'a ColumnarBatch,
+    row_idx: usize,
+    column_count: usize,
+}
+
+impl<'a> RowView<'a> {
+    pub fn value_as_string(&self, column_idx: usize) -> Option<String> {
+        self.batch
+            .columns
+            .get(&column_idx)
+            .and_then(|page| page.value_as_string(self.row_idx))
+    }
+
+    pub fn to_vec(&self) -> Vec<Option<String>> {
+        let mut row = Vec::with_capacity(self.column_count);
+        for column_idx in 0..self.column_count {
+            row.push(
+                self.batch
+                    .columns
+                    .get(&column_idx)
+                    .and_then(|page| page.value_as_string(self.row_idx)),
+            );
+        }
+        row
+    }
+}
+
 fn rows_to_batch(rows: Vec<Vec<Option<String>>>) -> ColumnarBatch {
     if rows.is_empty() {
         return ColumnarBatch::new();
@@ -3313,6 +3370,86 @@ fn batches_to_rows(batches: &[ColumnarBatch]) -> Vec<Vec<Option<String>>> {
         rows.extend(batch_to_rows(batch));
     }
     rows
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum DistinctValue {
+    Null,
+    Int(i64),
+    Float(u64),
+    Text(String),
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct DistinctKey {
+    values: Vec<DistinctValue>,
+}
+
+fn build_distinct_key(
+    batch: &ColumnarBatch,
+    row_idx: usize,
+    column_count: usize,
+) -> DistinctKey {
+    let mut values = Vec::with_capacity(column_count);
+    for column_idx in 0..column_count {
+        let value = match batch.columns.get(&column_idx) {
+            Some(page) => match &page.data {
+                ColumnData::Int64(data) => {
+                    if page.null_bitmap.is_set(row_idx) {
+                        DistinctValue::Null
+                    } else {
+                        DistinctValue::Int(data[row_idx])
+                    }
+                }
+                ColumnData::Float64(data) => {
+                    if page.null_bitmap.is_set(row_idx) {
+                        DistinctValue::Null
+                    } else {
+                        DistinctValue::Float(data[row_idx].to_bits())
+                    }
+                }
+                ColumnData::Text(data) => {
+                    if page.null_bitmap.is_set(row_idx) {
+                        DistinctValue::Null
+                    } else {
+                        DistinctValue::Text(data[row_idx].clone())
+                    }
+                }
+            },
+            None => DistinctValue::Null,
+        };
+        values.push(value);
+    }
+    DistinctKey { values }
+}
+
+fn deduplicate_batches(
+    batches: Vec<ColumnarBatch>,
+    column_count: usize,
+) -> Vec<ColumnarBatch> {
+    if batches.is_empty() || column_count == 0 {
+        return batches;
+    }
+
+    let mut seen: HashSet<DistinctKey> = HashSet::new();
+    let mut deduped: Vec<ColumnarBatch> = Vec::new();
+
+    for batch in batches.into_iter() {
+        if batch.num_rows == 0 {
+            continue;
+        }
+        let mut indices: Vec<usize> = Vec::new();
+        for row_idx in 0..batch.num_rows {
+            let key = build_distinct_key(&batch, row_idx, column_count);
+            if seen.insert(key) {
+                indices.push(row_idx);
+            }
+        }
+        if !indices.is_empty() {
+            deduped.push(batch.gather(&indices));
+        }
+    }
+    deduped
 }
 
 fn chunk_batch(batch: &ColumnarBatch, chunk_size: usize) -> Vec<ColumnarBatch> {

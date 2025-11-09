@@ -8,10 +8,20 @@ use idk_uwu_ig::ops_handler::{
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SqlExecutionError, SqlExecutor};
+use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutionError, SqlExecutor};
 use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
 use std::cmp::Ordering;
 use std::sync::{Arc, RwLock};
+
+trait ResultRowsExt {
+    fn rows(&self) -> Vec<Vec<Option<String>>>;
+}
+
+impl ResultRowsExt for SelectResult {
+    fn rows(&self) -> Vec<Vec<Option<String>>> {
+        self.row_iter().map(|row| row.to_vec()).collect()
+    }
+}
 
 fn build_table_with_rows(
     table: &str,
