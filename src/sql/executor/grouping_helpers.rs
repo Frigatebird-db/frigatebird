@@ -1,7 +1,9 @@
 use super::aggregates::AggregateDataset;
-use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
+use super::batch::ColumnarBatch;
+use super::expressions::{evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression};
 use super::values::ScalarValue;
 use super::{GroupByInfo, GroupKey, GroupingSetPlan, SqlExecutionError};
+use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{Expr, GroupByExpr};
 
 pub(super) fn validate_group_by(
@@ -136,4 +138,33 @@ pub(super) fn evaluate_having(
     } else {
         Ok(true)
     }
+}
+
+pub(super) fn evaluate_group_keys_on_batch(
+    group_by_exprs: &[Expr],
+    batch: &ColumnarBatch,
+    catalog: &TableCatalog,
+) -> Result<Vec<GroupKey>, SqlExecutionError> {
+    if batch.num_rows == 0 {
+        return Ok(Vec::new());
+    }
+
+    if group_by_exprs.is_empty() {
+        return Ok(vec![GroupKey::empty(); batch.num_rows]);
+    }
+
+    let mut key_columns = Vec::with_capacity(group_by_exprs.len());
+    for expr in group_by_exprs {
+        key_columns.push(evaluate_expression_on_batch(expr, batch, catalog)?);
+    }
+
+    let mut keys = Vec::with_capacity(batch.num_rows);
+    for row_idx in 0..batch.num_rows {
+        let mut values = Vec::with_capacity(key_columns.len());
+        for column in &key_columns {
+            values.push(column.get_value_as_string(row_idx));
+        }
+        keys.push(GroupKey::from_values(values));
+    }
+    Ok(keys)
 }
