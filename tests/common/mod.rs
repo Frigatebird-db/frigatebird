@@ -665,7 +665,7 @@ fn compare_results(
     duck_rows: Vec<Vec<Option<String>>>,
     options: QueryOptions<'_>,
 ) {
-    let mut ours_norm = normalize_rows(ours.rows);
+    let mut ours_norm = normalize_rows(ours.into_rows());
     let mut duck_norm = normalize_rows(duck_rows);
 
     if ours_norm.len() != duck_norm.len() {
