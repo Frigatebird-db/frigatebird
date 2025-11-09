@@ -1562,37 +1562,23 @@ impl SqlExecutor {
             rows.push(projected);
         }
 
-        if distinct_flag {
-            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
-            let mut deduped = Vec::with_capacity(rows.len());
-            for row in rows.into_iter() {
-                if seen.insert(row.clone()) {
-                    deduped.push(row);
-                }
-            }
-            rows = deduped;
-        }
-
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
 
-        let start = offset.min(rows.len());
-        let end = if let Some(limit) = limit {
-            start.saturating_add(limit).min(rows.len())
-        } else {
-            rows.len()
-        };
-        let final_rows = rows[start..end].to_vec();
-        let batch = rows_to_batch(final_rows);
-        let batches = if batch.num_rows == 0 {
+        let mut batches = if rows.is_empty() {
             Vec::new()
         } else {
-            vec![batch]
+            vec![rows_to_batch(rows)]
         };
+        if distinct_flag {
+            batches = deduplicate_batches(batches, projection_plan.items.len());
+        }
+        let limited_batches =
+            self.apply_limit_offset(batches.into_iter(), offset, limit)?;
 
         Ok(SelectResult {
             columns: result_columns,
-            batches,
+            batches: limited_batches,
         })
     }
 
@@ -2162,10 +2148,16 @@ impl SqlExecutor {
                 .insert(idx, strings_to_text_column(values));
         }
 
+        let batches = if num_rows == 0 {
+            Vec::new()
+        } else {
+            vec![result_batch]
+        };
+
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
         let limited_batches =
-            self.apply_limit_offset(std::iter::once(result_batch), offset, limit)?;
+            self.apply_limit_offset(batches.into_iter(), offset, limit)?;
 
         Ok(SelectResult {
             columns: result_columns,

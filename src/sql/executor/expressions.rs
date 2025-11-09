@@ -11,7 +11,9 @@ use super::values::{
     compare_strs, is_encoded_null, scalar_from_f64,
 };
 use crate::metadata_store::TableCatalog;
-use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, UnaryOperator, Value,
+};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -631,12 +633,202 @@ pub(super) fn evaluate_expression_on_batch(
             }
         }
         Expr::Nested(inner) => evaluate_expression_on_batch(inner, batch, catalog),
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => evaluate_case_expression_vectorized(
+            operand.as_deref(),
+            conditions,
+            results,
+            else_result.as_deref(),
+            batch,
+            catalog,
+        ),
+        Expr::Function(function) => evaluate_scalar_function_on_batch(function, batch, catalog),
         _ => Err(SqlExecutionError::Unsupported(
             "expression not supported by vectorized projection".into(),
         )),
     }
 }
 
+fn evaluate_scalar_function_on_batch(
+    function: &Function,
+    batch: &ColumnarBatch,
+    catalog: &TableCatalog,
+) -> Result<ColumnarPage, SqlExecutionError> {
+    let name = function
+        .name
+        .0
+        .last()
+        .map(|ident| ident.value.to_uppercase())
+        .unwrap_or_default();
+
+    match name.as_str() {
+        "COALESCE" => evaluate_coalesce_function(function, batch, catalog),
+        _ => Err(SqlExecutionError::Unsupported(format!(
+            "function {name} is not supported in vectorized projection"
+        ))),
+    }
+}
+
+fn evaluate_coalesce_function(
+    function: &Function,
+    batch: &ColumnarBatch,
+    catalog: &TableCatalog,
+) -> Result<ColumnarPage, SqlExecutionError> {
+    if function.args.is_empty() {
+        return Err(SqlExecutionError::Unsupported(
+            "COALESCE requires at least one argument".into(),
+        ));
+    }
+
+    let mut arg_pages = Vec::with_capacity(function.args.len());
+    for arg in &function.args {
+        let expr = match arg {
+            FunctionArg::Unnamed(item) | FunctionArg::Named { arg: item, .. } => match item {
+                FunctionArgExpr::Expr(expr) => expr,
+                _ => {
+                    return Err(SqlExecutionError::Unsupported(
+                        "COALESCE arguments must be expressions".into(),
+                    ))
+                }
+            },
+        };
+        arg_pages.push(evaluate_expression_on_batch(expr, batch, catalog)?);
+    }
+
+    let mut values: Vec<Option<String>> = Vec::with_capacity(batch.num_rows);
+    for row_idx in 0..batch.num_rows {
+        let mut selected = None;
+        for page in &arg_pages {
+            if !page.null_bitmap.is_set(row_idx) {
+                selected = page.value_as_string(row_idx);
+                if selected.is_some() {
+                    break;
+                }
+            }
+        }
+        values.push(selected);
+    }
+
+    Ok(column_from_strings(values))
+}
+
+fn evaluate_case_expression_vectorized(
+    operand: Option<&Expr>,
+    conditions: &[Expr],
+    results: &[Expr],
+    else_result: Option<&Expr>,
+    batch: &ColumnarBatch,
+    catalog: &TableCatalog,
+) -> Result<ColumnarPage, SqlExecutionError> {
+    if conditions.len() != results.len() {
+        return Err(SqlExecutionError::Unsupported(
+            "CASE expression requires matching WHEN/THEN clauses".into(),
+        ));
+    }
+
+    let result_pages: Vec<ColumnarPage> = results
+        .iter()
+        .map(|expr| evaluate_expression_on_batch(expr, batch, catalog))
+        .collect::<Result<_, _>>()?;
+    let else_page = if let Some(expr) = else_result {
+        Some(evaluate_expression_on_batch(expr, batch, catalog)?)
+    } else {
+        None
+    };
+
+    let mut values: Vec<Option<String>> = Vec::with_capacity(batch.num_rows);
+    if let Some(op_expr) = operand {
+        let operand_page = evaluate_expression_on_batch(op_expr, batch, catalog)?;
+        let condition_pages: Vec<ColumnarPage> = conditions
+            .iter()
+            .map(|expr| evaluate_expression_on_batch(expr, batch, catalog))
+            .collect::<Result<_, _>>()?;
+        for row_idx in 0..batch.num_rows {
+            let operand_value = operand_page.value_as_string(row_idx);
+            let mut selected = None;
+            if operand_value.is_some() {
+                for (cond_page, result_page) in condition_pages.iter().zip(result_pages.iter()) {
+                    let cond_value = cond_page.value_as_string(row_idx);
+                    if cond_value.is_some() && cond_value == operand_value {
+                        selected = result_page.value_as_string(row_idx);
+                        break;
+                    }
+                }
+            }
+            if selected.is_none() {
+                selected = else_page
+                    .as_ref()
+                    .and_then(|page| page.value_as_string(row_idx));
+            }
+            values.push(selected);
+        }
+    } else {
+        let condition_pages: Vec<ColumnarPage> = conditions
+            .iter()
+            .map(|expr| evaluate_expression_on_batch(expr, batch, catalog))
+            .collect::<Result<_, _>>()?;
+        for row_idx in 0..batch.num_rows {
+            let mut selected = None;
+            for (cond_page, result_page) in condition_pages.iter().zip(result_pages.iter()) {
+                if page_value_truthy(cond_page, row_idx) {
+                    selected = result_page.value_as_string(row_idx);
+                    break;
+                }
+            }
+            if selected.is_none() {
+                selected = else_page
+                    .as_ref()
+                    .and_then(|page| page.value_as_string(row_idx));
+            }
+            values.push(selected);
+        }
+    }
+
+    Ok(column_from_strings(values))
+}
+
+fn page_value_truthy(page: &ColumnarPage, row_idx: usize) -> bool {
+    if page.null_bitmap.is_set(row_idx) {
+        return false;
+    }
+
+    match &page.data {
+        ColumnData::Int64(values) => values[row_idx] != 0,
+        ColumnData::Float64(values) => values[row_idx] != 0.0,
+        ColumnData::Text(values) => {
+            let value = values[row_idx].trim();
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "t" | "1" | "yes" | "y"
+            )
+        }
+    }
+}
+
+fn column_from_strings(values: Vec<Option<String>>) -> ColumnarPage {
+    let len = values.len();
+    let mut data: Vec<String> = Vec::with_capacity(len);
+    let mut bitmap = Bitmap::new(len);
+    for (idx, value) in values.into_iter().enumerate() {
+        match value {
+            Some(text) => data.push(text),
+            None => {
+                bitmap.set(idx);
+                data.push(String::new());
+            }
+        }
+    }
+    ColumnarPage {
+        page_metadata: String::new(),
+        data: ColumnData::Text(data),
+        null_bitmap: bitmap,
+        num_rows: len,
+    }
+}
 fn evaluate_row_case_expr(
     operand: Option<&Expr>,
     conditions: &[Expr],
