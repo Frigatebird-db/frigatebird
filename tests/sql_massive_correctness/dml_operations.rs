@@ -9,7 +9,6 @@ fn install_fixture() -> (ExecutorHarness, MassiveFixture) {
 }
 
 #[test]
-#[ignore = "UPDATE operations hang/are broken - needs investigation"]
 fn update_single_column_with_where() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
@@ -41,7 +40,6 @@ fn update_single_column_with_where() {
 }
 
 #[test]
-#[ignore = "UPDATE operations hang/are broken - needs investigation"]
 fn update_multiple_columns() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
@@ -71,7 +69,6 @@ fn update_multiple_columns() {
 }
 
 #[test]
-#[ignore = "UPDATE operations hang/are broken - needs investigation"]
 fn update_with_complex_where() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
@@ -109,7 +106,6 @@ fn update_with_complex_where() {
 }
 
 #[test]
-#[ignore = "UPDATE operations hang/are broken - needs investigation"]
 fn update_with_expression() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
@@ -139,7 +135,6 @@ fn update_with_expression() {
 }
 
 #[test]
-#[ignore = "DELETE operations hang/are broken - needs investigation"]
 fn delete_with_simple_where() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
@@ -172,7 +167,6 @@ fn delete_with_simple_where() {
 }
 
 #[test]
-#[ignore = "DELETE operations hang/are broken - needs investigation"]
 fn delete_with_complex_predicate() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
@@ -202,7 +196,6 @@ fn delete_with_complex_predicate() {
 }
 
 #[test]
-#[ignore = "DELETE operations hang/are broken - needs investigation"]
 fn delete_with_in_clause() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
