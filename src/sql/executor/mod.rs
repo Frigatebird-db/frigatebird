@@ -36,14 +36,17 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use aggregates::{
-    AggregateDataset, AggregateProjectionPlan, MaterializedColumns, WindowResultMap,
+    AggregateDataset, AggregateFunctionKind, AggregateFunctionPlan, AggregateProjectionPlan,
+    AggregateState, AggregationHashTable, MaterializedColumns, WindowResultMap,
     evaluate_aggregate_outputs, plan_aggregate_projection, select_item_contains_aggregate,
+    vectorized_average_update, vectorized_count_star_update, vectorized_count_value_update,
+    vectorized_sum_update,
 };
 use expressions::{
     evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
     evaluate_selection_expr, evaluate_selection_on_page,
 };
-use grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
+use grouping_helpers::{evaluate_group_key, evaluate_group_keys_on_batch, evaluate_having, validate_group_by};
 use helpers::{
     collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
     object_name_matches_table, object_name_to_string, parse_interval_seconds, parse_limit,
@@ -70,6 +73,22 @@ pub enum SqlExecutionError {
     ColumnMismatch { table: String, column: String },
     ValueMismatch(String),
     OperationFailed(String),
+}
+
+fn find_group_expr_index(expr: &Expr, group_exprs: &[Expr]) -> Option<usize> {
+    group_exprs.iter().position(|candidate| candidate == expr)
+}
+
+fn literal_value(expr: &Expr) -> Option<Option<String>> {
+    match expr {
+        Expr::Value(Value::Null) => Some(None),
+        Expr::Value(Value::Boolean(flag)) => {
+            Some(Some(if *flag { "true".into() } else { "false".into() }))
+        }
+        Expr::Value(Value::Number(value, _)) => Some(Some(value.clone())),
+        Expr::Value(Value::SingleQuotedString(text)) => Some(Some(text.clone())),
+        _ => None,
+    }
 }
 
 impl std::fmt::Display for SqlExecutionError {
@@ -323,6 +342,26 @@ struct AggregatedRow {
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct GroupKey {
     values: Vec<Option<String>>,
+}
+
+impl GroupKey {
+    fn empty() -> Self {
+        Self { values: Vec::new() }
+    }
+
+    fn from_values(values: Vec<Option<String>>) -> Self {
+        Self { values }
+    }
+
+    fn value_at(&self, idx: usize) -> Option<Option<String>> {
+        self.values.get(idx).cloned()
+    }
+}
+
+enum VectorAggregationOutput {
+    Aggregate { slot_index: usize },
+    GroupExpr { group_index: usize },
+    Literal { value: Option<String> },
 }
 
 #[derive(Clone)]
@@ -745,6 +784,51 @@ impl SqlExecutor {
             }
         }
 
+        let simple_group_exprs = if let Some(info) = &group_by_info {
+            if info.sets.len() == 1 && info.sets[0].masked_exprs.is_empty() {
+                Some(info.sets[0].expressions.clone())
+            } else {
+                None
+            }
+        } else {
+            Some(Vec::new())
+        };
+
+        let can_run_vectorized_aggregation = needs_aggregation
+            && !distinct_flag
+            && having.is_none()
+            && order_clauses.is_empty()
+            && sort_key_filters.is_none()
+            && !apply_selection_late
+            && window_plans.is_empty()
+            && aggregate_plan_opt.is_some()
+            && simple_group_exprs.is_some();
+
+        if can_run_vectorized_aggregation {
+            if let Some(aggregate_plan) = &aggregate_plan_opt {
+                let group_exprs = simple_group_exprs
+                    .clone()
+                    .expect("group expressions checked above");
+                match self.execute_vectorized_aggregation(
+                    &table_name,
+                    &catalog,
+                    &columns,
+                    aggregate_plan,
+                    &group_exprs,
+                    &required_ordinals,
+                    scan_selection_expr,
+                    &column_ordinals,
+                    result_columns.clone(),
+                    limit_expr.clone(),
+                    offset_expr.clone(),
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(SqlExecutionError::Unsupported(_)) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
         let mut candidate_rows = if let Some(sort_key_filters) = sort_key_filters {
             for column in &sort_columns {
                 key_values.push(sort_key_filters.get(&column.name).cloned().ok_or_else(|| {
@@ -1137,6 +1221,30 @@ impl SqlExecutor {
         })
     }
 
+    fn transpose_batch_to_rows(
+        &self,
+        batch: &ColumnarBatch,
+    ) -> Result<Vec<Vec<Option<String>>>, SqlExecutionError> {
+        if batch.num_rows == 0 {
+            return Ok(Vec::new());
+        }
+        let column_count = batch.columns.len();
+        let mut rows = Vec::with_capacity(batch.num_rows);
+        for row_idx in 0..batch.num_rows {
+            let mut row = Vec::with_capacity(column_count);
+            for column_idx in 0..column_count {
+                let column = batch.columns.get(&column_idx).ok_or_else(|| {
+                    SqlExecutionError::OperationFailed(format!(
+                        "missing projection column at index {column_idx}"
+                    ))
+                })?;
+                row.push(column.value_as_string(row_idx));
+            }
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+
     fn execute_vectorized_projection(
         &self,
         table: &str,
@@ -1210,28 +1318,177 @@ impl SqlExecutor {
         })
     }
 
-    fn transpose_batch_to_rows(
+    fn execute_vectorized_aggregation(
         &self,
-        batch: &ColumnarBatch,
-    ) -> Result<Vec<Vec<Option<String>>>, SqlExecutionError> {
-        if batch.num_rows == 0 {
-            return Ok(Vec::new());
+        table: &str,
+        catalog: &TableCatalog,
+        columns: &[ColumnCatalog],
+        aggregate_plan: &AggregateProjectionPlan,
+        group_exprs: &[Expr],
+        required_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&Expr>,
+        column_ordinals: &HashMap<String, usize>,
+        result_columns: Vec<String>,
+        limit_expr: Option<Expr>,
+        offset_expr: Option<Offset>,
+    ) -> Result<SelectResult, SqlExecutionError> {
+        let batch = self.scan_and_filter_vectorized(
+            table,
+            columns,
+            required_ordinals,
+            selection_expr,
+            column_ordinals,
+        )?;
+
+        let group_keys = evaluate_group_keys_on_batch(group_exprs, &batch, catalog)?;
+
+        let mut aggregate_plans: Vec<AggregateFunctionPlan> = Vec::new();
+        let mut output_kinds: Vec<VectorAggregationOutput> =
+            Vec::with_capacity(aggregate_plan.outputs.len());
+
+        for projection in &aggregate_plan.outputs {
+            match AggregateFunctionPlan::from_expr(&projection.expr)? {
+                Some(plan) => {
+                    let slot_index = aggregate_plans.len();
+                    aggregate_plans.push(plan);
+                    output_kinds.push(VectorAggregationOutput::Aggregate { slot_index });
+                    continue;
+                }
+                None => {}
+            }
+
+            if let Some(idx) = find_group_expr_index(&projection.expr, group_exprs) {
+                output_kinds.push(VectorAggregationOutput::GroupExpr { group_index: idx });
+                continue;
+            }
+
+            if let Some(value) = literal_value(&projection.expr) {
+                output_kinds.push(VectorAggregationOutput::Literal { value });
+                continue;
+            }
+
+            return Err(SqlExecutionError::Unsupported(
+                "vectorized aggregation only supports direct group expressions, literals, and simple aggregates"
+                    .into(),
+            ));
         }
-        let column_count = batch.columns.len();
-        let mut rows = Vec::with_capacity(batch.num_rows);
-        for row_idx in 0..batch.num_rows {
-            let mut row = Vec::with_capacity(column_count);
-            for column_idx in 0..column_count {
-                let column = batch.columns.get(&column_idx).ok_or_else(|| {
-                    SqlExecutionError::OperationFailed(format!(
-                        "missing projection column at index {column_idx}"
-                    ))
-                })?;
-                row.push(column.value_as_string(row_idx));
+
+        if aggregate_plans.is_empty() {
+            return Err(SqlExecutionError::Unsupported(
+                "vectorized aggregation requires at least one aggregate function".into(),
+            ));
+        }
+
+        let state_template: Vec<AggregateState> =
+            aggregate_plans.iter().map(|plan| plan.initial_state()).collect();
+        let mut hash_table: AggregationHashTable = HashMap::new();
+
+        if batch.num_rows > 0 {
+            if group_keys.len() != batch.num_rows {
+                return Err(SqlExecutionError::OperationFailed(
+                    "group key evaluation mismatch".into(),
+                ));
+            }
+
+            for (slot_index, plan) in aggregate_plans.iter().enumerate() {
+                match plan.kind {
+                    AggregateFunctionKind::CountStar => {
+                        vectorized_count_star_update(
+                            &mut hash_table,
+                            slot_index,
+                            &group_keys,
+                            &state_template,
+                        );
+                    }
+                    AggregateFunctionKind::CountExpr => {
+                        let expr = plan.arg.as_ref().ok_or_else(|| {
+                            SqlExecutionError::OperationFailed(
+                                "COUNT expression missing argument".into(),
+                            )
+                        })?;
+                        let values_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
+                        vectorized_count_value_update(
+                            &mut hash_table,
+                            slot_index,
+                            &group_keys,
+                            &values_page,
+                            &state_template,
+                        );
+                    }
+                    AggregateFunctionKind::Sum => {
+                        let expr = plan.arg.as_ref().ok_or_else(|| {
+                            SqlExecutionError::OperationFailed(
+                                "SUM expression missing argument".into(),
+                            )
+                        })?;
+                        let values_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
+                        vectorized_sum_update(
+                            &mut hash_table,
+                            slot_index,
+                            &group_keys,
+                            &values_page,
+                            &state_template,
+                        );
+                    }
+                    AggregateFunctionKind::Average => {
+                        let expr = plan.arg.as_ref().ok_or_else(|| {
+                            SqlExecutionError::OperationFailed(
+                                "AVG expression missing argument".into(),
+                            )
+                        })?;
+                        let values_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
+                        vectorized_average_update(
+                            &mut hash_table,
+                            slot_index,
+                            &group_keys,
+                            &values_page,
+                            &state_template,
+                        );
+                    }
+                }
+            }
+        }
+
+        if hash_table.is_empty() && group_exprs.is_empty() {
+            hash_table.insert(GroupKey::empty(), state_template.clone());
+        }
+
+        let mut rows: Vec<Vec<Option<String>>> = Vec::with_capacity(hash_table.len());
+        for (key, states) in hash_table.into_iter() {
+            let mut row = Vec::with_capacity(output_kinds.len());
+            for kind in &output_kinds {
+                match kind {
+                    VectorAggregationOutput::Aggregate { slot_index } => {
+                        let state = states.get(*slot_index).ok_or_else(|| {
+                            SqlExecutionError::OperationFailed(
+                                "missing aggregate state for group".into(),
+                            )
+                        })?;
+                        row.push(aggregate_plans[*slot_index].finalize_value(state));
+                    }
+                    VectorAggregationOutput::GroupExpr { group_index } => {
+                        row.push(key.value_at(*group_index).unwrap_or(None));
+                    }
+                    VectorAggregationOutput::Literal { value } => row.push(value.clone()),
+                }
             }
             rows.push(row);
         }
-        Ok(rows)
+
+        let offset = parse_offset(offset_expr)?;
+        let limit = parse_limit(limit_expr)?;
+        let start = offset.min(rows.len());
+        let end = if let Some(limit) = limit {
+            start.saturating_add(limit).min(rows.len())
+        } else {
+            rows.len()
+        };
+        let final_rows = rows[start..end].to_vec();
+
+        Ok(SelectResult {
+            columns: result_columns,
+            rows: final_rows,
+        })
     }
 
     fn execute_create(&self, statement: Statement) -> Result<(), SqlExecutionError> {

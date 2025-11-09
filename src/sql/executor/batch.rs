@@ -318,6 +318,10 @@ impl ColumnarPage {
         Some(Entry::new(&value))
     }
 
+    pub fn get_value_as_string(&self, idx: usize) -> Option<String> {
+        self.value_as_string(idx)
+    }
+
     pub fn empty_like(&self) -> Self {
         let data = match &self.data {
             ColumnData::Int64(_) => ColumnData::Int64(Vec::new()),
