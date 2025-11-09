@@ -1,12 +1,15 @@
 use super::SqlExecutionError;
 use super::aggregates::{AggregateDataset, MaterializedColumns};
 use super::batch::{ColumnarBatch, ColumnarPage, ColumnData};
-use super::expressions::{evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression};
-use super::values::{ScalarValue, compare_scalar_values, compare_strs, format_float};
+use super::expressions::{
+    evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
+};
+use super::values::{compare_scalar_values, compare_strs, format_float, ScalarValue};
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::Expr;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(super) struct OrderClause {
@@ -233,5 +236,189 @@ fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
         ColumnData::Int64(values) => ScalarValue::Int(values[idx] as i128),
         ColumnData::Float64(values) => ScalarValue::Float(values[idx]),
         ColumnData::Text(values) => column_scalar_from_text(&values[idx]),
+    }
+}
+
+pub(super) struct MergeOperator {
+    runs: Vec<MergeRun>,
+    heap: BinaryHeap<HeapItem>,
+    batch_capacity: usize,
+    clauses: Arc<Vec<OrderClause>>,
+}
+
+impl MergeOperator {
+    pub fn new(
+        runs: Vec<ColumnarBatch>,
+        clauses: &[OrderClause],
+        catalog: &TableCatalog,
+        batch_capacity: usize,
+    ) -> Result<Self, SqlExecutionError> {
+        if runs.is_empty() {
+            return Ok(Self {
+                runs: Vec::new(),
+                heap: BinaryHeap::new(),
+                batch_capacity,
+                clauses: Arc::new(Vec::new()),
+            });
+        }
+
+        let clauses_arc = Arc::new(clauses.to_vec());
+        let mut merge_runs = Vec::with_capacity(runs.len());
+        let mut heap = BinaryHeap::new();
+
+        for batch in runs.into_iter() {
+            if batch.num_rows == 0 {
+                continue;
+            }
+            let keys =
+                build_order_keys_on_batch(clauses_arc.as_slice(), &batch, catalog)?;
+            let run_idx = merge_runs.len();
+            merge_runs.push(MergeRun {
+                batch,
+                keys,
+            });
+            let key = merge_runs[run_idx]
+                .keys
+                .get(0)
+                .cloned()
+                .ok_or_else(|| {
+                    SqlExecutionError::OperationFailed(
+                        "missing order key for merge run".into(),
+                    )
+                })?;
+            heap.push(HeapItem::new(run_idx, 0, key, Arc::clone(&clauses_arc)));
+        }
+
+        Ok(Self {
+            runs: merge_runs,
+            heap,
+            batch_capacity,
+            clauses: clauses_arc,
+        })
+    }
+
+    pub fn next_batch(&mut self) -> Result<Option<ColumnarBatch>, SqlExecutionError> {
+        if self.heap.is_empty() {
+            return Ok(None);
+        }
+
+        let mut emitted = 0;
+        let mut chunks: Vec<RowChunk> = Vec::new();
+
+        while emitted < self.batch_capacity {
+            let Some(item) = self.heap.pop() else {
+                break;
+            };
+
+            emitted += 1;
+            if let Some(chunk) = chunks.last_mut() {
+                if chunk.run_idx == item.run_idx && chunk.end_row == item.row_idx {
+                    chunk.end_row += 1;
+                } else {
+                    chunks.push(RowChunk::new(item.run_idx, item.row_idx));
+                }
+            } else {
+                chunks.push(RowChunk::new(item.run_idx, item.row_idx));
+            }
+
+            let next_row = item.row_idx + 1;
+            if let Some(next_key) =
+                self.runs[item.run_idx].keys.get(next_row).cloned()
+            {
+                self.heap.push(HeapItem::new(
+                    item.run_idx,
+                    next_row,
+                    next_key,
+                    Arc::clone(&self.clauses),
+                ));
+            }
+        }
+
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+
+        let mut output = ColumnarBatch::new();
+        for chunk in chunks {
+            let slice =
+                self.runs[chunk.run_idx].batch.slice(chunk.start_row, chunk.end_row);
+            output.append(&slice);
+        }
+        Ok(Some(output))
+    }
+}
+
+struct MergeRun {
+    batch: ColumnarBatch,
+    keys: Vec<OrderKey>,
+}
+
+#[derive(Clone)]
+struct HeapItem {
+    run_idx: usize,
+    row_idx: usize,
+    key: OrderKey,
+    clauses: Arc<Vec<OrderClause>>,
+}
+
+impl HeapItem {
+    fn new(
+        run_idx: usize,
+        row_idx: usize,
+        key: OrderKey,
+        clauses: Arc<Vec<OrderClause>>,
+    ) -> Self {
+        Self {
+            run_idx,
+            row_idx,
+            key,
+            clauses,
+        }
+    }
+}
+
+impl PartialEq for HeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.run_idx == other.run_idx && self.row_idx == other.row_idx
+    }
+}
+
+impl Eq for HeapItem {}
+
+impl PartialOrd for HeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeapItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match compare_order_keys(
+            &self.key,
+            &other.key,
+            self.clauses.as_slice(),
+        ) {
+            Ordering::Equal => other
+                .run_idx
+                .cmp(&self.run_idx)
+                .then_with(|| other.row_idx.cmp(&self.row_idx)),
+            ord => ord.reverse(),
+        }
+    }
+}
+
+struct RowChunk {
+    run_idx: usize,
+    start_row: usize,
+    end_row: usize,
+}
+
+impl RowChunk {
+    fn new(run_idx: usize, start_row: usize) -> Self {
+        Self {
+            run_idx,
+            start_row,
+            end_row: start_row + 1,
+        }
     }
 }

@@ -13,6 +13,7 @@ mod values;
 mod window_helpers;
 
 use self::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
+use self::spill::SpillManager;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{ColumnCatalog, PageDescriptor, PageDirectory, TableCatalog};
@@ -53,7 +54,7 @@ use helpers::{
 };
 use ordering::{
     NullsPlacement, OrderClause, OrderKey, build_group_order_key, compare_order_keys,
-    sort_batch_in_memory, sort_rows_logical,
+    sort_batch_in_memory, sort_rows_logical, MergeOperator,
 };
 use projection_helpers::{build_projection, materialize_columns};
 use scan_helpers::collect_sort_key_filters;
@@ -710,6 +711,7 @@ enum RangePreceding {
 
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
 const WINDOW_BATCH_CHUNK_SIZE: usize = 1_024;
+const SORT_OUTPUT_BATCH_SIZE: usize = 1_024;
 
 pub struct SqlExecutor {
     page_handler: Arc<PageHandler>,
@@ -1537,6 +1539,21 @@ impl SqlExecutor {
         Ok(rows)
     }
 
+    fn transpose_batches_to_rows(
+        &self,
+        batches: &[ColumnarBatch],
+    ) -> Result<Vec<Vec<Option<String>>>, SqlExecutionError> {
+        let mut rows = Vec::new();
+        for batch in batches {
+            if batch.num_rows == 0 {
+                continue;
+            }
+            let mut chunk_rows = self.transpose_batch_to_rows(batch)?;
+            rows.append(&mut chunk_rows);
+        }
+        Ok(rows)
+    }
+
     fn execute_vectorized_projection(
         &self,
         table: &str,
@@ -1568,26 +1585,37 @@ impl SqlExecutor {
         }
 
         if !order_clauses.is_empty() {
-            batch = sort_batch_in_memory(&batch, order_clauses, catalog)?;
+            let sorted_batches =
+                self.execute_sort(std::iter::once(batch), order_clauses, catalog)?;
+            batch = merge_batches(sorted_batches);
         }
 
         let final_batch = self.build_projection_batch(&batch, projection_plan, catalog)?;
-        let mut rows = self.transpose_batch_to_rows(&final_batch)?;
-
-        if distinct_flag {
-            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
-            rows.retain(|row| seen.insert(row.clone()));
-        }
-
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
-        let start = offset.min(rows.len());
-        let end = if let Some(limit) = limit {
-            start.saturating_add(limit).min(rows.len())
-        } else {
-            rows.len()
-        };
-        let final_rows = rows[start..end].to_vec();
+
+        if distinct_flag {
+            let mut rows = self.transpose_batch_to_rows(&final_batch)?;
+            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
+            rows.retain(|row| seen.insert(row.clone()));
+
+            let start = offset.min(rows.len());
+            let end = if let Some(limit) = limit {
+                start.saturating_add(limit).min(rows.len())
+            } else {
+                rows.len()
+            };
+            let final_rows = rows[start..end].to_vec();
+
+            return Ok(SelectResult {
+                columns: result_columns,
+                rows: final_rows,
+            });
+        }
+
+        let limited_batches =
+            self.apply_limit_offset(std::iter::once(final_batch), offset, limit)?;
+        let final_rows = self.transpose_batches_to_rows(&limited_batches)?;
 
         Ok(SelectResult {
             columns: result_columns,
@@ -1696,27 +1724,41 @@ impl SqlExecutor {
         }
 
         if !final_order_clauses.is_empty() {
-            processed_batch = sort_batch_in_memory(&processed_batch, &final_order_clauses, catalog)?;
+            let sorted_batches = self.execute_sort(
+                std::iter::once(processed_batch),
+                &final_order_clauses,
+                catalog,
+            )?;
+            processed_batch = merge_batches(sorted_batches);
         }
 
         let final_batch =
             self.build_projection_batch(&processed_batch, &projection_plan, catalog)?;
-        let mut rows = self.transpose_batch_to_rows(&final_batch)?;
-
-        if distinct_flag {
-            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
-            rows.retain(|row| seen.insert(row.clone()));
-        }
-
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
-        let start = offset.min(rows.len());
-        let end = if let Some(limit) = limit {
-            start.saturating_add(limit).min(rows.len())
-        } else {
-            rows.len()
-        };
-        let final_rows = rows[start..end].to_vec();
+
+        if distinct_flag {
+            let mut rows = self.transpose_batch_to_rows(&final_batch)?;
+            let mut seen: HashSet<Vec<Option<String>>> = HashSet::with_capacity(rows.len());
+            rows.retain(|row| seen.insert(row.clone()));
+
+            let start = offset.min(rows.len());
+            let end = if let Some(limit) = limit {
+                start.saturating_add(limit).min(rows.len())
+            } else {
+                rows.len()
+            };
+            let final_rows = rows[start..end].to_vec();
+
+            return Ok(SelectResult {
+                columns: result_columns,
+                rows: final_rows,
+            });
+        }
+
+        let limited_batches =
+            self.apply_limit_offset(std::iter::once(final_batch), offset, limit)?;
+        let final_rows = self.transpose_batches_to_rows(&limited_batches)?;
 
         Ok(SelectResult {
             columns: result_columns,
@@ -1767,6 +1809,119 @@ impl SqlExecutor {
             return Ok(ColumnarBatch::new());
         }
         Ok(batch.filter_by_bitmap(&bitmap))
+    }
+
+    fn execute_sort<I>(
+        &self,
+        batches: I,
+        clauses: &[OrderClause],
+        catalog: &TableCatalog,
+    ) -> Result<Vec<ColumnarBatch>, SqlExecutionError>
+    where
+        I: IntoIterator<Item = ColumnarBatch>,
+    {
+        if clauses.is_empty() {
+            return Ok(batches
+                .into_iter()
+                .filter(|batch| batch.num_rows > 0)
+                .collect());
+        }
+
+        let mut spill_manager = SpillManager::new()
+            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+
+        for batch in batches.into_iter() {
+            if batch.num_rows == 0 {
+                continue;
+            }
+            let sorted = sort_batch_in_memory(&batch, clauses, catalog)?;
+            spill_manager
+                .spill_batch(sorted)
+                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+        }
+
+        let runs = spill_manager
+            .finish()
+            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+        if runs.len() <= 1 {
+            return Ok(runs);
+        }
+
+        let mut merge_operator =
+            MergeOperator::new(runs, clauses, catalog, SORT_OUTPUT_BATCH_SIZE)?;
+        let mut merged_batches = Vec::new();
+        while let Some(batch) = merge_operator.next_batch()? {
+            if batch.num_rows > 0 {
+                merged_batches.push(batch);
+            }
+        }
+        Ok(merged_batches)
+    }
+
+    fn apply_limit_offset<I>(
+        &self,
+        batches: I,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Result<Vec<ColumnarBatch>, SqlExecutionError>
+    where
+        I: IntoIterator<Item = ColumnarBatch>,
+    {
+        let mut rows_seen = 0usize;
+        let mut rows_emitted = 0usize;
+        let mut limited_batches = Vec::new();
+
+        for batch in batches.into_iter() {
+            if batch.num_rows == 0 {
+                continue;
+            }
+
+            if let Some(limit_value) = limit {
+                if rows_emitted >= limit_value {
+                    break;
+                }
+            }
+
+            let batch_end = rows_seen + batch.num_rows;
+            if batch_end <= offset {
+                rows_seen = batch_end;
+                continue;
+            }
+
+            let mut start_in_batch = 0usize;
+            if offset > rows_seen {
+                start_in_batch = offset - rows_seen;
+            }
+
+            let mut end_in_batch = batch.num_rows;
+            if let Some(limit_value) = limit {
+                let remaining = limit_value.saturating_sub(rows_emitted);
+                if remaining == 0 {
+                    break;
+                }
+                end_in_batch = (start_in_batch + remaining).min(batch.num_rows);
+            }
+
+            if start_in_batch >= end_in_batch {
+                rows_seen = batch_end;
+                continue;
+            }
+
+            let slice = batch.slice(start_in_batch, end_in_batch);
+            if slice.num_rows > 0 {
+                rows_emitted += slice.num_rows;
+                limited_batches.push(slice);
+            }
+            rows_seen = batch_end;
+
+            if let Some(limit_value) = limit {
+                if rows_emitted >= limit_value {
+                    break;
+                }
+            }
+        }
+
+        Ok(limited_batches)
     }
 
     fn execute_vectorized_aggregation(
@@ -1951,40 +2106,45 @@ impl SqlExecutor {
             group_order = filtered_order;
         }
 
-        let mut rows: Vec<Vec<Option<String>>> = Vec::with_capacity(group_order.len());
+        let mut column_values: Vec<Vec<Option<String>>> =
+            vec![Vec::with_capacity(group_order.len()); output_kinds.len()];
         for key in group_order {
             let states = hash_table.get(&key).ok_or_else(|| {
                 SqlExecutionError::OperationFailed("missing aggregate state for group".into())
             })?;
-            let mut row = Vec::with_capacity(output_kinds.len());
-            for kind in &output_kinds {
-                match kind {
+            for (idx, kind) in output_kinds.iter().enumerate() {
+                let value = match kind {
                     VectorAggregationOutput::Aggregate { slot_index } => {
                         let state = states.get(*slot_index).ok_or_else(|| {
                             SqlExecutionError::OperationFailed(
                                 "missing aggregate state for group".into(),
                             )
                         })?;
-                        row.push(aggregate_plans[*slot_index].finalize_value(state));
+                        aggregate_plans[*slot_index].finalize_value(state)
                     }
                     VectorAggregationOutput::GroupExpr { group_index } => {
-                        row.push(key.value_at(*group_index).unwrap_or(None));
+                        key.value_at(*group_index).unwrap_or(None)
                     }
-                    VectorAggregationOutput::Literal { value } => row.push(value.clone()),
-                }
+                    VectorAggregationOutput::Literal { value } => value.clone(),
+                };
+                column_values[idx].push(value);
             }
-            rows.push(row);
+        }
+
+        let mut result_batch = ColumnarBatch::with_capacity(column_values.len());
+        let num_rows = column_values.first().map(|values| values.len()).unwrap_or(0);
+        result_batch.num_rows = num_rows;
+        for (idx, values) in column_values.into_iter().enumerate() {
+            result_batch
+                .columns
+                .insert(idx, strings_to_text_column(values));
         }
 
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
-        let start = offset.min(rows.len());
-        let end = if let Some(limit) = limit {
-            start.saturating_add(limit).min(rows.len())
-        } else {
-            rows.len()
-        };
-        let final_rows = rows[start..end].to_vec();
+        let limited_batches =
+            self.apply_limit_offset(std::iter::once(result_batch), offset, limit)?;
+        let final_rows = self.transpose_batches_to_rows(&limited_batches)?;
 
         Ok(SelectResult {
             columns: result_columns,
@@ -3034,6 +3194,27 @@ fn boolean_bitmap_from_page(page: &ColumnarPage) -> Result<Bitmap, SqlExecutionE
         _ => Err(SqlExecutionError::Unsupported(
             "QUALIFY expressions must produce boolean results".into(),
         )),
+    }
+}
+
+fn strings_to_text_column(values: Vec<Option<String>>) -> ColumnarPage {
+    let len = values.len();
+    let mut null_bitmap = Bitmap::new(len);
+    let mut data: Vec<String> = Vec::with_capacity(len);
+    for (idx, value) in values.into_iter().enumerate() {
+        match value {
+            Some(text) => data.push(text),
+            None => {
+                null_bitmap.set(idx);
+                data.push(String::new());
+            }
+        }
+    }
+    ColumnarPage {
+        page_metadata: String::new(),
+        data: ColumnData::Text(data),
+        null_bitmap,
+        num_rows: len,
     }
 }
 
