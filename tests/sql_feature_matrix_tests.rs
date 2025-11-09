@@ -127,7 +127,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
     let order_result = executor
         .query(order_query)
         .expect("order by expression query");
-    assert_eq!(order_result.rows().len(), expected_top_five.len());
+    assert_eq!(order_result.row_count(), expected_top_five.len());
     for (row, expected) in order_result.rows().iter().zip(expected_top_five.iter()) {
         assert_eq!(row[0].as_ref().unwrap(), &expected.0);
         assert_eq!(row[1].as_ref().unwrap(), &expected.1);
@@ -173,7 +173,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
     let group_result = executor
         .query(group_query)
         .expect("group by + having query");
-    assert_eq!(group_result.rows().len(), expected_groups.len());
+    assert_eq!(group_result.row_count(), expected_groups.len());
     for (row, expected) in group_result.rows().iter().zip(expected_groups.iter()) {
         assert_eq!(row[0].as_ref().unwrap(), &expected.0);
         assert_eq!(row[1].as_ref().unwrap(), &expected.1);
@@ -231,7 +231,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
     let window_result = executor
         .query(&window_query)
         .expect("window function query");
-    assert_eq!(window_result.rows().len(), expected_window.len());
+    assert_eq!(window_result.row_count(), expected_window.len());
     for (row, expected) in window_result.rows().iter().zip(expected_window.iter()) {
         assert_eq!(row[0].as_ref().unwrap(), &expected.0);
         let rn: i64 = row[1].as_ref().unwrap().parse().unwrap();
@@ -275,7 +275,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
                          QUALIFY ROW_NUMBER() OVER (PARTITION BY category ORDER BY value DESC) <= 3 \
                          ORDER BY ts";
     let qualify_result = executor.query(qualify_query).expect("qualify query");
-    assert_eq!(qualify_result.rows().len(), expected_beta.len());
+    assert_eq!(qualify_result.row_count(), expected_beta.len());
     for (row, expected) in qualify_result.rows().iter().zip(expected_beta.iter()) {
         assert_eq!(row[0].as_ref().unwrap(), &expected.0);
         assert_eq!(row[1].as_ref().unwrap(), &expected.1);
@@ -307,7 +307,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
                             DENSE_RANK() OVER (PARTITION BY category ORDER BY value DESC) AS drnk \
                       FROM metrics WHERE category = 'gamma' ORDER BY ts LIMIT 8";
     let rank_result = executor.query(rank_query).expect("rank window query");
-    assert_eq!(rank_result.rows().len(), 8);
+    assert_eq!(rank_result.row_count(), 8);
     for (row, metric) in rank_result.rows().iter().zip(gamma_rows_ts.iter().take(8)) {
         let (expected_rank, expected_dense) = rank_map.get(&metric.ts_text).unwrap();
         assert_eq!(row[1].as_ref().unwrap(), &expected_rank.to_string());
@@ -326,7 +326,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
     let lag_lead_result = executor
         .query(lag_lead_query)
         .expect("lag/lead window query");
-    assert_eq!(lag_lead_result.rows().len(), 6);
+    assert_eq!(lag_lead_result.row_count(), 6);
     for (idx, row) in lag_lead_result.rows().iter().enumerate() {
         let current = alpha_rows_ts[idx];
         let expected_prev = if idx > 0 {
@@ -357,7 +357,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
     let sliding_result = executor
         .query(sliding_query)
         .expect("sliding sum window query");
-    assert_eq!(sliding_result.rows().len(), 8);
+    assert_eq!(sliding_result.row_count(), 8);
     for (idx, row) in sliding_result.rows().iter().enumerate() {
         let current = alpha_rows_ts[idx];
         let start = if idx >= 2 { idx - 2 } else { 0 };

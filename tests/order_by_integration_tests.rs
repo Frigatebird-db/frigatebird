@@ -450,7 +450,7 @@ fn sql_executor_query_supports_like_predicates() {
     let ilike = executor
         .query("SELECT name FROM users WHERE id = 1 AND name ILIKE 'al%'")
         .expect("ILIKE predicate");
-    assert_eq!(ilike.rows().len(), 2);
+    assert_eq!(ilike.row_count(), 2);
 }
 
 #[test]
@@ -540,13 +540,13 @@ fn sql_executor_numeric_aggregates() {
     let filtered = executor
         .query("SELECT SUM(CASE WHEN value > 20 THEN 1 ELSE 0 END) FROM numbers WHERE id = 1")
         .expect("filtered sum");
-    println!("filtered rows: {:?}", filtered.rows());
+    println!("filtered rows:\n{}", filtered);
     assert_eq!(filtered.rows(), vec![vec![Some("2".to_string())]]);
 
     let count_filtered = executor
         .query("SELECT COUNT(*) FROM numbers WHERE id = 1 AND value > 20")
         .expect("count filtered");
-    println!("count filtered: {:?}", count_filtered.rows());
+    println!("count filtered:\n{}", count_filtered);
     assert_eq!(count_filtered.rows(), vec![vec![Some("2".to_string())]]);
 
     let null_count = executor

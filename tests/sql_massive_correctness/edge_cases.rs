@@ -324,9 +324,9 @@ fn aggregate_on_empty_group() {
         return;
     }
     assert!(result.is_ok(), "Aggregate on empty set failed");
-    let rows = result.unwrap().rows();
+    let result = result.unwrap();
     // Should return one row with COUNT=0, SUM=NULL or 0, AVG=NULL
-    println!("Aggregate on empty set: {:?}", rows);
+    println!("Aggregate on empty set:\n{}", result);
 }
 
 #[test]

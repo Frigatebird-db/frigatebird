@@ -158,11 +158,9 @@ fn delete_with_simple_where() {
         table = table
     );
 
-    let result = executor.query(&verify_sql);
-    if result.is_ok() {
-        let count_result = result.unwrap();
+    if let Ok(count_result) = executor.query(&verify_sql) {
         // Should be 0 or significantly reduced
-        println!("Rows remaining after DELETE: {:?}", count_result.rows());
+        println!("Rows remaining after DELETE:\n{}", count_result);
     }
 }
 
@@ -189,12 +187,8 @@ fn delete_with_complex_predicate() {
         table = table
     );
 
-    let result = executor.query(&verify_sql);
-    if result.is_ok() {
-        println!(
-            "Rows remaining after complex DELETE: {:?}",
-            result.unwrap().rows()
-        );
+    if let Ok(result) = executor.query(&verify_sql) {
+        println!("Rows remaining after complex DELETE:\n{}", result);
     }
 }
 
@@ -226,12 +220,8 @@ fn delete_with_in_clause() {
         table = table
     );
 
-    let result = executor.query(&verify_sql);
-    if result.is_ok() {
-        println!(
-            "Rows remaining after DELETE: {:?}",
-            result.unwrap().rows()
-        );
+    if let Ok(result) = executor.query(&verify_sql) {
+        println!("Rows remaining after DELETE:\n{}", result);
         // Note: This test may fail due to DELETE implementation issues
         // Expected: 0 rows, but may return non-zero
     }
@@ -361,5 +351,5 @@ fn insert_with_nulls() {
     );
     let result = executor.query(&verify_sql);
     assert!(result.is_ok(), "SELECT after NULL INSERT failed");
-    println!("Rows with NULLs: {:?}", result.unwrap().rows());
+    println!("Rows with NULLs:\n{}", result.unwrap());
 }
