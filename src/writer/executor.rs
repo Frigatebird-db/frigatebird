@@ -2,7 +2,7 @@ use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{
     CatalogError, ColumnCatalog, ColumnDefinition, PageDescriptor, PageDirectory, PendingPage,
-    TableDefinition, ROWS_PER_PAGE_GROUP,
+    ROWS_PER_PAGE_GROUP, TableDefinition,
 };
 use crate::page::Page;
 use crate::page_handler::{PageHandler, page_io::PageIO};
@@ -308,11 +308,8 @@ impl WorkerContext {
             return;
         }
 
-        let sort_key_ordinals: Vec<usize> = catalog
-            .sort_key()
-            .iter()
-            .map(|col| col.ordinal)
-            .collect();
+        let sort_key_ordinals: Vec<usize> =
+            catalog.sort_key().iter().map(|col| col.ordinal).collect();
 
         if sort_key_ordinals.is_empty() {
             eprintln!(
@@ -396,10 +393,7 @@ impl WorkerContext {
             };
             let mut updated = (*page_arc).clone();
             for row in rows.iter().take(take) {
-                let value = row
-                    .get(idx)
-                    .map(|v| v.as_str())
-                    .unwrap_or_default();
+                let value = row.get(idx).map(|v| v.as_str()).unwrap_or_default();
                 updated.mutate_disk_page(|disk_page| {
                     disk_page.add_entry(Entry::new(value));
                 });
@@ -678,8 +672,7 @@ fn ensure_capacity(page: &mut Page, row_idx: usize) {
     }
 
     let missing = row_idx + 1 - page.entries.len();
-    page.entries
-        .extend((0..missing).map(|_| Entry::new("")));
+    page.entries.extend((0..missing).map(|_| Entry::new("")));
 }
 
 #[derive(Debug)]
@@ -709,9 +702,7 @@ fn compare_rows(left: &[String], right: &[String], sort_ordinals: &[usize]) -> C
 
 fn compare_field_values(left: &str, right: &str) -> CmpOrdering {
     match (left.parse::<f64>(), right.parse::<f64>()) {
-        (Ok(l), Ok(r)) => l
-            .partial_cmp(&r)
-            .unwrap_or_else(|| left.cmp(right)),
+        (Ok(l), Ok(r)) => l.partial_cmp(&r).unwrap_or_else(|| left.cmp(right)),
         _ => left.cmp(right),
     }
 }

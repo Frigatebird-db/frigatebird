@@ -223,10 +223,7 @@ fn compressor_single_byte_entries() {
     let decompressed = compressor.decompress(Arc::new(compressed));
 
     assert_eq!(decompressed.len(), 100);
-    assert_eq!(
-        uncompressed.page.len(),
-        decompressed.len()
-    );
+    assert_eq!(uncompressed.page.len(), decompressed.len());
 }
 
 #[test]

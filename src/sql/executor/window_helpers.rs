@@ -659,10 +659,7 @@ pub(super) fn rewrite_window_expressions(
         UnaryOp { expr, .. } => rewrite_window_expressions(expr, alias_map),
         Nested(inner) => rewrite_window_expressions(inner, alias_map),
         Between {
-            expr,
-            low,
-            high,
-            ..
+            expr, low, high, ..
         } => {
             rewrite_window_expressions(expr, alias_map)?;
             rewrite_window_expressions(low, alias_map)?;
@@ -729,7 +726,9 @@ pub(super) fn rewrite_window_expressions(
         | Collate { expr, .. }
         | Ceil { expr, .. }
         | Floor { expr, .. }
-        | AtTimeZone { timestamp: expr, .. } => rewrite_window_expressions(expr, alias_map),
+        | AtTimeZone {
+            timestamp: expr, ..
+        } => rewrite_window_expressions(expr, alias_map),
         Trim {
             expr,
             trim_what,
@@ -866,11 +865,7 @@ where
         Ok(())
     }
 
-    fn push_chunk(
-        &mut self,
-        key: GroupKey,
-        chunk: ColumnarBatch,
-    ) -> Result<(), SqlExecutionError> {
+    fn push_chunk(&mut self, key: GroupKey, chunk: ColumnarBatch) -> Result<(), SqlExecutionError> {
         match &self.current_partition_key {
             None => {
                 self.current_partition_key = Some(key);
@@ -1093,7 +1088,10 @@ where
                     let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
                     let arg_values = columnar_page_to_scalars(&arg_page);
                     let first_idx = sorted_positions.first().copied().unwrap_or(0);
-                    let first_value = arg_values.get(first_idx).cloned().unwrap_or(ScalarValue::Null);
+                    let first_value = arg_values
+                        .get(first_idx)
+                        .cloned()
+                        .unwrap_or(ScalarValue::Null);
                     for position in sorted_positions.iter() {
                         values[*position] = first_value.clone();
                     }
@@ -1105,7 +1103,10 @@ where
                     let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
                     let arg_values = columnar_page_to_scalars(&arg_page);
                     let last_idx = sorted_positions.last().copied().unwrap_or(0);
-                    let last_value = arg_values.get(last_idx).cloned().unwrap_or(ScalarValue::Null);
+                    let last_value = arg_values
+                        .get(last_idx)
+                        .cloned()
+                        .unwrap_or(ScalarValue::Null);
                     for position in sorted_positions.iter() {
                         values[*position] = last_value.clone();
                     }
@@ -1114,7 +1115,9 @@ where
                 }
             }
 
-            batch.aliases.insert(plan.result_alias.clone(), plan.result_ordinal);
+            batch
+                .aliases
+                .insert(plan.result_alias.clone(), plan.result_ordinal);
             if let Some(alias) = &plan.display_alias {
                 batch.aliases.insert(alias.clone(), plan.result_ordinal);
             }
@@ -1341,17 +1344,18 @@ fn scalars_to_column(
     }
 }
 
-fn determine_template_kind(
-    template: &ColumnarPage,
-    values: &[ScalarValue],
-) -> TemplateOutputKind {
+fn determine_template_kind(template: &ColumnarPage, values: &[ScalarValue]) -> TemplateOutputKind {
     if matches!(template.data, ColumnData::Text(_))
-        || values.iter().any(|value| matches!(value, ScalarValue::Text(_)))
+        || values
+            .iter()
+            .any(|value| matches!(value, ScalarValue::Text(_)))
     {
         return TemplateOutputKind::Text;
     }
     if matches!(template.data, ColumnData::Float64(_))
-        || values.iter().any(|value| matches!(value, ScalarValue::Float(_)))
+        || values
+            .iter()
+            .any(|value| matches!(value, ScalarValue::Float(_)))
     {
         return TemplateOutputKind::Float;
     }

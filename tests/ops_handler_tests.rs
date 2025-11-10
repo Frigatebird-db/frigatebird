@@ -421,10 +421,6 @@ fn sorted_upsert_inserts_in_order() {
         .collect();
     assert_eq!(
         values,
-        vec![
-            "10".to_string(),
-            "20".to_string(),
-            "30".to_string()
-        ]
+        vec!["10".to_string(), "20".to_string(), "30".to_string()]
     );
 }

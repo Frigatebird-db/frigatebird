@@ -1,9 +1,11 @@
 use super::SqlExecutionError;
-use super::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
 use super::aggregates::{
     AggregateDataset, MaterializedColumns, evaluate_aggregate_function, is_aggregate_function,
 };
-use super::helpers::{column_name_from_expr, expr_to_string, is_null_value, like_match, regex_match};
+use super::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
+use super::helpers::{
+    column_name_from_expr, expr_to_string, is_null_value, like_match, regex_match,
+};
 use super::row_functions::evaluate_row_function;
 use super::scalar_functions::evaluate_scalar_function;
 use super::values::{
@@ -561,9 +563,7 @@ pub(super) fn evaluate_expression_on_batch(
         }
         Expr::Value(Value::Number(raw, _)) => {
             let value = raw.parse::<f64>().map_err(|_| {
-                SqlExecutionError::Unsupported(format!(
-                    "unable to parse numeric literal '{raw}'"
-                ))
+                SqlExecutionError::Unsupported(format!("unable to parse numeric literal '{raw}'"))
             })?;
             Ok(ColumnarPage::from_literal_f64(value, batch.num_rows))
         }
@@ -692,7 +692,7 @@ fn evaluate_coalesce_function(
                 _ => {
                     return Err(SqlExecutionError::Unsupported(
                         "COALESCE arguments must be expressions".into(),
-                    ))
+                    ));
                 }
             },
         };
@@ -750,16 +750,18 @@ fn evaluate_case_expression_vectorized(
         for row_idx in 0..batch.num_rows {
             let operand_value = operand_page.value_as_string(row_idx);
             let mut selected = None;
+            let mut matched = false;
             if operand_value.is_some() {
                 for (cond_page, result_page) in condition_pages.iter().zip(result_pages.iter()) {
                     let cond_value = cond_page.value_as_string(row_idx);
                     if cond_value.is_some() && cond_value == operand_value {
+                        matched = true;
                         selected = result_page.value_as_string(row_idx);
                         break;
                     }
                 }
             }
-            if selected.is_none() {
+            if !matched {
                 selected = else_page
                     .as_ref()
                     .and_then(|page| page.value_as_string(row_idx));
@@ -773,13 +775,15 @@ fn evaluate_case_expression_vectorized(
             .collect::<Result<_, _>>()?;
         for row_idx in 0..batch.num_rows {
             let mut selected = None;
+            let mut matched = false;
             for (cond_page, result_page) in condition_pages.iter().zip(result_pages.iter()) {
                 if page_value_truthy(cond_page, row_idx) {
+                    matched = true;
                     selected = result_page.value_as_string(row_idx);
                     break;
                 }
             }
-            if selected.is_none() {
+            if !matched {
                 selected = else_page
                     .as_ref()
                     .and_then(|page| page.value_as_string(row_idx));
@@ -1183,11 +1187,7 @@ pub(super) fn evaluate_selection_on_page(
     expr: &Expr,
     pages: &HashMap<String, &ColumnarPage>,
 ) -> Result<Bitmap, SqlExecutionError> {
-    let num_rows = pages
-        .values()
-        .next()
-        .map(|page| page.len())
-        .unwrap_or(0);
+    let num_rows = pages.values().next().map(|page| page.len()).unwrap_or(0);
 
     if num_rows == 0 {
         return Ok(Bitmap::new(0));
@@ -1213,8 +1213,8 @@ pub(super) fn evaluate_selection_on_page(
             | BinaryOperator::GtEq
             | BinaryOperator::Lt
             | BinaryOperator::LtEq => {
-                let (column, literal, normalized_op) =
-                    resolve_column_literal(left, right, op).ok_or_else(|| {
+                let (column, literal, normalized_op) = resolve_column_literal(left, right, op)
+                    .ok_or_else(|| {
                         SqlExecutionError::Unsupported(
                             "vectorized WHERE only supports column-to-literal predicates".into(),
                         )
@@ -1367,12 +1367,7 @@ fn evaluate_column_comparison(
                     "unable to parse literal as FLOAT for vectorized comparison".into(),
                 )
             })?;
-            Ok(build_float_bitmap(
-                values,
-                &page.null_bitmap,
-                op,
-                target,
-            ))
+            Ok(build_float_bitmap(values, &page.null_bitmap, op, target))
         }
         (ColumnData::Text(values), Eq)
         | (ColumnData::Text(values), NotEq)
@@ -1417,30 +1412,22 @@ fn resolve_batch_column(
     catalog: &TableCatalog,
 ) -> Result<ColumnarPage, SqlExecutionError> {
     if let Some(&ordinal) = batch.aliases.get(name) {
-        return batch
-            .columns
-            .get(&ordinal)
-            .cloned()
-            .ok_or_else(|| {
-                SqlExecutionError::OperationFailed(format!(
-                    "missing computed column {name} in vectorized batch"
-                ))
-            });
+        return batch.columns.get(&ordinal).cloned().ok_or_else(|| {
+            SqlExecutionError::OperationFailed(format!(
+                "missing computed column {name} in vectorized batch"
+            ))
+        });
     }
 
-    let column = catalog.column(name).ok_or_else(|| SqlExecutionError::ColumnMismatch {
-        table: catalog.name.clone(),
-        column: name.to_string(),
-    })?;
-    batch
-        .columns
-        .get(&column.ordinal)
-        .cloned()
-        .ok_or_else(|| {
-            SqlExecutionError::OperationFailed(format!(
-                "column {name} missing from vectorized batch"
-            ))
-        })
+    let column = catalog
+        .column(name)
+        .ok_or_else(|| SqlExecutionError::ColumnMismatch {
+            table: catalog.name.clone(),
+            column: name.to_string(),
+        })?;
+    batch.columns.get(&column.ordinal).cloned().ok_or_else(|| {
+        SqlExecutionError::OperationFailed(format!("column {name} missing from vectorized batch"))
+    })
 }
 
 fn vectorized_numeric_binary_op<F>(
@@ -1564,19 +1551,10 @@ fn numeric_value_at(page: &ColumnarPage, idx: usize) -> Result<f64, SqlExecution
 }
 
 fn bool_to_text(value: bool) -> String {
-    if value {
-        "true".into()
-    } else {
-        "false".into()
-    }
+    if value { "true".into() } else { "false".into() }
 }
 
-fn build_float_bitmap(
-    values: &[f64],
-    nulls: &Bitmap,
-    op: &BinaryOperator,
-    target: f64,
-) -> Bitmap {
+fn build_float_bitmap(values: &[f64], nulls: &Bitmap, op: &BinaryOperator, target: f64) -> Bitmap {
     let mut bitmap = Bitmap::new(values.len());
     for (idx, value) in values.iter().enumerate() {
         if nulls.is_set(idx) {

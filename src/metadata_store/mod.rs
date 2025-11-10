@@ -257,7 +257,6 @@ impl ColumnChain {
         self.pages[last_idx].entry_count = entry_count;
         self.pages.last().cloned()
     }
-
 }
 
 /// Describes where a logical row falls within a page.

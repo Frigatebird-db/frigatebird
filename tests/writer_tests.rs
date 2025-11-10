@@ -156,11 +156,7 @@ fn writer_submit_insert_at_operation() {
     let values = entry_values(&page);
     assert_eq!(
         values,
-        vec![
-            "10".to_string(),
-            "20".to_string(),
-            "30".to_string()
-        ]
+        vec!["10".to_string(), "20".to_string(), "30".to_string()]
     );
 }
 
@@ -260,11 +256,7 @@ fn writer_submit_multiple_operations_same_column() {
     let values = entry_values(&page);
     assert_eq!(
         values,
-        vec![
-            "tag1".to_string(),
-            "tag2".to_string(),
-            "tag3".to_string()
-        ]
+        vec!["tag1".to_string(), "tag2".to_string(), "tag3".to_string()]
     );
 }
 

@@ -21,10 +21,7 @@ fn update_without_where_full_table() {
     }
 
     // UPDATE without WHERE - should update ALL rows
-    let update_sql = format!(
-        "UPDATE {table} SET discount = 0.5",
-        table = table
-    );
+    let update_sql = format!("UPDATE {table} SET discount = 0.5", table = table);
 
     let update_result = executor.execute(&update_sql);
     if let Err(SqlExecutionError::Unsupported(_)) = update_result {

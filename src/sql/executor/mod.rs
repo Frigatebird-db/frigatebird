@@ -1,14 +1,14 @@
-pub mod batch;
 mod aggregates;
+pub mod batch;
 mod expressions;
 mod grouping_helpers;
 mod helpers;
 mod ordering;
-mod spill;
 mod projection_helpers;
 mod row_functions;
 mod scalar_functions;
 mod scan_helpers;
+mod spill;
 mod values;
 mod window_helpers;
 
@@ -47,23 +47,25 @@ use expressions::{
     evaluate_expression_on_batch, evaluate_row_expr, evaluate_selection_expr,
     evaluate_selection_on_page,
 };
-use grouping_helpers::{evaluate_group_key, evaluate_group_keys_on_batch, evaluate_having, validate_group_by};
+use grouping_helpers::{
+    evaluate_group_key, evaluate_group_keys_on_batch, evaluate_having, validate_group_by,
+};
 use helpers::{
     collect_expr_column_names, collect_expr_column_ordinals, column_name_from_expr, expr_to_string,
     object_name_to_string, parse_limit, parse_offset, table_with_joins_to_name,
 };
 use ordering::{
-    NullsPlacement, OrderClause, OrderKey, build_group_order_key, compare_order_keys,
-    sort_batch_in_memory, sort_rows_logical, MergeOperator,
+    MergeOperator, NullsPlacement, OrderClause, OrderKey, build_group_order_key,
+    compare_order_keys, sort_batch_in_memory, sort_rows_logical,
 };
 use projection_helpers::{build_projection, materialize_columns};
-use scan_helpers::collect_sort_key_filters;
+use scan_helpers::{SortKeyPrefix, collect_sort_key_filters, collect_sort_key_prefixes};
 use values::{
     CachedValue, ScalarValue, combine_numeric, compare_scalar_values, compare_strs, scalar_from_f64,
 };
 use window_helpers::{
-    collect_window_function_plans, collect_window_plans_from_expr, ensure_common_partition,
-    plan_order_clauses, rewrite_window_expressions, WindowOperator,
+    WindowOperator, collect_window_function_plans, collect_window_plans_from_expr,
+    ensure_common_partition, plan_order_clauses, rewrite_window_expressions,
 };
 
 #[derive(Debug)]
@@ -155,7 +157,9 @@ fn ensure_having_aggregate_plans(
         Expr::UnaryOp { expr, .. } | Expr::Nested(expr) => {
             ensure_having_aggregate_plans(expr, aggregate_plans, aggregate_lookup)?;
         }
-        Expr::Between { expr, low, high, .. } => {
+        Expr::Between {
+            expr, low, high, ..
+        } => {
             ensure_having_aggregate_plans(expr, aggregate_plans, aggregate_lookup)?;
             ensure_having_aggregate_plans(low, aggregate_plans, aggregate_lookup)?;
             ensure_having_aggregate_plans(high, aggregate_plans, aggregate_lookup)?;
@@ -224,9 +228,11 @@ fn evaluate_having_expression(
             let lhs = evaluate_having_expression(left, ctx)?;
             let rhs = evaluate_having_expression(right, ctx)?;
             match op {
-                BinaryOperator::Plus => combine_numeric(&lhs, &rhs, |a, b| a + b).ok_or_else(|| {
-                    SqlExecutionError::Unsupported("non-numeric addition in HAVING".into())
-                }),
+                BinaryOperator::Plus => {
+                    combine_numeric(&lhs, &rhs, |a, b| a + b).ok_or_else(|| {
+                        SqlExecutionError::Unsupported("non-numeric addition in HAVING".into())
+                    })
+                }
                 BinaryOperator::Minus => {
                     combine_numeric(&lhs, &rhs, |a, b| a - b).ok_or_else(|| {
                         SqlExecutionError::Unsupported("non-numeric subtraction in HAVING".into())
@@ -234,17 +240,21 @@ fn evaluate_having_expression(
                 }
                 BinaryOperator::Multiply => {
                     combine_numeric(&lhs, &rhs, |a, b| a * b).ok_or_else(|| {
-                        SqlExecutionError::Unsupported("non-numeric multiplication in HAVING".into())
+                        SqlExecutionError::Unsupported(
+                            "non-numeric multiplication in HAVING".into(),
+                        )
                     })
                 }
-                BinaryOperator::Divide => combine_numeric(&lhs, &rhs, |a, b| a / b)
-                    .ok_or_else(|| {
+                BinaryOperator::Divide => {
+                    combine_numeric(&lhs, &rhs, |a, b| a / b).ok_or_else(|| {
                         SqlExecutionError::Unsupported("non-numeric division in HAVING".into())
-                    }),
-                BinaryOperator::Modulo => combine_numeric(&lhs, &rhs, |a, b| a % b)
-                    .ok_or_else(|| {
+                    })
+                }
+                BinaryOperator::Modulo => {
+                    combine_numeric(&lhs, &rhs, |a, b| a % b).ok_or_else(|| {
                         SqlExecutionError::Unsupported("non-numeric modulo in HAVING".into())
-                    }),
+                    })
+                }
                 BinaryOperator::And => Ok(ScalarValue::Bool(
                     lhs.as_bool().unwrap_or(false) && rhs.as_bool().unwrap_or(false),
                 )),
@@ -320,9 +330,7 @@ fn group_value_as_scalar(
     ctx: &HavingEvalContext<'_>,
 ) -> Result<ScalarValue, SqlExecutionError> {
     let idx = ctx.group_expr_lookup.get(ident).ok_or_else(|| {
-        SqlExecutionError::Unsupported(format!(
-            "HAVING references non-grouped column {ident}"
-        ))
+        SqlExecutionError::Unsupported(format!("HAVING references non-grouped column {ident}"))
     })?;
     let value = ctx.group_key.value_at(*idx).unwrap_or(None);
     Ok(match value {
@@ -347,9 +355,7 @@ fn aggregate_value_as_scalar(
     ctx.aggregate_plans[*slot]
         .scalar_value(state)
         .ok_or_else(|| {
-            SqlExecutionError::Unsupported(format!(
-                "unable to evaluate aggregate {key} in HAVING"
-            ))
+            SqlExecutionError::Unsupported(format!("unable to evaluate aggregate {key} in HAVING"))
         })
 }
 
@@ -390,7 +396,7 @@ pub struct SelectResult {
     pub columns: Vec<String>,
     pub batches: Vec<ColumnarBatch>,
 }
- 
+
 impl SelectResult {
     pub fn row_iter(&self) -> RowIter<'_> {
         RowIter {
@@ -548,8 +554,8 @@ fn assign_window_display_aliases(
     plans: &mut [WindowFunctionPlan],
     projection_plan: &ProjectionPlan,
 ) {
-    use std::collections::VecDeque;
     use sqlparser::ast::Expr;
+    use std::collections::VecDeque;
 
     let mut key_to_indices: HashMap<String, VecDeque<usize>> = HashMap::new();
     for (idx, plan) in plans.iter().enumerate() {
@@ -1129,6 +1135,11 @@ impl SqlExecutor {
             },
             &sort_columns,
         )?;
+        let sort_key_prefixes = if has_selection {
+            collect_sort_key_prefixes(Some(&selection_expr), &sort_columns)?
+        } else {
+            None
+        };
 
         let scan_selection_expr = if has_selection && !apply_selection_late {
             Some(&selection_expr)
@@ -1137,13 +1148,11 @@ impl SqlExecutor {
         };
 
         if !window_plans.is_empty() {
-            let projection_plan = projection_plan_opt
-                .take()
-                .ok_or_else(|| {
-                    SqlExecutionError::Unsupported(
-                        "window queries require an explicit projection plan".into(),
-                    )
-                })?;
+            let projection_plan = projection_plan_opt.take().ok_or_else(|| {
+                SqlExecutionError::Unsupported(
+                    "window queries require an explicit projection plan".into(),
+                )
+            })?;
             let partition_exprs = ensure_common_partition(&window_plans)?;
             let vectorized_selection_expr = if has_selection {
                 Some(&selection_expr)
@@ -1174,6 +1183,7 @@ impl SqlExecutor {
             && qualify.is_none()
             && window_plans.is_empty()
             && sort_key_filters.is_none()
+            && sort_key_prefixes.is_none()
             && projection_plan_opt.is_some()
             && (order_clauses.is_empty() || !distinct_flag);
 
@@ -1214,6 +1224,7 @@ impl SqlExecutor {
             && !distinct_flag
             && order_clauses.is_empty()
             && sort_key_filters.is_none()
+            && sort_key_prefixes.is_none()
             && !apply_selection_late
             && window_plans.is_empty()
             && aggregate_plan_opt.is_some()
@@ -1251,6 +1262,8 @@ impl SqlExecutor {
             && order_clauses.is_empty()
             && window_plans.is_empty()
             && qualify.is_none()
+            && sort_key_prefixes.is_none()
+            && sort_key_filters.is_none()
         {
             if let Some(projection_plan) = &projection_plan_opt {
                 let group_exprs = build_group_exprs_for_distinct(projection_plan, &columns)?;
@@ -1297,6 +1310,8 @@ impl SqlExecutor {
             }
 
             self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?
+        } else if let Some(prefixes) = sort_key_prefixes {
+            self.locate_rows_by_sort_prefixes(&table_name, &sort_columns, &prefixes)?
         } else {
             self.scan_rows_via_full_table(
                 &table_name,
@@ -1333,12 +1348,7 @@ impl SqlExecutor {
 
         for &row_idx in &candidate_rows {
             let passes = if has_selection {
-                evaluate_selection_expr(
-                    &selection_expr,
-                    row_idx,
-                    &column_ordinals,
-                    &materialized,
-                )?
+                evaluate_selection_expr(&selection_expr, row_idx, &column_ordinals, &materialized)?
             } else {
                 true
             };
@@ -1573,8 +1583,7 @@ impl SqlExecutor {
         if distinct_flag {
             batches = deduplicate_batches(batches, projection_plan.items.len());
         }
-        let limited_batches =
-            self.apply_limit_offset(batches.into_iter(), offset, limit)?;
+        let limited_batches = self.apply_limit_offset(batches.into_iter(), offset, limit)?;
 
         Ok(SelectResult {
             columns: result_columns,
@@ -1623,10 +1632,8 @@ impl SqlExecutor {
         let limit = parse_limit(limit_expr)?;
 
         if distinct_flag {
-            let deduped =
-                deduplicate_batches(vec![final_batch], projection_plan.items.len());
-            let limited_batches =
-                self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
+            let deduped = deduplicate_batches(vec![final_batch], projection_plan.items.len());
+            let limited_batches = self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
             return Ok(SelectResult {
                 columns: result_columns,
                 batches: limited_batches,
@@ -1756,10 +1763,8 @@ impl SqlExecutor {
         let limit = parse_limit(limit_expr)?;
 
         if distinct_flag {
-            let deduped =
-                deduplicate_batches(vec![final_batch], projection_plan.items.len());
-            let limited_batches =
-                self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
+            let deduped = deduplicate_batches(vec![final_batch], projection_plan.items.len());
+            let limited_batches = self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
             return Ok(SelectResult {
                 columns: result_columns,
                 batches: limited_batches,
@@ -1784,15 +1789,13 @@ impl SqlExecutor {
         final_batch.num_rows = batch.num_rows;
         for (idx, item) in projection_plan.items.iter().enumerate() {
             let column_page = match item {
-                ProjectionItem::Direct { ordinal } => batch
-                    .columns
-                    .get(ordinal)
-                    .cloned()
-                    .ok_or_else(|| {
+                ProjectionItem::Direct { ordinal } => {
+                    batch.columns.get(ordinal).cloned().ok_or_else(|| {
                         SqlExecutionError::OperationFailed(format!(
                             "missing column ordinal {ordinal} in vectorized batch"
                         ))
-                    })?,
+                    })?
+                }
                 ProjectionItem::Computed { expr } => {
                     evaluate_expression_on_batch(expr, batch, catalog)?
                 }
@@ -2002,15 +2005,13 @@ impl SqlExecutor {
         }
 
         if let Some(expr) = having_expr {
-            ensure_having_aggregate_plans(
-                expr,
-                &mut aggregate_plans,
-                &mut aggregate_expr_lookup,
-            )?;
+            ensure_having_aggregate_plans(expr, &mut aggregate_plans, &mut aggregate_expr_lookup)?;
         }
 
-        let state_template: Vec<AggregateState> =
-            aggregate_plans.iter().map(|plan| plan.initial_state()).collect();
+        let state_template: Vec<AggregateState> = aggregate_plans
+            .iter()
+            .map(|plan| plan.initial_state())
+            .collect();
         let mut hash_table: AggregationHashTable = HashMap::new();
 
         if batch.num_rows > 0 {
@@ -2095,9 +2096,7 @@ impl SqlExecutor {
             let mut filtered_order = Vec::with_capacity(group_order.len());
             for key in group_order {
                 let states = hash_table.get(&key).ok_or_else(|| {
-                    SqlExecutionError::OperationFailed(
-                        "missing aggregate state for group".into(),
-                    )
+                    SqlExecutionError::OperationFailed("missing aggregate state for group".into())
                 })?;
                 let ctx = HavingEvalContext {
                     aggregate_plans: &aggregate_plans,
@@ -2140,7 +2139,10 @@ impl SqlExecutor {
         }
 
         let mut result_batch = ColumnarBatch::with_capacity(column_values.len());
-        let num_rows = column_values.first().map(|values| values.len()).unwrap_or(0);
+        let num_rows = column_values
+            .first()
+            .map(|values| values.len())
+            .unwrap_or(0);
         result_batch.num_rows = num_rows;
         for (idx, values) in column_values.into_iter().enumerate() {
             result_batch
@@ -2156,8 +2158,7 @@ impl SqlExecutor {
 
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
-        let limited_batches =
-            self.apply_limit_offset(batches.into_iter(), offset, limit)?;
+        let limited_batches = self.apply_limit_offset(batches.into_iter(), offset, limit)?;
 
         Ok(SelectResult {
             columns: result_columns,
@@ -2265,24 +2266,18 @@ impl SqlExecutor {
                 .map(|value| value.unwrap_or_default())
                 .collect();
 
-            let column_update = ColumnUpdate::new(
-                "*",
-                vec![UpdateOp::BufferRow {
-                    row: final_row,
-                }],
-            );
+            let column_update =
+                ColumnUpdate::new("*", vec![UpdateOp::BufferRow { row: final_row }]);
             let job = UpdateJob::new(table.clone(), vec![column_update]);
             self.writer.submit(job).map_err(|err| {
-                SqlExecutionError::OperationFailed(format!(
-                    "failed to submit insert job: {err:?}"
-                ))
+                SqlExecutionError::OperationFailed(format!("failed to submit insert job: {err:?}"))
             })?;
         }
 
         if !values.rows.is_empty() {
-            self.writer
-                .flush_table(&table)
-                .map_err(|err| SqlExecutionError::OperationFailed(format!("flush failed: {err:?}")))?;
+            self.writer.flush_table(&table).map_err(|err| {
+                SqlExecutionError::OperationFailed(format!("flush failed: {err:?}"))
+            })?;
         }
 
         Ok(())
@@ -2458,6 +2453,11 @@ impl SqlExecutor {
             },
             &sort_columns,
         )?;
+        let sort_key_prefixes = if has_selection {
+            collect_sort_key_prefixes(Some(&selection_expr), &sort_columns)?
+        } else {
+            None
+        };
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
         let mut candidate_rows = if let Some(filters) = sort_key_filters {
@@ -2471,6 +2471,8 @@ impl SqlExecutor {
                 key_values.push(value);
             }
             self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?
+        } else if let Some(prefixes) = sort_key_prefixes {
+            self.locate_rows_by_sort_prefixes(&table_name, &sort_columns, &prefixes)?
         } else {
             self.scan_rows_via_full_table(
                 &table_name,
@@ -2638,6 +2640,11 @@ impl SqlExecutor {
             },
             &sort_columns,
         )?;
+        let sort_key_prefixes = if has_selection {
+            collect_sort_key_prefixes(Some(&selection_expr), &sort_columns)?
+        } else {
+            None
+        };
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
         let mut candidate_rows = if let Some(filters) = sort_key_filters {
@@ -2651,6 +2658,8 @@ impl SqlExecutor {
                 key_values.push(value);
             }
             self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?
+        } else if let Some(prefixes) = sort_key_prefixes {
+            self.locate_rows_by_sort_prefixes(&table_name, &sort_columns, &prefixes)?
         } else {
             self.scan_rows_via_full_table(
                 &table_name,
@@ -2758,6 +2767,24 @@ impl SqlExecutor {
                 .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
         }
         Ok(())
+    }
+
+    fn locate_rows_by_sort_prefixes(
+        &self,
+        table: &str,
+        sort_columns: &[ColumnCatalog],
+        prefixes: &[SortKeyPrefix],
+    ) -> Result<Vec<u64>, SqlExecutionError> {
+        let mut result = Vec::new();
+        for prefix in prefixes {
+            if prefix.values.is_empty() || prefix.values.len() > sort_columns.len() {
+                continue;
+            }
+            let columns_slice = &sort_columns[..prefix.len()];
+            let rows = self.locate_rows_by_sort_tuple(table, columns_slice, &prefix.values)?;
+            result.extend(rows);
+        }
+        Ok(result)
     }
 
     fn locate_rows_by_sort_tuple(
@@ -3349,11 +3376,7 @@ struct DistinctKey {
     values: Vec<DistinctValue>,
 }
 
-fn build_distinct_key(
-    batch: &ColumnarBatch,
-    row_idx: usize,
-    column_count: usize,
-) -> DistinctKey {
+fn build_distinct_key(batch: &ColumnarBatch, row_idx: usize, column_count: usize) -> DistinctKey {
     let mut values = Vec::with_capacity(column_count);
     for column_idx in 0..column_count {
         let value = match batch.columns.get(&column_idx) {
@@ -3387,10 +3410,7 @@ fn build_distinct_key(
     DistinctKey { values }
 }
 
-fn deduplicate_batches(
-    batches: Vec<ColumnarBatch>,
-    column_count: usize,
-) -> Vec<ColumnarBatch> {
+fn deduplicate_batches(batches: Vec<ColumnarBatch>, column_count: usize) -> Vec<ColumnarBatch> {
     if batches.is_empty() || column_count == 0 {
         return batches;
     }
