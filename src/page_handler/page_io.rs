@@ -30,11 +30,7 @@ struct Metadata {
 pub struct PageIO {}
 
 impl PageIO {
-    pub fn read_from_path(
-        &self,
-        path: &str,
-        offset: u64,
-    ) -> io::Result<PageCacheEntryCompressed> {
+    pub fn read_from_path(&self, path: &str, offset: u64) -> io::Result<PageCacheEntryCompressed> {
         self.read_batch_from_path(path, &[offset])?
             .into_iter()
             .next()

@@ -88,7 +88,10 @@ fn update_with_complex_where() {
     // Known bug: UPDATE with complex WHERE may have correctness issues
     // This test documents the expected behavior
     if update_result.is_err() {
-        println!("UPDATE with complex WHERE failed (known limitation): {:?}", update_result);
+        println!(
+            "UPDATE with complex WHERE failed (known limitation): {:?}",
+            update_result
+        );
         return;
     }
 
@@ -140,10 +143,7 @@ fn delete_with_simple_where() {
     let ExecutorHarness { executor, .. } = harness;
     let table = fixture.table_name();
 
-    let delete_sql = format!(
-        "DELETE FROM {table} WHERE id > 900",
-        table = table
-    );
+    let delete_sql = format!("DELETE FROM {table} WHERE id > 900", table = table);
 
     let delete_result = executor.execute(&delete_sql);
     if let Err(SqlExecutionError::Unsupported(_)) = delete_result {
@@ -153,10 +153,7 @@ fn delete_with_simple_where() {
     assert!(delete_result.is_ok(), "DELETE failed: {:?}", delete_result);
 
     // Verify deletion - count should be less
-    let verify_sql = format!(
-        "SELECT COUNT(*) FROM {table} WHERE id > 900",
-        table = table
-    );
+    let verify_sql = format!("SELECT COUNT(*) FROM {table} WHERE id > 900", table = table);
 
     if let Ok(count_result) = executor.query(&verify_sql) {
         // Should be 0 or significantly reduced
@@ -211,7 +208,10 @@ fn delete_with_in_clause() {
 
     // Known bug: DELETE with IN clause may have correctness issues
     if delete_result.is_err() {
-        println!("DELETE with IN clause failed (known limitation): {:?}", delete_result);
+        println!(
+            "DELETE with IN clause failed (known limitation): {:?}",
+            delete_result
+        );
         return;
     }
 
@@ -259,7 +259,10 @@ fn insert_single_row() {
     }
     assert!(insert_result.is_ok(), "INSERT failed: {:?}", insert_result);
 
-    let verify_sql = format!("SELECT id, name, value FROM {table} ORDER BY id", table = test_table);
+    let verify_sql = format!(
+        "SELECT id, name, value FROM {table} ORDER BY id",
+        table = test_table
+    );
     let result = executor.query(&verify_sql);
     assert!(result.is_ok(), "SELECT after INSERT failed");
 
@@ -300,7 +303,11 @@ fn insert_multiple_rows() {
         println!("INSERT with multiple values not yet supported, skipping test");
         return;
     }
-    assert!(insert_result.is_ok(), "Multi-row INSERT failed: {:?}", insert_result);
+    assert!(
+        insert_result.is_ok(),
+        "Multi-row INSERT failed: {:?}",
+        insert_result
+    );
 
     let verify_sql = format!("SELECT COUNT(*) FROM {table}", table = test_table);
     let result = executor.query(&verify_sql);
@@ -343,7 +350,11 @@ fn insert_with_nulls() {
         println!("INSERT with NULLs not yet supported, skipping test");
         return;
     }
-    assert!(insert_result.is_ok(), "INSERT with NULLs failed: {:?}", insert_result);
+    assert!(
+        insert_result.is_ok(),
+        "INSERT with NULLs failed: {:?}",
+        insert_result
+    );
 
     let verify_sql = format!(
         "SELECT id, optional_text, optional_number FROM {table} ORDER BY id",

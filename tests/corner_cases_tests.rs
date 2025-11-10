@@ -120,10 +120,7 @@ fn compress_single_entry_page() {
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
     assert_eq!(decompressed.len(), 1);
-    assert_eq!(
-        decompressed.entry_at(0).unwrap().get_data(),
-        "test"
-    );
+    assert_eq!(decompressed.entry_at(0).unwrap().get_data(), "test");
 }
 
 #[test]
@@ -294,7 +291,10 @@ fn cache_has_after_eviction() {
     }
 
     // First pages should be evicted
-    assert!(!cache.has("page0"), "oldest entry should be evicted once capacity is exceeded");
+    assert!(
+        !cache.has("page0"),
+        "oldest entry should be evicted once capacity is exceeded"
+    );
     assert!(
         !cache.has("page1"),
         "second-oldest entry should also be evicted once capacity is exceeded"

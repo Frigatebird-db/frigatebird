@@ -1,10 +1,10 @@
 use super::SqlExecutionError;
 use super::aggregates::{AggregateDataset, MaterializedColumns};
-use super::batch::{ColumnarBatch, ColumnarPage, ColumnData};
+use super::batch::{ColumnData, ColumnarBatch, ColumnarPage};
 use super::expressions::{
     evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
 };
-use super::values::{compare_scalar_values, compare_strs, format_float, ScalarValue};
+use super::values::{ScalarValue, compare_scalar_values, compare_strs, format_float};
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::Expr;
 use std::cmp::Ordering;
@@ -270,22 +270,12 @@ impl MergeOperator {
             if batch.num_rows == 0 {
                 continue;
             }
-            let keys =
-                build_order_keys_on_batch(clauses_arc.as_slice(), &batch, catalog)?;
+            let keys = build_order_keys_on_batch(clauses_arc.as_slice(), &batch, catalog)?;
             let run_idx = merge_runs.len();
-            merge_runs.push(MergeRun {
-                batch,
-                keys,
-            });
-            let key = merge_runs[run_idx]
-                .keys
-                .get(0)
-                .cloned()
-                .ok_or_else(|| {
-                    SqlExecutionError::OperationFailed(
-                        "missing order key for merge run".into(),
-                    )
-                })?;
+            merge_runs.push(MergeRun { batch, keys });
+            let key = merge_runs[run_idx].keys.get(0).cloned().ok_or_else(|| {
+                SqlExecutionError::OperationFailed("missing order key for merge run".into())
+            })?;
             heap.push(HeapItem::new(run_idx, 0, key, Arc::clone(&clauses_arc)));
         }
 
@@ -322,9 +312,7 @@ impl MergeOperator {
             }
 
             let next_row = item.row_idx + 1;
-            if let Some(next_key) =
-                self.runs[item.run_idx].keys.get(next_row).cloned()
-            {
+            if let Some(next_key) = self.runs[item.run_idx].keys.get(next_row).cloned() {
                 self.heap.push(HeapItem::new(
                     item.run_idx,
                     next_row,
@@ -340,8 +328,9 @@ impl MergeOperator {
 
         let mut output = ColumnarBatch::new();
         for chunk in chunks {
-            let slice =
-                self.runs[chunk.run_idx].batch.slice(chunk.start_row, chunk.end_row);
+            let slice = self.runs[chunk.run_idx]
+                .batch
+                .slice(chunk.start_row, chunk.end_row);
             output.append(&slice);
         }
         Ok(Some(output))
@@ -362,12 +351,7 @@ struct HeapItem {
 }
 
 impl HeapItem {
-    fn new(
-        run_idx: usize,
-        row_idx: usize,
-        key: OrderKey,
-        clauses: Arc<Vec<OrderClause>>,
-    ) -> Self {
+    fn new(run_idx: usize, row_idx: usize, key: OrderKey, clauses: Arc<Vec<OrderClause>>) -> Self {
         Self {
             run_idx,
             row_idx,
@@ -393,11 +377,7 @@ impl PartialOrd for HeapItem {
 
 impl Ord for HeapItem {
     fn cmp(&self, other: &Self) -> Ordering {
-        match compare_order_keys(
-            &self.key,
-            &other.key,
-            self.clauses.as_slice(),
-        ) {
+        match compare_order_keys(&self.key, &other.key, self.clauses.as_slice()) {
             Ordering::Equal => other
                 .run_idx
                 .cmp(&self.run_idx)
