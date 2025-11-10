@@ -1,11 +1,12 @@
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{
-    CatalogError, ColumnCatalog, ColumnDefinition, PageDescriptor, PageDirectory, PendingPage,
-    ROWS_PER_PAGE_GROUP, TableDefinition,
+    CatalogError, ColumnCatalog, ColumnDefinition, ColumnStats, ColumnStatsKind, PageDescriptor,
+    PageDirectory, PendingPage, ROWS_PER_PAGE_GROUP, TableDefinition,
 };
 use crate::page::Page;
 use crate::page_handler::{PageHandler, page_io::PageIO};
+use crate::sql::executor::batch::{ColumnData, ColumnarPage};
 use crate::writer::allocator::PageAllocator;
 use crate::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
 use bincode;
@@ -36,6 +37,7 @@ pub struct MetadataUpdate {
     pub actual_len: u64,
     pub entry_count: u64,
     pub replace_last: bool,
+    pub stats: Option<ColumnStats>,
 }
 
 /// Placeholder metadata client used until the real store integration lands.
@@ -58,6 +60,7 @@ impl MetadataClient for NoopMetadataClient {
                 alloc_len: update.alloc_len,
                 actual_len: update.actual_len,
                 entry_count: update.entry_count,
+                stats: update.stats,
             })
             .collect()
     }
@@ -138,6 +141,7 @@ impl MetadataClient for DirectoryMetadataClient {
                 actual_len: update.actual_len,
                 entry_count: update.entry_count,
                 replace_last: update.replace_last,
+                stats: update.stats,
             })
             .collect();
         self.directory.register_batch(&pending)
@@ -208,6 +212,7 @@ impl WorkerContext {
             Ok(a) => a,
             Err(_) => return None,
         };
+        let stats = derive_column_stats_from_page(&prepared.page);
 
         Some(StagedColumn {
             column: update.column,
@@ -219,6 +224,7 @@ impl WorkerContext {
             alloc_len: allocation.alloc_len,
             serialized,
             replace_last: latest.is_some(),
+            stats,
         })
     }
 
@@ -238,6 +244,7 @@ impl WorkerContext {
                 actual_len: prepared.actual_len,
                 entry_count: prepared.entry_count,
                 replace_last: prepared.replace_last,
+                stats: prepared.stats.clone(),
             })
             .collect();
 
@@ -421,6 +428,7 @@ impl WorkerContext {
                 }
             };
 
+            let stats = derive_column_stats_from_page(&updated.page);
             staged.push(StagedColumn {
                 column: column.name.clone(),
                 page: updated,
@@ -431,6 +439,7 @@ impl WorkerContext {
                 alloc_len: allocation.alloc_len,
                 serialized,
                 replace_last: true,
+                stats,
             });
         }
 
@@ -504,6 +513,7 @@ impl WorkerContext {
                 }
             };
 
+            let stats = derive_column_stats_from_page(&page_entry.page);
             staged.push(StagedColumn {
                 column: columns[idx].name.clone(),
                 page: page_entry,
@@ -514,6 +524,7 @@ impl WorkerContext {
                 alloc_len: allocation.alloc_len,
                 serialized,
                 replace_last: false,
+                stats,
             });
         }
 
@@ -534,6 +545,7 @@ struct StagedColumn {
     alloc_len: u64,
     serialized: Vec<u8>,
     replace_last: bool,
+    stats: Option<ColumnStats>,
 }
 
 /// Serial writer that executes update jobs in order.
@@ -612,6 +624,142 @@ impl Writer {
 impl Drop for Writer {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
+    if page.num_rows == 0 {
+        return None;
+    }
+
+    let null_count = page.null_bitmap.count_ones() as u64;
+    let mut stats = ColumnStats {
+        min_value: None,
+        max_value: None,
+        null_count,
+        kind: ColumnStatsKind::Text,
+    };
+
+    match &page.data {
+        ColumnData::Int64(values) => {
+            stats.kind = ColumnStatsKind::Int64;
+            let mut min_val: Option<i64> = None;
+            let mut max_val: Option<i64> = None;
+            for (idx, value) in values.iter().enumerate().take(page.num_rows) {
+                if page.null_bitmap.is_set(idx) {
+                    continue;
+                }
+                min_val = Some(min_val.map(|current| current.min(*value)).unwrap_or(*value));
+                max_val = Some(max_val.map(|current| current.max(*value)).unwrap_or(*value));
+            }
+            stats.min_value = min_val.map(|v| v.to_string());
+            stats.max_value = max_val.map(|v| v.to_string());
+        }
+        ColumnData::Float64(values) => {
+            stats.kind = ColumnStatsKind::Float64;
+            let mut min_val: Option<f64> = None;
+            let mut max_val: Option<f64> = None;
+            for (idx, value) in values.iter().enumerate().take(page.num_rows) {
+                if page.null_bitmap.is_set(idx) {
+                    continue;
+                }
+                min_val = Some(min_val.map(|current| current.min(*value)).unwrap_or(*value));
+                max_val = Some(max_val.map(|current| current.max(*value)).unwrap_or(*value));
+            }
+            stats.min_value = min_val.map(|v| v.to_string());
+            stats.max_value = max_val.map(|v| v.to_string());
+        }
+        ColumnData::Text(values) => {
+            stats.kind = ColumnStatsKind::Text;
+            let mut min_val: Option<String> = None;
+            let mut max_val: Option<String> = None;
+            for (idx, value) in values.iter().enumerate().take(page.num_rows) {
+                if page.null_bitmap.is_set(idx) {
+                    continue;
+                }
+                if min_val
+                    .as_ref()
+                    .map(|current| value < current)
+                    .unwrap_or(true)
+                {
+                    min_val = Some(value.clone());
+                }
+                if max_val
+                    .as_ref()
+                    .map(|current| value > current)
+                    .unwrap_or(true)
+                {
+                    max_val = Some(value.clone());
+                }
+            }
+            stats.min_value = min_val;
+            stats.max_value = max_val;
+        }
+    }
+
+    if stats.min_value.is_none() && stats.max_value.is_none() && stats.null_count == 0 {
+        return None;
+    }
+
+    Some(stats)
+}
+
+#[cfg(test)]
+mod writer_stats_tests {
+    use super::*;
+    use crate::sql::executor::batch::Bitmap;
+
+    fn make_bitmap(len: usize, null_indices: &[usize]) -> Bitmap {
+        let mut bitmap = Bitmap::new(len);
+        for &idx in null_indices {
+            bitmap.set(idx);
+        }
+        bitmap
+    }
+
+    #[test]
+    fn derive_stats_from_int_page() {
+        let page = ColumnarPage {
+            page_metadata: String::new(),
+            data: ColumnData::Int64(vec![1, 2, 7, -3]),
+            null_bitmap: make_bitmap(4, &[]),
+            num_rows: 4,
+        };
+        let stats = derive_column_stats_from_page(&page).expect("stats");
+        assert_eq!(stats.min_value.as_deref(), Some("-3"));
+        assert_eq!(stats.max_value.as_deref(), Some("7"));
+        assert_eq!(stats.null_count, 0);
+        assert!(matches!(stats.kind, ColumnStatsKind::Int64));
+    }
+
+    #[test]
+    fn derive_stats_respects_null_entries() {
+        let page = ColumnarPage {
+            page_metadata: String::new(),
+            data: ColumnData::Float64(vec![10.0, 20.0, 30.0]),
+            null_bitmap: make_bitmap(3, &[1]),
+            num_rows: 3,
+        };
+        let stats = derive_column_stats_from_page(&page).expect("stats");
+        assert_eq!(stats.min_value.as_deref(), Some("10"));
+        assert_eq!(stats.max_value.as_deref(), Some("30"));
+        assert_eq!(stats.null_count, 1);
+        assert!(matches!(stats.kind, ColumnStatsKind::Float64));
+    }
+
+    #[test]
+    fn derive_stats_tracks_all_null_pages() {
+        let page = ColumnarPage {
+            page_metadata: String::new(),
+            data: ColumnData::Text(vec!["a".into(), "b".into()]),
+            null_bitmap: make_bitmap(2, &[0, 1]),
+            num_rows: 2,
+        };
+        let stats = derive_column_stats_from_page(&page).expect("stats");
+        assert_eq!(stats.null_count, 2);
+        assert!(stats.min_value.is_none());
+        assert!(stats.max_value.is_none());
+        assert!(matches!(stats.kind, ColumnStatsKind::Text));
     }
 }
 

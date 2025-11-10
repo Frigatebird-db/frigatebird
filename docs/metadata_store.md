@@ -50,6 +50,7 @@ ColumnChain {
 | `alloc_len` | Bytes reserved on disk (multiple of 4 KiB) |
 | `actual_len` | Bytes of real payload stored in that allocation |
 | `entry_count` | Logical row count contained in the page |
+| `stats` | Optional per-column min/max/null-count metadata used by the executor to skip pages |
 
 Both lengths are stored so reads can issue a single direct I/O request for the
 aligned region (`alloc_len`) and then trim the tail back to `actual_len`.
@@ -115,6 +116,7 @@ PendingPage {
     actual_len: u64,
     entry_count: u64,
     replace_last: bool,
+    stats: Option<ColumnStats>,
 }
 ```
 
