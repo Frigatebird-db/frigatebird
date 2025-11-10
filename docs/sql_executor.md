@@ -6,46 +6,68 @@ nav_order: 14
 
 # SQL Executor
 
-`SqlExecutor` is the thinnest bridge between SQL text and the existing
-page/metadata primitives. It currently supports:
+The SQL executor is a **full-featured query engine** supporting SELECT, INSERT, UPDATE, DELETE, and CREATE TABLE operations. It implements ~10,000 lines of columnar batch processing with advanced features including:
 
-- `CREATE TABLE ... ORDER BY ...`
-- `INSERT INTO ... VALUES ...` for tables that declare an `ORDER BY`
-- `UPDATE ... SET ... WHERE ...` (equality predicates on all ORDER BY columns)
-- `DELETE FROM ... WHERE ...` (equality predicates on all ORDER BY columns)
+- Full SELECT with WHERE, GROUP BY, HAVING, ORDER BY, LIMIT/OFFSET
+- Aggregate functions: COUNT, SUM, AVG, MIN, MAX, VARIANCE, STDDEV, PERCENTILE_CONT
+- Window functions: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, SUM OVER, etc.
+- Expression evaluation: arithmetic, comparisons, pattern matching (LIKE/RLIKE)
+- Scalar functions: ABS, ROUND, CEIL, FLOOR, EXP, LN, LOG, POWER
+- Columnar batch processing for performance
+- Type-specific storage (Int64, Float64, Text)
+- Bitmap-based filtering
 
-It intentionally avoids building a full planner/executor stack. Instead it
-parses the statement once, then delegates to the `ops_handler` helpers that
-already know how to rewrite column pages.
+## Architecture
 
-## Components
+### High-Level Flow
 
 ```
-┌────────────────────┐
-│  SqlExecutor       │
-│  (this module)     │
-└─────────┬──────────┘
-          │ parse SQL (sqlparser)
-          ▼
-┌───────────────────────┐
-│ schema helpers        │◄── plan_create_table_statement
-└─────────┬─────────────┘
-          │                    ┌─────────────────────┐
-          ├─ CREATE TABLE ───► │ metadata::PageDirectory
-          │                    └─────────────────────┘
-          │
-          ▼
-┌───────────────────────┐
-│ mutating helpers      │◄── insert_sorted_row / overwrite_row / delete_row
-└─────────┬─────────────┘
-          │
-          ▼
-┌──────────────────────────────┐
-│ page_handler (locator+caches)│
-└──────────────────────────────┘
+SQL Text
+    │
+    ├─▶ Parse (sqlparser crate)
+    │      └─▶ AST (Statement)
+    │
+    ├─▶ Plan (identify columns, aggregates, windows)
+    │      └─▶ Execution Plan
+    │
+    ├─▶ Load Data
+    │      ├─▶ PageDirectory::locate_range()
+    │      ├─▶ PageHandler::get_pages()
+    │      └─▶ Convert to ColumnarBatch
+    │
+    ├─▶ Execute Query
+    │      ├─▶ Apply WHERE → selection bitmap
+    │      ├─▶ Apply GROUP BY → hash aggregation
+    │      ├─▶ Apply window functions → partitioned computation
+    │      ├─▶ Apply ORDER BY → multi-column sort
+    │      └─▶ Apply LIMIT/OFFSET → slice results
+    │
+    └─▶ Return Results (Vec<Vec<String>>)
 ```
 
-## Execution Flow
+### Components
+
+```
+┌──────────────────────────────────────────────┐
+│           SQL Executor Modules               │
+├──────────────────────────────────────────────┤
+│ mod.rs              - Main execution loop    │
+│ batch.rs            - Columnar processing    │
+│ expressions.rs      - WHERE/projection eval  │
+│ aggregates.rs       - GROUP BY/aggregates    │
+│ window_helpers.rs   - Window functions       │
+│ ordering.rs         - ORDER BY sorting       │
+│ grouping_helpers.rs - Multi-column grouping  │
+│ values.rs           - Type system            │
+│ row_functions.rs    - Scalar functions       │
+└──────────────────────────────────────────────┘
+           │
+           ├─▶ PageDirectory (metadata lookup)
+           ├─▶ PageHandler (data retrieval)
+           └─▶ Writer (DML operations)
+```
+
+## DML Execution (INSERT/UPDATE/DELETE)
 
 ### CREATE TABLE
 1. Parse statement and validate using `plan_create_table_statement`
@@ -56,32 +78,26 @@ already know how to rewrite column pages.
 1. Parse the `INSERT` AST, ensuring the source is a `VALUES` clause
 2. Resolve table metadata to get canonical column order and the sort key ordinals
 3. For each VALUES row:
-   - Materialise a `Vec<String>` sized to the full column count
+   - Materialize a `Vec<String>` sized to the full column count
    - Populate the specified columns, leaving the rest as empty strings
-   - If the table has no pages yet, write the row into freshly allocated pages
-   - Otherwise call `insert_sorted_row`, which finds the sorted position and
-     splices the entry into every column while keeping metadata entry counts in
-     sync
+   - Submit to Writer as BufferRow operations
+   - Writer batches rows until ROWS_PER_PAGE_GROUP threshold
+   - Flush writes complete page group atomically across all columns
 
 ### UPDATE
 1. Require a `WHERE` clause composed of `column = literal` predicates
 2. Validate that every ORDER BY column has an equality predicate
-3. Binary-search the leading ORDER BY column to locate candidate rows, then
-   confirm the full tuple with `read_row`
+3. Binary-search the leading ORDER BY column to locate candidate rows
 4. Apply assignments:
    - If ORDER BY columns remain unchanged, call `overwrite_row`
-   - If an ORDER BY column changes, `delete_row` the old tuple and reinsert via
-     `insert_sorted_row` so the row lands in the correct position
+   - If an ORDER BY column changes, `delete_row` + `insert_sorted_row`
+5. Submit UpdateJob to Writer for atomic persistence
 
 ### DELETE
 1. Same predicate restrictions as UPDATE (equality on ORDER BY columns)
 2. Locate the target row(s) via the ORDER BY tuple search
-3. Remove rows from all columns using `delete_row`, which also updates
-   metadata prefix counts
-
-Unsupported constructs (subqueries, RETURNING, INSERT ... SELECT, tables without
-an `ORDER BY` clause) immediately return `SqlExecutionError::Unsupported`
-so the caller knows the mutation was not applied.
+3. Remove rows from all columns using `delete_row`, which updates metadata
+4. Submit UpdateJob to Writer
 
 ## SELECT Execution (`src/sql/executor/mod.rs`)
 
@@ -379,15 +395,198 @@ existing caches, so the hot path remains the `InsertAt` splice in
 
 ---
 
+---
+
+## Window Functions (`src/sql/executor/window_helpers.rs`)
+
+Window functions perform calculations across sets of rows related to the current row, without collapsing results like GROUP BY.
+
+### Supported Window Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `ROW_NUMBER()` | Sequential number within partition | `ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC)` |
+| `RANK()` | Rank with gaps for ties | `RANK() OVER (ORDER BY score DESC)` |
+| `DENSE_RANK()` | Rank without gaps | `DENSE_RANK() OVER (ORDER BY score DESC)` |
+| `LAG(expr, offset)` | Access previous row | `LAG(price, 1) OVER (ORDER BY date)` |
+| `LEAD(expr, offset)` | Access next row | `LEAD(price, 1) OVER (ORDER BY date)` |
+| `FIRST_VALUE(expr)` | First value in window | `FIRST_VALUE(name) OVER (PARTITION BY dept ORDER BY salary DESC)` |
+| `LAST_VALUE(expr)` | Last value in window | `LAST_VALUE(name) OVER (...)` |
+| `NTH_VALUE(expr, n)` | Nth value in window | `NTH_VALUE(price, 3) OVER (...)` |
+| `SUM(expr) OVER` | Running sum | `SUM(amount) OVER (ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` |
+| `AVG(expr) OVER` | Moving average | `AVG(price) OVER (ORDER BY date ROWS BETWEEN 7 PRECEDING AND CURRENT ROW)` |
+| `COUNT(expr) OVER` | Running count | `COUNT(*) OVER (PARTITION BY category)` |
+| `MIN(expr) OVER` | Minimum in window | `MIN(price) OVER (...)` |
+| `MAX(expr) OVER` | Maximum in window | `MAX(price) OVER (...)` |
+
+### Window Frames
+
+Supported frame specifications:
+- `ROWS BETWEEN <start> AND <end>`
+- `RANGE BETWEEN <start> AND <end>`
+
+**Frame bounds:**
+- `UNBOUNDED PRECEDING` - Start of partition
+- `n PRECEDING` - n rows/range units before current row
+- `CURRENT ROW` - Current row
+- `n FOLLOWING` - n rows/range units after current row
+- `UNBOUNDED FOLLOWING` - End of partition
+
+**Example:**
+```sql
+SELECT
+  date,
+  price,
+  AVG(price) OVER (
+    ORDER BY date
+    ROWS BETWEEN 7 PRECEDING AND CURRENT ROW
+  ) AS moving_avg_7day
+FROM stock_prices
+```
+
+### Execution Model
+
+**Window Function Processing Pipeline:**
+
+```
+ColumnarBatch (input rows)
+    │
+    ├─▶ Step 1: Identify window function expressions
+    │     └─▶ Extract PARTITION BY, ORDER BY, frame specs
+    │
+    ├─▶ Step 2: Partition rows
+    │     ├─▶ Evaluate partition keys on batch
+    │     ├─▶ Group rows by partition key: HashMap<PartitionKey, Vec<row_idx>>
+    │     └─▶ For queries with no PARTITION BY, all rows in one partition
+    │
+    ├─▶ Step 3: Sort within partitions
+    │     └─▶ For each partition, sort by ORDER BY clauses
+    │
+    ├─▶ Step 4: Compute window function
+    │     ├─▶ For ROW_NUMBER/RANK/DENSE_RANK: assign ranks
+    │     ├─▶ For LAG/LEAD: access offset rows
+    │     ├─▶ For aggregates: accumulate over frame
+    │     └─▶ Store result for each row
+    │
+    ├─▶ Step 5: Materialize output column
+    │     └─▶ Create ColumnarPage with window function results
+    │
+    └─▶ Add column to batch with generated alias
+```
+
+**Example: ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC)**
+
+```
+Input batch (4 rows):
+  dept    salary
+  ----    ------
+  eng     100000
+  sales   80000
+  eng     95000
+  sales   85000
+
+Step 1: Partition by dept
+  Partition "eng": [0, 2]    (rows 0 and 2)
+  Partition "sales": [1, 3]  (rows 1 and 3)
+
+Step 2: Sort within partitions by salary DESC
+  Partition "eng": [0, 2]  (already sorted: 100000 > 95000)
+  Partition "sales": [3, 1] (reorder: 85000 > 80000)
+
+Step 3: Assign ROW_NUMBER
+  Row 0 (eng, 100000): 1
+  Row 2 (eng, 95000): 2
+  Row 3 (sales, 85000): 1
+  Row 1 (sales, 80000): 2
+
+Output column: [1, 2, 1, 2]  (indexed by original row position)
+```
+
+### Window Frame Evaluation
+
+**Sliding Window for Aggregates:**
+
+```sql
+SUM(amount) OVER (ORDER BY date ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)
+```
+
+**Execution:**
+```
+Sorted rows (by date):
+  date       amount
+  2024-01-01   10
+  2024-01-02   20
+  2024-01-03   30
+  2024-01-04   40
+
+Window computation:
+  Row 0: SUM([10])           = 10   (only current row, no preceding)
+  Row 1: SUM([10, 20])       = 30   (1 preceding + current)
+  Row 2: SUM([10, 20, 30])   = 60   (2 preceding + current)
+  Row 3: SUM([20, 30, 40])   = 90   (2 preceding + current, window slides)
+```
+
+**Implementation** (`WindowOperator::evaluate_frame`):
+```rust
+for current_row_idx in partition_rows {
+    let frame_start = max(0, current_row_idx - preceding_offset);
+    let frame_end = min(partition_rows.len(), current_row_idx + following_offset + 1);
+
+    let frame_rows = &partition_rows[frame_start..frame_end];
+
+    // Accumulate aggregate over frame
+    let result = match window_fn {
+        Sum => frame_rows.iter().map(|&i| values[i]).sum(),
+        Avg => frame_rows.iter().map(|&i| values[i]).sum() / frame_rows.len(),
+        Count => frame_rows.len(),
+        Min => frame_rows.iter().map(|&i| values[i]).min(),
+        Max => frame_rows.iter().map(|&i| values[i]).max(),
+    };
+
+    output[current_row_idx] = result;
+}
+```
+
+### Multiple Window Functions
+
+When a query contains multiple window functions, they are evaluated sequentially:
+
+```sql
+SELECT
+  name,
+  salary,
+  ROW_NUMBER() OVER (ORDER BY salary DESC) AS rank,
+  LAG(salary, 1) OVER (ORDER BY salary DESC) AS prev_salary,
+  AVG(salary) OVER () AS company_avg
+FROM employees
+```
+
+**Execution:**
+1. Evaluate `ROW_NUMBER() OVER (ORDER BY salary DESC)` → add column 'rank'
+2. Evaluate `LAG(salary, 1) OVER (ORDER BY salary DESC)` → add column 'prev_salary'
+3. Evaluate `AVG(salary) OVER ()` → add column 'company_avg'
+4. Project final columns: name, salary, rank, prev_salary, company_avg
+
+---
+
 ## Module Structure
 
 ```
 src/sql/executor/
-├── mod.rs                 - Main SELECT execution logic
-├── aggregates.rs          - Aggregate function evaluation
-├── expressions.rs         - Expression evaluation (WHERE, projections)
-├── helpers.rs             - Utility functions (name extraction, LIKE/RLIKE)
-├── row_functions.rs       - Per-row scalar functions
-├── scalar_functions.rs    - Scalar function implementations
-└── values.rs              - Value types and null encoding
+├── mod.rs                 - Main SELECT execution (3,445 lines)
+├── batch.rs               - Columnar batch processing (655 lines)
+├── expressions.rs         - Expression evaluation (1,631 lines)
+├── aggregates.rs          - Aggregate functions (1,089 lines)
+├── window_helpers.rs      - Window functions (1,375 lines)
+├── ordering.rs            - Sorting with NULLS (424 lines)
+├── grouping_helpers.rs    - GROUP BY/HAVING (170 lines)
+├── helpers.rs             - Utilities (460 lines)
+├── row_functions.rs       - Scalar functions (408 lines)
+├── scalar_functions.rs    - Additional scalars (167 lines)
+├── projection_helpers.rs  - Result materialization (223 lines)
+├── scan_helpers.rs        - Scan optimization (110 lines)
+├── values.rs              - Type system (174 lines)
+└── spill.rs               - Spill-to-disk (24 lines)
+
+Total: ~10,355 lines
 ```
