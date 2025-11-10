@@ -274,6 +274,7 @@ fn ensure_capacity(page: &mut Page, row_idx: usize) {
 **MetadataUpdate Structure** (`src/writer/executor.rs:29-38`):
 ```rust
 pub struct MetadataUpdate {
+    pub table: String,
     pub column: String,
     pub disk_path: String,
     pub offset: u64,
@@ -281,6 +282,7 @@ pub struct MetadataUpdate {
     pub actual_len: u64,
     pub entry_count: u64,
     pub replace_last: bool,  // Replace last in chain vs append new version
+    pub stats: Option<ColumnStats>,
 }
 ```
 
@@ -297,6 +299,7 @@ impl MetadataClient for DirectoryMetadataClient {
                 actual_len: update.actual_len,
                 entry_count: update.entry_count,
                 replace_last: update.replace_last,
+                stats: update.stats,
             })
             .collect();
 
@@ -304,6 +307,11 @@ impl MetadataClient for DirectoryMetadataClient {
         self.directory.register_batch(&pending)
     }
 }
+
+Each `StagedColumn` now carries lightweight min/max/null-count statistics that are derived while
+the columnar page is still in memory. These stats are embedded into every `MetadataUpdate`/`PendingPage`
+and are persisted alongside the page descriptors so the executor can eliminate cold page groups
+without issuing I/O.
 ```
 
 **Atomicity Guarantee**:

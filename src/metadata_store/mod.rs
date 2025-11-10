@@ -81,6 +81,40 @@ pub struct ColumnCatalog {
     pub ordinal: usize,
 }
 
+/// Supported statistic kinds emitted by the writer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ColumnStatsKind {
+    Int64,
+    Float64,
+    Text,
+}
+
+impl Default for ColumnStatsKind {
+    fn default() -> Self {
+        ColumnStatsKind::Text
+    }
+}
+
+/// Lightweight per-column statistics tracked for each physical page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnStats {
+    pub min_value: Option<String>,
+    pub max_value: Option<String>,
+    pub null_count: u64,
+    pub kind: ColumnStatsKind,
+}
+
+impl Default for ColumnStats {
+    fn default() -> Self {
+        ColumnStats {
+            min_value: None,
+            max_value: None,
+            null_count: 0,
+            kind: ColumnStatsKind::default(),
+        }
+    }
+}
+
 /// Catalog entry describing a table schema.
 #[derive(Clone, Debug)]
 pub struct TableCatalog {
@@ -182,6 +216,7 @@ pub struct PageDescriptor {
     pub alloc_len: u64,
     pub actual_len: u64,
     pub entry_count: u64,
+    pub stats: Option<ColumnStats>,
 }
 
 impl PageDescriptor {
@@ -200,6 +235,7 @@ impl PageDescriptor {
             alloc_len,
             actual_len,
             entry_count,
+            stats: None,
         }
     }
 }
@@ -285,6 +321,7 @@ pub struct PendingPage {
     pub actual_len: u64,
     pub entry_count: u64,
     pub replace_last: bool,
+    pub stats: Option<ColumnStats>,
 }
 
 /// In-memory catalog mapping columns to their latest page chain.
@@ -453,10 +490,14 @@ impl TableMetaStore {
         alloc_len: u64,
         actual_len: u64,
         entry_count: u64,
+        stats: Option<ColumnStats>,
     ) -> PageDescriptor {
         let id = format!("{:016x}", self.next_page_id);
         self.next_page_id = self.next_page_id.wrapping_add(1);
-        PageDescriptor::new(id, disk_path, offset, alloc_len, actual_len, entry_count)
+        let mut descriptor =
+            PageDescriptor::new(id, disk_path, offset, alloc_len, actual_len, entry_count);
+        descriptor.stats = stats;
+        descriptor
     }
 
     pub fn latest(&self, table: &str, column: &str) -> Option<PageDescriptor> {
@@ -579,7 +620,7 @@ impl TableMetaStore {
             return None;
         }
         let descriptor =
-            self.allocate_descriptor(disk_path, offset, alloc_len, actual_len, entry_count);
+            self.allocate_descriptor(disk_path, offset, alloc_len, actual_len, entry_count, None);
         {
             let chain = self
                 .column_chains
@@ -610,6 +651,7 @@ impl TableMetaStore {
                 page.alloc_len,
                 page.actual_len,
                 page.entry_count,
+                page.stats.clone(),
             );
             let mut old_id: Option<String> = None;
 
