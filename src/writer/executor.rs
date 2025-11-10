@@ -9,6 +9,7 @@ use crate::page_handler::{PageHandler, page_io::PageIO};
 use crate::sql::executor::batch::{ColumnData, ColumnarPage};
 use crate::writer::allocator::PageAllocator;
 use crate::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
+use crate::writer::GLOBAL_WRITER_SHARD_COUNT;
 use bincode;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::cmp::Ordering as CmpOrdering;
@@ -548,11 +549,16 @@ struct StagedColumn {
     stats: Option<ColumnStats>,
 }
 
-/// Serial writer that executes update jobs in order.
-pub struct Writer {
+struct WriterShard {
     tx: Sender<WriterMessage>,
     handle: Option<JoinHandle<()>>,
     is_shutdown: Arc<AtomicBool>,
+}
+
+/// Sharded writer that serializes updates per table while allowing parallel tables.
+pub struct Writer {
+    shards: Vec<WriterShard>,
+    is_shutdown: AtomicBool,
 }
 
 impl Writer {
@@ -561,23 +567,42 @@ impl Writer {
         allocator: Arc<dyn PageAllocator>,
         metadata: Arc<dyn MetadataClient>,
     ) -> Self {
-        let (tx, rx) = channel::unbounded::<WriterMessage>();
-        let is_shutdown = Arc::new(AtomicBool::new(false));
-        let ctx = WorkerContext {
-            page_handler,
-            allocator,
-            metadata,
-            rx,
-            buffered_rows: HashMap::new(),
-        };
-        let shutdown_flag = Arc::clone(&is_shutdown);
+        let shard_count = GLOBAL_WRITER_SHARD_COUNT
+            .load(Ordering::Acquire)
+            .max(1);
+        Writer::with_shard_count(page_handler, allocator, metadata, shard_count)
+    }
 
-        let handle = thread::spawn(move || run_worker(ctx, shutdown_flag));
+    pub fn with_shard_count(
+        page_handler: Arc<PageHandler>,
+        allocator: Arc<dyn PageAllocator>,
+        metadata: Arc<dyn MetadataClient>,
+        shard_count: usize,
+    ) -> Self {
+        let shard_total = shard_count.max(1);
+        let mut shards = Vec::with_capacity(shard_total);
+        for _ in 0..shard_total {
+            let (tx, rx) = channel::unbounded::<WriterMessage>();
+            let is_shutdown = Arc::new(AtomicBool::new(false));
+            let ctx = WorkerContext {
+                page_handler: Arc::clone(&page_handler),
+                allocator: Arc::clone(&allocator),
+                metadata: Arc::clone(&metadata),
+                rx,
+                buffered_rows: HashMap::new(),
+            };
+            let shutdown_flag = Arc::clone(&is_shutdown);
+            let handle = thread::spawn(move || run_worker(ctx, shutdown_flag));
+            shards.push(WriterShard {
+                tx,
+                handle: Some(handle),
+                is_shutdown,
+            });
+        }
 
         Writer {
-            tx,
-            handle: Some(handle),
-            is_shutdown,
+            shards,
+            is_shutdown: AtomicBool::new(false),
         }
     }
 
@@ -585,9 +610,8 @@ impl Writer {
         if self.is_shutdown.load(Ordering::Acquire) {
             return Err(WriterError::Shutdown);
         }
-        self.tx
-            .send(WriterMessage::Job(job))
-            .map_err(|_| WriterError::ChannelClosed)
+        let shard_index = self.shard_index_for_table(&job.table);
+        self.send_job_to_shard(shard_index, WriterMessage::Job(job))
     }
 
     pub fn flush_table(&self, table: &str) -> Result<(), WriterError> {
@@ -595,12 +619,14 @@ impl Writer {
             return Err(WriterError::Shutdown);
         }
         let (ack_tx, ack_rx) = channel::bounded::<()>(0);
-        self.tx
-            .send(WriterMessage::Flush {
+        let shard_index = self.shard_index_for_table(table);
+        self.send_job_to_shard(
+            shard_index,
+            WriterMessage::Flush {
                 table: table.to_string(),
                 ack: ack_tx,
-            })
-            .map_err(|_| WriterError::ChannelClosed)?;
+            },
+        )?;
         ack_rx.recv().map_err(|_| WriterError::ChannelClosed)?;
         Ok(())
     }
@@ -614,9 +640,44 @@ impl Writer {
             return;
         }
 
-        let _ = self.tx.send(WriterMessage::Shutdown);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+        for shard in &self.shards {
+            if shard
+                .is_shutdown
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let _ = shard.tx.send(WriterMessage::Shutdown);
+            }
+        }
+        for shard in &mut self.shards {
+            if let Some(handle) = shard.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn shard_index_for_table(&self, table: &str) -> usize {
+        if self.shards.len() == 1 {
+            return 0;
+        }
+        (fast_table_hash(table) as usize) % self.shards.len()
+    }
+
+    fn send_job_to_shard(
+        &self,
+        shard_index: usize,
+        message: WriterMessage,
+    ) -> Result<(), WriterError> {
+        if let Some(shard) = self.shards.get(shard_index) {
+            if shard.is_shutdown.load(Ordering::Acquire) {
+                return Err(WriterError::Shutdown);
+            }
+            shard
+                .tx
+                .send(message)
+                .map_err(|_| WriterError::ChannelClosed)
+        } else {
+            Err(WriterError::Shutdown)
         }
     }
 }
@@ -625,6 +686,18 @@ impl Drop for Writer {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+#[inline]
+fn fast_table_hash(table: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for byte in table.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {

@@ -9,9 +9,28 @@ use idk_uwu_ig::writer::allocator::DirectBlockAllocator;
 use idk_uwu_ig::writer::executor::{DirectoryMetadataClient, Writer};
 use idk_uwu_ig::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
 use idk_uwu_ig::{ops_handler::create_table_from_plan, sql::plan_create_table_sql};
+use idk_uwu_ig::writer::GLOBAL_WRITER_SHARD_COUNT;
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
+
+struct ShardGuard {
+    previous: usize,
+}
+
+impl ShardGuard {
+    fn set(count: usize) -> Self {
+        let previous = GLOBAL_WRITER_SHARD_COUNT.swap(count, Ordering::SeqCst);
+        ShardGuard { previous }
+    }
+}
+
+impl Drop for ShardGuard {
+    fn drop(&mut self) {
+        GLOBAL_WRITER_SHARD_COUNT.store(self.previous, Ordering::SeqCst);
+    }
+}
 
 fn setup_writer() -> (Arc<Writer>, Arc<PageHandler>, Arc<PageDirectory>) {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
@@ -197,6 +216,81 @@ fn writer_submit_overwrite_operation() {
     let values = entry_values(&page);
     assert_eq!(values.len(), 1);
     assert_eq!(values[0], "active");
+}
+
+#[test]
+fn writer_preserves_order_with_multiple_shards() {
+    let _guard = ShardGuard::set(4);
+    let (writer, page_handler, directory) = setup_writer();
+
+    let append_job = UpdateJob::new(
+        "users",
+        vec![ColumnUpdate::new(
+            "status",
+            vec![UpdateOp::Append {
+                entry: Entry::new("pending"),
+            }],
+        )],
+    );
+    writer.submit(append_job).expect("append submit failed");
+
+    let overwrite_job = UpdateJob::new(
+        "users",
+        vec![ColumnUpdate::new(
+            "status",
+            vec![UpdateOp::Overwrite {
+                row: 0,
+                entry: Entry::new("active"),
+            }],
+        )],
+    );
+    writer.submit(overwrite_job).expect("overwrite submit failed");
+
+    thread::sleep(Duration::from_millis(150));
+
+    let descriptor = directory.latest_in_table("users", "status").unwrap();
+    let page = page_handler.get_page(descriptor).unwrap();
+    let values = entry_values(&page);
+    assert_eq!(values, vec!["active".to_string()]);
+}
+
+#[test]
+fn writer_updates_multiple_tables_across_shards() {
+    let _guard = ShardGuard::set(4);
+    let (writer, _, directory) = setup_writer();
+
+    let user_job = UpdateJob::new(
+        "users",
+        vec![ColumnUpdate::new(
+            "email",
+            vec![UpdateOp::Append {
+                entry: Entry::new("carol@example.com"),
+            }],
+        )],
+    );
+
+    let orders_job = UpdateJob::new(
+        "orders",
+        vec![ColumnUpdate::new(
+            "order_id",
+            vec![UpdateOp::Append {
+                entry: Entry::new("order-1"),
+            }],
+        )],
+    );
+
+    writer.submit(user_job).expect("submit users failed");
+    writer.submit(orders_job).expect("submit orders failed");
+    thread::sleep(Duration::from_millis(150));
+
+    assert!(
+        directory.latest_in_table("users", "email").is_some(),
+        "users table should have data"
+    );
+    assert!(
+        directory.latest_in_table("orders", "order_id").is_some(),
+        "orders table should have data"
+    );
 }
 
 #[test]
