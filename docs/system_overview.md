@@ -6,1039 +6,788 @@ nav_order: 4
 
 # System Overview - Visual Guide
 
-Progressive deep-dive from 30,000ft to implementation details.
+Progressive deep-dive from 30,000ft view down to implementation details.
 
 ---
 
-## SQL Processing Pipeline
+## Level 0: Complete System Architecture
 
 ```
-╔═══════════════════════════════════════════════════════════════╗
-║                       SQL Query Text                          ║
-║         "SELECT id FROM users WHERE age > 18"                 ║
-╚═══════════════════════════════╤═══════════════════════════════╝
-                                │
-                                ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                       SQL PARSER                              ║
-║                    (parser.rs)                                ║
-║  • Lexical analysis (tokenization)                            ║
-║  • Syntax analysis                                            ║
-║  • AST construction                                           ║
-╚═══════════════════════════════╤═══════════════════════════════╝
-                                │ Statement (AST)
-                                ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                     QUERY PLANNER                             ║
-║                    (planner.rs)                               ║
-║  • Extract table names                                        ║
-║  • Collect read/write columns                                ║
-║  • Build filter expression trees                             ║
-║  • Validate support                                           ║
-╚═══════════════════════════════╤═══════════════════════════════╝
-                                │ QueryPlan
-                                ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                   PIPELINE BUILDER                            ║
-║                   (builder.rs)                                ║
-║  • Extract leaf filters                                       ║
-║  • Group by column                                            ║
-║  • Create execution steps                                     ║
-╚═══════════════════════════════╤═══════════════════════════════╝
-                                │ Pipeline
-                                ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                  QUERY EXECUTOR                               ║
-║                   (future)                                    ║
-║  • Apply filters step-by-step                                 ║
-║  • Materialize results                                        ║
-╚═══════════════════════════════════════════════════════════════╝
+┌─────────────────────────────────────────────────────────────────┐
+│                        CLIENT APPLICATION                        │
+│              SQL queries, DML operations, scans                  │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        │                    │                    │
+        ▼                    ▼                    ▼
+┌───────────────┐   ┌────────────────┐   ┌─────────────────┐
+│ SQL Executor  │   │ Direct Ops     │   │ Writer          │
+│ (SELECT)      │   │ (legacy scans) │   │ (DML mutations) │
+└───────┬───────┘   └────────┬───────┘   └────────┬────────┘
+        │                    │                     │
+        └────────────────────┼─────────────────────┘
+                             │
+                ┌────────────┼────────────┐
+                │            │            │
+                ▼            ▼            ▼
+        ┌────────────┬────────────┬────────────┐
+        │ PageDir    │ PageHandler│ Allocator  │
+        │ (metadata) │ (caches)   │ (disk)     │
+        └────────────┴────────────┴────────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │ Persistent      │
+                    │ Storage         │
+                    │ (data files)    │
+                    └─────────────────┘
 ```
 
 ---
 
-## Level 1: 30,000ft View
+## Level 1: SQL Query Execution Flow
+
+### SELECT Path (Columnar Batch Processing)
 
 ```
 ╔═══════════════════════════════════════════════════════════════╗
-║                         CLIENT                                ║
-║              (upsert, update, range_scan)                     ║
-╚═══════════════════════════════╤═══════════════════════════════╝
-                                │
-                                ▼
+║ SQL: "SELECT dept, AVG(salary) FROM employees                ║
+║       WHERE age > 25 GROUP BY dept ORDER BY dept"            ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │
+                          ▼
 ╔═══════════════════════════════════════════════════════════════╗
-║                       OPS HANDLER                             ║
-║                   (API boundary)                              ║
-╚═══════════════════════════════╤═══════════════════════════════╝
-                                │
-                                ▼
+║                    SQL PARSER (sqlparser)                     ║
+║  • Tokenize: [SELECT, dept, ',', AVG, '(', salary, ...)      ║
+║  • Parse: Statement::Query(...)                              ║
+║  • Output: AST (Abstract Syntax Tree)                        ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │ AST
+                          ▼
 ╔═══════════════════════════════════════════════════════════════╗
-║                      PAGE HANDLER                             ║
-║              (cache orchestration)                            ║
-╚═══════════════════════════════╤═══════════════════════════════╝
-                                │
-                ┌───────────────┼───────────────┐
-                ▼               ▼               ▼
-         ╔═══════════╗   ╔═══════════╗   ╔═══════════╗
-         ║    UPC    ║   ║    CPC    ║   ║   DISK    ║
-         ║   (hot)   ║──▶║  (cold)   ║──▶║ (persist) ║
-         ╚═══════════╝   ╚═══════════╝   ╚═══════════╝
-```
-
----
-
-## Level 2: Component Architecture
-
-```
-╔════════════════════════════════════════════════════════════════════╗
-║                           METADATA LAYER                           ║
-║  ┌──────────────────────┐         ┌─────────────────────────┐     ║
-║  │  TableMetaStore      │◀────────│   PageDirectory         │     ║
-║  │  - col_data          │         │   (façade)              │     ║
-║  │  - page_data         │         │   - latest()            │     ║
-║  │  - MVCC versions     │         │   - range()             │     ║
-║  └──────────────────────┘         │   - lookup()            │     ║
-║                                   └─────────────────────────┘     ║
-╚════════════════════════════════════════════════════════════════════╝
-                                   │
-                                   ▼
-╔════════════════════════════════════════════════════════════════════╗
-║                         HANDLER LAYER                              ║
-║                                                                    ║
-║  ┌─────────────┐    ┌──────────────┐    ┌────────────────────┐   ║
-║  │PageLocator  │    │ PageFetcher  │    │ PageMaterializer   │   ║
-║  │- metadata   │    │ - CPC        │    │ - UPC              │   ║
-║  │  lookups    │    │ - PageIO     │    │ - Compressor       │   ║
-║  └─────────────┘    └──────────────┘    └────────────────────┘   ║
-║         │                   │                      │              ║
-║         └───────────────────┴──────────────────────┘              ║
-║                             │                                     ║
-║                    ┌────────▼────────┐                            ║
-║                    │  PageHandler    │                            ║
-║                    │  (coordinator)  │                            ║
-║                    └─────────────────┘                            ║
-╚════════════════════════════════════════════════════════════════════╝
-                                   │
-                                   ▼
-╔════════════════════════════════════════════════════════════════════╗
-║                          CACHE LAYER                               ║
-║                                                                    ║
-║  ╔════════════════════════════════════════════════════════════╗   ║
-║  ║  UPC (Uncompressed Page Cache)                             ║   ║
-║  ║  HashMap<PageId, Arc<Page>> + BTreeSet (LRU)               ║   ║
-║  ║  MAX: 10 entries                                           ║   ║
-║  ╚════════════════════╤═══════════════════════════════════════╝   ║
-║                       │ eviction                                  ║
-║                       ▼                                           ║
-║         ╔═══════════════════════════════════════╗                 ║
-║         ║ UncompressedToCompressedLifecycle     ║                 ║
-║         ║ (compress via bincode + lz4)          ║                 ║
-║         ╚═════════════════╤═══════════════════════               ║
-║                           ▼                                       ║
-║  ╔════════════════════════════════════════════════════════════╗   ║
-║  ║  CPC (Compressed Page Cache)                               ║   ║
-║  ║  HashMap<PageId, Arc<Vec<u8>>> + BTreeSet (LRU)            ║   ║
-║  ║  MAX: 10 entries                                           ║   ║
-║  ╚════════════════════╤═══════════════════════════════════════╝   ║
-║                       │ eviction                                  ║
-║                       ▼                                           ║
-║         ╔═══════════════════════════════════════╗                 ║
-║         ║ CompressedToDiskLifecycle             ║                 ║
-║         ║ (flush to disk via PageIO)            ║                 ║
-║         ╚═════════════════╤═══════════════════════               ║
-║                           ▼                                       ║
-╚═══════════════════════════╪═══════════════════════════════════════╝
-                            │
-                            ▼
-╔════════════════════════════════════════════════════════════════════╗
-║                         STORAGE LAYER                              ║
-║                                                                    ║
-║  ┌──────────────────────────────────────────────────────────┐     ║
-║  │  Writer                                                  │     ║
-║  │  ├─ DirectBlockAllocator (256 KiB blocks, 4 KiB tail)    │     ║
-║  │  ├─ rotate files: storage/data.00000, data.00001, …      │     ║
-║  │  └─ persists padded payloads via O_DIRECT writes         │     ║
-║  │                                                          │     ║
-║  │  PageIO                                                  │     ║
-║  │  ├─ reads aligned regions (alloc_len)                    │     ║
-║  │  └─ trims to actual_len before handing to callers        │     ║
-║  └──────────────────────────────────────────────────────────┘     ║
-╚════════════════════════════════════════════════════════════════════╝
-```
-
----
-
-## Level 3: Data Flow - Write Path
-
-```
-Pipeline-driven UPDATE/DELETE write
-      │
-      ▼
-╔═══════════════════════════════════════════════════════════════╗
-║ writer::submit(UpdateJob)                                     ║
-╚═══════════════════════════════════════════════════════════════╝
-      │
-      ├─▶ stage_column                                          
-      │        ├─▶ PageDirectory.latest(+PageHandler::get_page) 
-      │        ├─▶ apply row mutations                          
-      │        └─▶ serialize updated page                       
-      │
-      ├─▶ DirectBlockAllocator.allocate(actual_len)             
-      │        └─▶ returns { path, offset, alloc_len }          
-      │
-      ├─▶ metadata.register_batch(pending_pages)                
-      │        └─▶ replaces/appends column chain tail           
-      │
-      ├─▶ persist_allocation                                    
-      │        └─▶ zero-pad buffer, write alloc_len bytes       
-      │
-      └─▶ PageHandler::write_back_uncompressed (cache refresh)  
-               │
-               ▼
-          ╔═══════════════════════════════╗
-          ║ UPC.add("p42", page)          ║
-          ╚═══════════════════════════════╝
-               │
-               ▼ (if UPC full)
-          ╔═══════════════════════════════╗
-          ║ Evict oldest → Lifecycle      ║
-          ║   └─▶ Compress → CPC          ║
-          ╚═══════════════════════════════╝
-```
-
----
-
-## Level 4: Data Flow - Read Path (Range Scan)
-
-```
-Client range_scan("temperature", 1000, 5000, ts)
-      │
-      ▼
-╔═══════════════════════════════════════════════════════════════╗
-║ ops_handler::range_scan_column_entry                          ║
-╚═══════════════════════════════════════════════════════════════╝
-      │
-      ├─▶ handler.locate_range("temperature", 1000, 5000, ts)
-      │        │
-      │        ▼
-      │   ╔════════════════════════════════════════════════════╗
-      │   ║ PageDirectory::range()                            ║
-      │   ║   └─▶ TableMetaStore.get_ranged_pages_meta()     ║
-      │   ╚════════════════════════════════════════════════════╝
-      │        │
-      │        ├─▶ Binary search col_data[column]
-      │        │     └─▶ Find ranges overlapping [1000, 5000)
-      │        │
-      │        ├─▶ For each range:
-      │        │     └─▶ Binary search MVCC versions
-      │        │          └─▶ Pick newest commit_time ≤ ts
-      │        │
-      │        └─▶ Return [PageDescriptor{p5}, PageDescriptor{p7}, ...]
-      │
-      └─▶ handler.get_pages(descriptors)
-               │
-               ▼
-          ╔═══════════════════════════════════════════════════╗
-          ║ PageHandler::get_pages (batch)                    ║
-          ╚═══════════════════════════════════════════════════╝
-               │
-               ├─▶ STEP 1: UPC sweep
-               │     └─▶ Collect all hits in order
-               │
-               ├─▶ STEP 2: CPC sweep
-               │     └─▶ Collect remaining, decompress
-               │
-               ├─▶ STEP 3: Disk fetch
-               │     └─▶ Read missing pages
-               │
-               └─▶ STEP 4: Final UPC pass
-                     └─▶ Return all pages in original order
-               │
-               ▼
-          [Arc<Page>, Arc<Page>, Arc<Page>, ...]
-               │
-               ▼
-          Concatenate all page.entries
-               │
-               ▼
-          Vec<Entry>
-```
-
----
-
-## Level 5: Cache Eviction Chain
-
-```
-╔═════════════════════════════════════════════════════════════════╗
-║                    UPC (10 entries max)                         ║
-║  ┌────┬────┬────┬────┬────┬────┬────┬────┬────┬────┐           ║
-║  │ p1 │ p2 │ p3 │ p4 │ p5 │ p6 │ p7 │ p8 │ p9 │p10 │           ║
-║  └────┴────┴────┴────┴────┴────┴────┴────┴────┴────┘           ║
-║                                                                 ║
-║  New insert (p11) triggers eviction of p1 (oldest)             ║
-╚═════════════════════════════╤═══════════════════════════════════╝
-                              │
-                              ▼
-                ╔═════════════════════════════════╗
-                ║ UncompressedToCompressedLifecycle║
-                ╚═════════════════════════════════╝
-                              │
-                              ├─▶ Compressor.compress(p1)
-                              │     └─▶ Page → bincode → lz4_flex
-                              │
-                              └─▶ CPC.add("p1", compressed_blob)
-                                    │
-                                    ▼
-╔═════════════════════════════════════════════════════════════════╗
-║                    CPC (10 entries max)                         ║
-║  ┌────┬────┬────┬────┬────┬────┬────┬────┬────┬────┐           ║
-║  │ c1 │ c2 │ c3 │ c4 │ c5 │ c6 │ c7 │ c8 │ c9 │c10 │           ║
-║  └────┴────┴────┴────┴────┴────┴────┴────┴────┴────┘           ║
-║                                                                 ║
-║  New insert (p1 compressed) triggers eviction of c1 (oldest)   ║
-╚═════════════════════════════╤═══════════════════════════════════╝
-                              │
-                              ▼
-                ╔═════════════════════════════════╗
-                ║ CompressedToDiskLifecycle       ║
-                ╚═════════════════════════════════╝
-                              │
-                              ├─▶ PageDirectory.lookup("c1")
-                              │     └─▶ PageDescriptor{path, offset}
-                              │
-                              └─▶ PageIO.write_to_path(path, offset, blob)
-                                    │
-                                    ▼
-╔═════════════════════════════════════════════════════════════════╗
-║                         DISK                                    ║
-║                                                                 ║
-║  page_file_0.bin:                                               ║
-║  ┌───────────────┬─────────────────────────────────────┐        ║
-║  │ 64B Metadata  │  Compressed Page Blob               │        ║
-║  │ {read_size}   │  [lz4 compressed data...]           │        ║
-║  └───────────────┴─────────────────────────────────────┘        ║
-╚═════════════════════════════════════════════════════════════════╝
-```
-
----
-
-## Level 5.5: Batch Operations & Prefetching
-
-```
-╔═══════════════════════════════════════════════════════════════╗
-║               BATCH READ (io_uring on Linux)                  ║
-╚═══════════════════════════════════════════════════════════════╝
-
-Input: [PageDescriptor{p1, file1.db, 0},
-        PageDescriptor{p2, file1.db, 4096},
-        PageDescriptor{p3, file2.db, 0}]
-        │
-        ▼
-╔═══════════════════════════════════════════════════════════════╗
-║ Step 1: Group by disk_path                                   ║
-║   file1.db → [p1@0, p2@4096]                                  ║
-║   file2.db → [p3@0]                                           ║
-╚═══════════════════════════════════════════════════════════════╝
-        │
-        ▼
-╔═══════════════════════════════════════════════════════════════╗
-║ Step 2: For each file (parallel via io_uring)                ║
+║              SQL EXECUTOR (executor/mod.rs)                   ║
 ║                                                               ║
-║   Phase 1: Submit all metadata reads (64B each)              ║
-║   ┌─────────┬─────────┐                                      ║
-║   │ Meta p1 │ Meta p2 │  ──▶ io_uring submission queue       ║
-║   └─────────┴─────────┘                                      ║
+║  Phase 1: Planning                                            ║
+║    • Identify required columns: [dept, salary, age]          ║
+║    • Detect aggregates: [AVG(salary)]                        ║
+║    • Extract WHERE filters: [age > 25]                       ║
+║    • Extract GROUP BY keys: [dept]                           ║
+║    • Extract ORDER BY: [dept ASC]                            ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │
+                          ▼
+╔═══════════════════════════════════════════════════════════════╗
+║  Phase 2: Data Loading                                        ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ PageDirectory::locate_range(table, ...)  │              ║
+║    │   → Returns Vec<PageDescriptor>          │              ║
+║    └───────────────┬──────────────────────────┘              ║
+║                    ▼                                          ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ PageHandler::get_pages(descriptors)      │              ║
+║    │   → Returns Vec<Arc<Page>>               │              ║
+║    └───────────────┬──────────────────────────┘              ║
+║                    ▼                                          ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ Convert to ColumnarBatch                 │              ║
+║    │   Page(Vec<Entry>) → ColumnarBatch       │              ║
+║    │     columns: {                            │              ║
+║    │       0 → ColumnarPage {                  │              ║
+║    │             data: Text(["eng","sales"]),  │              ║
+║    │             null_bitmap: [0,0]            │              ║
+║    │           }                               │              ║
+║    │       1 → ColumnarPage {                  │              ║
+║    │             data: Int64([25, 30, ...]),   │              ║
+║    │             null_bitmap: [0,0]            │              ║
+║    │           }                               │              ║
+║    │       2 → ColumnarPage {                  │              ║
+║    │             data: Int64([80000, 90000])   │              ║
+║    │           }                               │              ║
+║    │     }                                     │              ║
+║    └──────────────────────────────────────────┘              ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │ ColumnarBatch (1000 rows)
+                          ▼
+╔═══════════════════════════════════════════════════════════════╗
+║  Phase 3: WHERE Filtering (batch.rs + expressions.rs)         ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ evaluate_selection_on_batch(age > 25)    │              ║
+║    │   → Bitmap: [1,1,0,1,0,1,1,0,...]        │              ║
+║    └───────────────┬──────────────────────────┘              ║
+║                    ▼                                          ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ selected_indices = bitmap.iter_ones()    │              ║
+║    │   → [0, 1, 3, 5, 6, ...]                 │              ║
+║    └───────────────┬──────────────────────────┘              ║
+║                    ▼                                          ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ batch = batch.gather(selected_indices)   │              ║
+║    │   → ColumnarBatch with 650 rows          │              ║
+║    └──────────────────────────────────────────┘              ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │ Filtered batch (650 rows)
+                          ▼
+╔═══════════════════════════════════════════════════════════════╗
+║  Phase 4: GROUP BY Aggregation (aggregates.rs)                ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ Evaluate group keys: [dept]              │              ║
+║    │   keys = ["eng", "sales", "eng", ...]    │              ║
+║    └───────────────┬──────────────────────────┘              ║
+║                    ▼                                          ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ Hash aggregation table:                  │              ║
+║    │   HashMap<GroupKey, AggregateState>      │              ║
+║    │                                           │              ║
+║    │   For each row i:                        │              ║
+║    │     key = GroupKey(dept[i])              │              ║
+║    │     state = table[key]                   │              ║
+║    │     state.sum += salary[i]               │              ║
+║    │     state.count += 1                     │              ║
+║    └───────────────┬──────────────────────────┘              ║
+║                    ▼                                          ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ Materialize results:                     │              ║
+║    │   dept      AVG(salary)                  │              ║
+║    │   ----      -----------                  │              ║
+║    │   eng       95000                        │              ║
+║    │   sales     87500                        │              ║
+║    │   → ColumnarBatch with 2 rows            │              ║
+║    └──────────────────────────────────────────┘              ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │ Aggregated batch (2 rows)
+                          ▼
+╔═══════════════════════════════════════════════════════════════╗
+║  Phase 5: ORDER BY Sorting (ordering.rs)                      ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ Build sort keys for each row:            │              ║
+║    │   keys = [                               │              ║
+║    │     OrderKey([Text("eng")]),             │              ║
+║    │     OrderKey([Text("sales")])            │              ║
+║    │   ]                                      │              ║
+║    └───────────────┬──────────────────────────┘              ║
+║                    ▼                                          ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ keys.sort_unstable_by(compare_order_keys)│              ║
+║    │   → indices: [0, 1] (eng < sales)        │              ║
+║    └───────────────┬──────────────────────────┘              ║
+║                    ▼                                          ║
+║    ┌──────────────────────────────────────────┐              ║
+║    │ batch = batch.gather(sorted_indices)     │              ║
+║    └──────────────────────────────────────────┘              ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │ Sorted batch (2 rows)
+                          ▼
+╔═══════════════════════════════════════════════════════════════╗
+║  Phase 6: Projection (projection_helpers.rs)                  ║
+║    Convert ColumnarBatch → Vec<Vec<String>>                   ║
 ║                                                               ║
-║   Phase 2: Submit all payload reads                          ║
-║   ┌─────────┬─────────┐                                      ║
-║   │ Data p1 │ Data p2 │  ──▶ io_uring submission queue       ║
-║   └─────────┴─────────┘                                      ║
+║    Results:                                                   ║
+║    [                                                          ║
+║      ["eng", "95000"],                                        ║
+║      ["sales", "87500"]                                       ║
+║    ]                                                          ║
+╚═══════════════════════════════════════════════════════════════╝
+```
+
+---
+
+## Level 2: DML Execution (INSERT/UPDATE/DELETE)
+
+### INSERT Path (Page Group Batching)
+
+```
+╔═══════════════════════════════════════════════════════════════╗
+║ SQL: "INSERT INTO users (id, name) VALUES (1, 'Alice')"      ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │
+                          ▼
+╔═══════════════════════════════════════════════════════════════╗
+║              SQL EXECUTOR (executor/mod.rs)                   ║
+║  • Parse INSERT statement                                     ║
+║  • Extract values: [("1", "Alice")]                          ║
+║  • Resolve table schema and ORDER BY columns                 ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │
+                          ▼
+╔═══════════════════════════════════════════════════════════════╗
+║                    WRITER (writer/executor.rs)                ║
 ║                                                               ║
-║   Wait for all completions (parallel I/O)                    ║
-║   Single fsync per file                                      ║
-╚═══════════════════════════════════════════════════════════════╝
-        │
-        ▼
+║  ┌──────────────────────────────────────────┐                ║
+║  │ Submit UpdateJob {                       │                ║
+║  │   table: "users",                        │                ║
+║  │   columns: [                             │                ║
+║  │     ColumnUpdate {                       │                ║
+║  │       column: "id",                      │                ║
+║  │       operations: [                      │                ║
+║  │         BufferRow { row: ["1"] }         │                ║
+║  │       ]                                  │                ║
+║  │     },                                   │                ║
+║  │     ColumnUpdate {                       │                ║
+║  │       column: "name",                    │                ║
+║  │       operations: [                      │                ║
+║  │         BufferRow { row: ["Alice"] }     │                ║
+║  │       ]                                  │                ║
+║  │     }                                    │                ║
+║  │   ]                                      │                ║
+║  │ }                                        │                ║
+║  └───────────────┬──────────────────────────┘                ║
+║                  │                                            ║
+║                  ▼                                            ║
+║  ┌──────────────────────────────────────────┐                ║
+║  │ Background Worker Thread                 │                ║
+║  │ (polls channel every ~1ms)               │                ║
+║  └───────────────┬──────────────────────────┘                ║
+║                  │                                            ║
+║                  ▼                                            ║
+║  ┌──────────────────────────────────────────┐                ║
+║  │ buffer_row(table, row)                   │                ║
+║  │   buffered_rows["users"] += 1            │                ║
+║  │   if buffered_rows.len() >= 1000:        │                ║
+║  │     flush_page_group()                   │                ║
+║  └───────────────┬──────────────────────────┘                ║
+╚══════════════════╪═══════════════════════════════════════════╝
+                   │ (after 1000 rows buffered)
+                   ▼
 ╔═══════════════════════════════════════════════════════════════╗
-║ Step 3: Single write lock                                    ║
-║   Insert all pages into CPC at once                           ║
-╚═══════════════════════════════════════════════════════════════╝
-
-Performance: ~N× faster than sequential for N pages in same file
-
-
+║              flush_page_group() - Phase 1: Stage              ║
+║  ┌──────────────────────────────────────────┐                ║
+║  │ For each column:                         │                ║
+║  │   1. Sort buffered rows by ORDER BY keys│                ║
+║  │   2. Create new Page with 1000 entries  │                ║
+║  │   3. Serialize with bincode              │                ║
+║  │      → page_bytes (e.g., 45,678 bytes)   │                ║
+║  │   4. Allocate disk space:                │                ║
+║  │      allocator.allocate(45678)           │                ║
+║  │      → { path: "storage/data.00000",     │                ║
+║  │          offset: 262144,                 │                ║
+║  │          alloc_len: 49152 } (48 KiB)     │                ║
+║  └──────────────────────────────────────────┘                ║
+╚══════════════════╪═══════════════════════════════════════════╝
+                   │ Vec<StagedColumn>
+                   ▼
 ╔═══════════════════════════════════════════════════════════════╗
-║               BATCH WRITE (io_uring on Linux)                 ║
-╚═══════════════════════════════════════════════════════════════╝
-
-Input: [(offset, data), (offset, data), ...]
-        │
-        ▼
+║              flush_page_group() - Phase 2: Commit             ║
+║  ┌──────────────────────────────────────────┐                ║
+║  │ metadata_client.commit(table, updates)   │                ║
+║  │   → PageDirectory::register_batch()      │                ║
+║  │   → Acquires write lock                  │                ║
+║  │   → Generates page IDs: ["p1001", "p1002"]│               ║
+║  │   → Updates column metadata atomically   │                ║
+║  │   → Returns Vec<PageDescriptor>          │                ║
+║  └──────────────────────────────────────────┘                ║
+╚══════════════════╪═══════════════════════════════════════════╝
+                   │ Committed
+                   ▼
 ╔═══════════════════════════════════════════════════════════════╗
-║ Step 1: Prepare all buffers                                  ║
-║   For each write:                                             ║
-║     • Serialize metadata (rkyv)                               ║
-║     • Pad to 64B                                              ║
-║     • Combine with compressed page data                       ║
-║     • Store in stable buffer                                  ║
-╚═══════════════════════════════════════════════════════════════╝
-        │
-        ▼
+║              flush_page_group() - Phase 3: Persist            ║
+║  ┌──────────────────────────────────────────┐                ║
+║  │ For each StagedColumn:                   │                ║
+║  │   1. Zero-pad buffer to alloc_len        │                ║
+║  │      buffer = vec![0; 49152]             │                ║
+║  │      buffer[0..45678] = serialized_bytes │                ║
+║  │   2. Open file (O_DIRECT on Linux)       │                ║
+║  │   3. write_all_at(buffer, offset)        │                ║
+║  │      → Writes to storage/data.00000      │                ║
+║  └──────────────────────────────────────────┘                ║
+╚══════════════════╪═══════════════════════════════════════════╝
+                   │ Persisted
+                   ▼
 ╔═══════════════════════════════════════════════════════════════╗
-║ Step 2: Submit all Write opcodes                             ║
-║   ┌──────┬──────┬──────┬──────┐                              ║
-║   │Write1│Write2│Write3│Write4│  ──▶ io_uring queue          ║
-║   └──────┴──────┴──────┴──────┘                              ║
-║   (all writes submitted in parallel)                          ║
-╚═══════════════════════════════════════════════════════════════╝
-        │
-        ▼
-╔═══════════════════════════════════════════════════════════════╗
-║ Step 3: Wait for completions                                 ║
-║   All writes complete in parallel                             ║
-╚═══════════════════════════════════════════════════════════════╝
-        │
-        ▼
-╔═══════════════════════════════════════════════════════════════╗
-║ Step 4: Single Fsync                                          ║
-║   One fsync for all writes                                    ║
-╚═══════════════════════════════════════════════════════════════╝
-
-
-╔═══════════════════════════════════════════════════════════════╗
-║                      PREFETCHING                              ║
-╚═══════════════════════════════════════════════════════════════╝
-
-Request: get_pages_with_prefetch([p1, p2, p3, p4, p5], k=2)
-        │
-        ├────────────────────┬─────────────────────────────┐
-        ▼                    ▼                             │
-   IMMEDIATE PATH      PREFETCH PATH                       │
-        │                    │                             │
-        ▼                    ▼                             │
-  Return [p1, p2]     Send [p3, p4, p5]                    │
-  (blocking)          to channel (non-blocking)            │
-                             │                             │
-                             ▼                             │
-                 ╔═══════════════════════════╗             │
-                 ║   Prefetch Thread         ║             │
-                 ║   (background worker)     ║             │
-                 ╚═══════════════════════════╝             │
-                             │                             │
-        ┌────────────────────┴────────────┐                │
-        ▼                                 ▼                │
-  recv_timeout(1ms)                  Work arrives?         │
-        │                                 │                │
-        ├─▶ Timeout → loop               └─▶ YES          │
-        │                                     │            │
-        └─▶ Disconnected → exit               ▼            │
-                                    ╔═════════════════╗    │
-                                    ║ Drain channel   ║    │
-                                    ║ immediately     ║    │
-                                    ╚═════════════════╝    │
-                                             │             │
-                                             ▼             │
-                              Batch: [p3, p4, p5, ...]    │
-                              (auto-batches overlapping    │
-                               requests from multiple      │
-                               get_pages_with_prefetch     │
-                               calls)                      │
-                                             │             │
-                                             ▼             │
-                              ensure_pages_cached(batch)   │
-                                             │             │
-                                             ▼             │
-                              Load into UPC/CPC            │
-                                             │             │
-                                             └─────────────┘
-                                                   │
-                                                   ▼
-                                     Ready for next request
-                                     (within 1-2ms)
-
-Performance characteristics:
-• First k pages: blocking, immediate return
-• Remaining pages: background prefetch within 1-2ms
-• Zero CPU when idle (blocked on recv_timeout)
-• Natural batching when requests overlap
-```
-
----
-
-## Level 6: Metadata Structure
-
-```
-╔═════════════════════════════════════════════════════════════════╗
-║                      TableMetaStore                             ║
-╚═════════════════════════════════════════════════════════════════╝
-
-col_data: HashMap<ColumnName, Arc<RwLock<Vec<TableMetaStoreEntry>>>>
-
-"temperature" ──▶ Arc<RwLock<Vec<TableMetaStoreEntry>>>
-                        │
-                        ├─▶ Entry[0]: [0, 1024)
-                        │     └─▶ page_metas: [
-                        │           MVCCKeeperEntry{p1, commit=100},
-                        │           MVCCKeeperEntry{p2, commit=150},
-                        │         ]
-                        │
-                        ├─▶ Entry[1]: [1024, 2048)
-                        │     └─▶ page_metas: [
-                        │           MVCCKeeperEntry{p3, commit=200},
-                        │         ]
-                        │
-                        └─▶ Entry[2]: [2048, 4096)
-                              └─▶ page_metas: [
-                                    MVCCKeeperEntry{p4, commit=250},
-                                  ]
-
-page_data: HashMap<PageId, Arc<PageMetadata>>
-
-"p1" ──▶ Arc<PageMetadata{ id: "p1", disk_path: "/data/0.bin", offset: 0 }>
-"p2" ──▶ Arc<PageMetadata{ id: "p2", disk_path: "/data/0.bin", offset: 4096 }>
-"p3" ──▶ Arc<PageMetadata{ id: "p3", disk_path: "/data/1.bin", offset: 0 }>
-"p4" ──▶ Arc<PageMetadata{ id: "p4", disk_path: "/data/1.bin", offset: 8192 }>
-
-
-╔═════════════════════════════════════════════════════════════════╗
-║                      PageDirectory                              ║
-║                      (Façade)                                   ║
-╚═════════════════════════════════════════════════════════════════╝
-
-latest("temperature")
-      │
-      └─▶ Read lock col_data["temperature"]
-           └─▶ Get last TableMetaStoreEntry
-                └─▶ Get last MVCCKeeperEntry
-                     └─▶ Lookup page_data[page_id]
-                          └─▶ Return PageDescriptor (clone)
-
-range("temperature", 1000, 5000, ts=200)
-      │
-      └─▶ Read lock col_data["temperature"]
-           │
-           ├─▶ Binary search: find ranges overlapping [1000, 5000)
-           │     └─▶ Matches: Entry[0], Entry[1], Entry[2]
-           │
-           ├─▶ For each entry:
-           │     └─▶ Binary search MVCC: find version with commit ≤ 200
-           │          └─▶ Entry[0]: p2 (commit=150)
-           │          └─▶ Entry[1]: p3 (commit=200)
-           │          └─▶ Entry[2]: p4 (commit=250) ❌ too new, skip
-           │
-           └─▶ Return [PageDescriptor{p2}, PageDescriptor{p3}]
-```
-
----
-
-## Level 7: Data Structures
-
-```
-╔═════════════════════════════════════════════════════════════════╗
-║                          Entry                                  ║
-╚═════════════════════════════════════════════════════════════════╝
-
-struct Entry {
-    prefix_meta: String,    // reserved
-    data: String,           // "22.5"
-    suffix_meta: String,    // reserved
-}
-
-
-╔═════════════════════════════════════════════════════════════════╗
-║                           Page                                  ║
-╚═════════════════════════════════════════════════════════════════╝
-
-struct Page {
-    page_metadata: String,
-    entries: Vec<Entry>,    // [Entry{data: "21.0"}, Entry{data: "22.5"}, ...]
-}
-
-In Memory:
-┌──────────────────────────────────────────────────────────┐
-│ Page                                                     │
-│  ├─ page_metadata: ""                                    │
-│  └─ entries: [                                           │
-│       Entry{ prefix_meta: "", data: "21.0", suffix: "" },│
-│       Entry{ prefix_meta: "", data: "22.5", suffix: "" },│
-│       Entry{ prefix_meta: "", data: "23.1", suffix: "" },│
-│     ]                                                    │
-└──────────────────────────────────────────────────────────┘
-
-On Disk (compressed):
-┌────────────┬──────────────────────────────────────────┐
-│ 64B Header │ LZ4(bincode(Page))                       │
-│ {size: N}  │ [compressed bytes...]                    │
-└────────────┴──────────────────────────────────────────┘
-
-
-╔═════════════════════════════════════════════════════════════════╗
-║                      PageCacheEntry                             ║
-╚═════════════════════════════════════════════════════════════════╝
-
-struct PageCacheEntry<T> {
-    page: Arc<T>,           // Arc to avoid cloning
-    used_time: u64,         // epoch millis, for LRU
-}
-
-UPC: PageCacheEntry<PageCacheEntryUncompressed>
-      └─▶ PageCacheEntryUncompressed { page: Page }
-
-CPC: PageCacheEntry<PageCacheEntryCompressed>
-      └─▶ PageCacheEntryCompressed { page: Vec<u8> }
-
-
-╔═════════════════════════════════════════════════════════════════╗
-║                         PageCache<T>                            ║
-╚═════════════════════════════════════════════════════════════════╝
-
-struct PageCache<T> {
-    store: HashMap<PageId, PageCacheEntry<T>>,
-    lru_queue: BTreeSet<(used_time, PageId)>,
-    lifecycle: Option<Arc<dyn CacheLifecycle<T>>>,
-}
-
-Example UPC state:
-store: {
-    "p1" => PageCacheEntry{ page: Arc<Page{...}>, used_time: 1000 },
-    "p5" => PageCacheEntry{ page: Arc<Page{...}>, used_time: 2000 },
-    "p9" => PageCacheEntry{ page: Arc<Page{...}>, used_time: 3000 },
-}
-
-lru_queue: BTreeSet {
-    (1000, "p1"),  ← oldest, evicted first
-    (2000, "p5"),
-    (3000, "p9"),  ← newest
-}
-```
-
----
-
-## Level 8: Thread Safety & Ownership
-
-```
-╔═════════════════════════════════════════════════════════════════╗
-║                    Arc/RwLock Topology                          ║
-╚═════════════════════════════════════════════════════════════════╝
-
-main.rs creates:
-
-Arc<RwLock<PageCache<Uncompressed>>>  ─┐
-                                       ├─▶ PageMaterializer
-Arc<Compressor>  ──────────────────────┘
-
-Arc<RwLock<PageCache<Compressed>>>  ───┐
-                                       ├─▶ PageFetcher
-Arc<PageIO>  ───────────────────────────┘
-
-Arc<RwLock<TableMetaStore>>  ──────────▶ PageDirectory
-                                              │
-                                              ├─▶ PageLocator
-                                              └─▶ CompressedToDiskLifecycle
-
-Arc<PageDirectory>  ────────────────────┐
-                                        ├─▶ PageLocator
-                                        └─▶ CompressedToDiskLifecycle
-
-
-Thread Safety Guarantees:
-
-UPC/CPC operations:
-  - Read locks: get_cached(), collect_cached()
-  - Write locks: add(), evict()
-  - Locks held briefly (dropped before decompression)
-
-TableMetaStore operations:
-  - Read locks: latest(), range(), lookup()
-  - Write locks: register_page()
-  - PageDescriptor cloned before lock drop
-
-Lifecycle callbacks:
-  - Execute on evicting thread
-  - Hold cache write lock during callback
-  - Compression/IO blocks eviction
-```
-
----
-
-## Level 9: Complete Request Trace
-
-```
-╔═════════════════════════════════════════════════════════════════╗
-║ Client: upsert_data_into_column(handler, "temp", "22.5")       ║
-╚═════════════════════════════════════════════════════════════════╝
-                            │
-      ┌─────────────────────┴─────────────────────┐
-      │                                           │
-      ▼                                           ▼
-[1] locate_latest("temp")                   [2] get_page(desc)
-      │                                           │
-      ▼                                           ▼
-  PageDirectory                             PageMaterializer
-      │                                     .get_cached("p42")
-      ▼                                           │
-  RwLock::read()                                  ▼
-      │                                     UPC.store.get("p42")
-      ▼                                           │
-  col_data["temp"]                                ├─▶ HIT
-      │                                           │   └─▶ Arc<Page>
-      └─▶ last entry                              │
-           └─▶ last MVCC                          ├─▶ MISS
-                └─▶ page_id="p42"                 │   │
-                     │                            │   ▼
-                     ▼                            │   PageFetcher
-                page_data["p42"]                  │   .get_cached("p42")
-                     │                            │        │
-                     └─▶ PageDescriptor           │        ├─▶ HIT
-                                                  │        │   └─▶ decompress
-      ┌───────────────────────────────────────────┘        │       └─▶ UPC.add
-      │                                                    │
-      ▼                                                    └─▶ MISS
-[3] Clone & Mutate                                             │
-      │                                                        ▼
-      ├─▶ let mut page = (*arc).clone()                   PageFetcher
-      ├─▶ page.add_entry(Entry::new("22.5"))              .fetch_and_insert
-      │                                                         │
-      └─▶ [4] write_back_uncompressed("p42", page)             ▼
-               │                                          PageIO::read
-               ▼                                               │
-          PageMaterializer                                     ├─▶ seek(offset)
-          .write_back("p42", page)                             ├─▶ read 64B meta
-               │                                               ├─▶ read N bytes
-               ▼                                               │
-          UPC.write().add("p42", page)                         └─▶ compressed blob
-               │                                                    │
-               ├─▶ store.insert("p42", entry)                      ▼
-               ├─▶ lru_queue.insert((now, "p42"))            CPC.add("p42", blob)
-               │                                                    │
-               └─▶ if lru_queue.len() > 10:                        └─▶ decompress
-                     │                                                  └─▶ UPC.add
-                     └─▶ evict(oldest_id)
-                           │
-                           └─▶ lifecycle.on_evict(id, data)
-                                     │
-                                     ▼
-                           UncompressedToCompressed
-                           .on_evict("p99", Arc<Page>)
-                                     │
-                                     ├─▶ compress(page)
-                                     │     └─▶ bincode + lz4
-                                     │
-                                     └─▶ CPC.add("p99", blob)
-                                           │
-                                           └─▶ if CPC full:
-                                                 evict oldest
-                                                   │
-                                                   ▼
-                                             CompressedToDisk
-                                             .on_evict("c55", blob)
-                                                   │
-                                                   ├─▶ lookup("c55")
-                                                   │     └─▶ descriptor
-                                                   │
-                                                   └─▶ PageIO::write
-                                                         │
-                                                         └─▶ disk
-```
-
----
-
-## Level 10: SQL Parser - AST Transformation
-
-```
-╔═══════════════════════════════════════════════════════════════╗
-║ Input: "SELECT id, name FROM users WHERE age > 18"           ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                    TOKENIZATION                               ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-    [SELECT] [id] [,] [name] [FROM] [users] [WHERE] [age] [>] [18]
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                      PARSING                                  ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                Abstract Syntax Tree                           ║
-╚═══════════════════════════════════════════════════════════════╝
-
-Statement::Query
-    └── body: SetExpr::Select
-        ├── projection: Vec<SelectItem>
-        │   ├── UnnamedExpr(Identifier("id"))
-        │   └── UnnamedExpr(Identifier("name"))
-        │
-        ├── from: Vec<TableWithJoins>
-        │   └── TableWithJoins
-        │       └── relation: TableFactor::Table
-        │           └── name: ObjectName("users")
-        │
-        └── selection: Option<Expr>
-            └── BinaryOp
-                ├── left: Identifier("age")
-                ├── op: Gt
-                └── right: Value(Number("18"))
-```
-
----
-
-## Level 11: Query Planner - Plan Construction
-
-```
-╔═══════════════════════════════════════════════════════════════╗
-║ Input: Statement::Query (AST)                                 ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                    plan_statement()                           ║
-║                         │                                     ║
-║         ┌───────────────┴───────────────┐                     ║
-║         ▼                               ▼                     ║
-║   Statement::Query              Statement::Insert/           ║
-║         │                       Update/Delete                ║
-║         ▼                               │                     ║
-║   plan_query()                          ├─▶ plan_insert()    ║
-║         │                               ├─▶ plan_update()    ║
-║         ▼                               └─▶ plan_delete()    ║
-║   plan_select()                                              ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                   ANALYSIS PHASE                              ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-           ┌────────────────┼────────────────┐
-           ▼                ▼                ▼
-    Extract Table    Collect Columns   Build Filters
-         │                 │                 │
-         ▼                 ▼                 ▼
-    "users"       {id, name, age}     FilterExpr::Leaf
-                                         (age > 18)
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                      QueryPlan                                ║
-║                                                               ║
-║  tables: [                                                    ║
-║    TableAccess {                                              ║
-║      table_name: "users",                                     ║
-║      read_columns: {"id", "name", "age"},                     ║
-║      write_columns: {},                                       ║
-║      filters: Some(FilterExpr::Leaf(age > 18))               ║
-║    }                                                          ║
-║  ]                                                            ║
+║              flush_page_group() - Phase 4: Cache              ║
+║  ┌──────────────────────────────────────────┐                ║
+║  │ For each page:                           │                ║
+║  │   page_handler.write_back_uncompressed(  │                ║
+║  │     descriptor.id, page                  │                ║
+║  │   )                                      │                ║
+║  │   → Inserts into UPC                     │                ║
+║  │   → Next read hits cache immediately     │                ║
+║  └──────────────────────────────────────────┘                ║
 ╚═══════════════════════════════════════════════════════════════╝
 ```
 
 ---
 
-## Level 12: FilterExpr Tree Structure
+## Level 3: Storage Architecture Deep-Dive
+
+### Cache Hierarchy
 
 ```
-╔═══════════════════════════════════════════════════════════════╗
-║ WHERE age > 18 AND (region = 'US' OR vip = true)             ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                    build_filter()                             ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-                    FilterExpr::And
-                            │
-                ┌───────────┴───────────┐
-                ▼                       ▼
-        FilterExpr::Leaf        FilterExpr::Or
-         (age > 18)                     │
-                            ┌───────────┴───────────┐
-                            ▼                       ▼
-                    FilterExpr::Leaf        FilterExpr::Leaf
-                    (region = 'US')         (vip = true)
+╔══════════════════════════════════════════════════════════════════╗
+║                   READ REQUEST: get_page("p42")                  ║
+╚════════════════════════════╤═════════════════════════════════════╝
+                             │
+                             ▼
+          ╔══════════════════════════════════════╗
+          ║ LAYER 1: Uncompressed Page Cache    ║
+          ║         (UPC / hot pages)            ║
+          ╚══════════════════════════════════════╝
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+        Read lock     HashMap lookup   Found?
+              │              │              │
+              └──────────────┴──YES─────────┴──▶ return Arc<Page>
+                             │
+                            NO (miss)
+                             │
+                             ▼
+          ╔══════════════════════════════════════╗
+          ║ LAYER 2: Compressed Page Cache       ║
+          ║         (CPC / cold blobs)            ║
+          ╚══════════════════════════════════════╝
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+        Read lock     HashMap lookup   Found?
+              │              │              │
+              │              │             YES
+              │              │              │
+              └──────────────┴──────────────┤
+                             │              │
+                            NO              ▼
+                             │     ┌────────────────────┐
+                             │     │ Decompress blob    │
+                             │     │ (lz4 + bincode)    │
+                             │     └────────┬───────────┘
+                             │              │
+                             │              ▼
+                             │     ┌────────────────────┐
+                             │     │ Insert into UPC    │
+                             │     └────────┬───────────┘
+                             │              │
+                             │              └──▶ return Arc<Page>
+                             │
+                             ▼
+          ╔══════════════════════════════════════╗
+          ║ LAYER 3: Disk I/O                    ║
+          ║         (persistent storage)         ║
+          ╚══════════════════════════════════════╝
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+     Lookup descriptor  Open file    Read bytes
+              │              │              │
+              │              │              ▼
+              │              │     ┌────────────────────┐
+              │              │     │ PageIO::read()     │
+              │              │     │ • seek(offset)     │
+              │              │     │ • read(alloc_len)  │
+              │              │     └────────┬───────────┘
+              │              │              │
+              │              │              ▼
+              │              │     ┌────────────────────┐
+              │              │     │ Insert into CPC    │
+              │              │     └────────┬───────────┘
+              │              │              │
+              │              │              ▼
+              │              │     ┌────────────────────┐
+              │              │     │ Decompress → UPC   │
+              │              │     └────────┬───────────┘
+              │              │              │
+              │              └──────────────┴──▶ return Arc<Page>
+              │
+              ▼
+        (page not found error)
+```
 
+### Cache Eviction Flow
 
-Visual representation:
-
-                        AND
-                    ┌────┴────┐
-                    │         │
-                  Leaf       OR
-               (age > 18)  ┌──┴──┐
-                           │     │
-                         Leaf   Leaf
-                      (region  (vip
-                       = 'US')  = true)
+```
+╔══════════════════════════════════════════════════════════════════╗
+║              UPC reaches capacity (10 entries)                   ║
+╚════════════════════════════╤═════════════════════════════════════╝
+                             │
+                             ▼
+          ┌──────────────────────────────────┐
+          │ Identify LRU entry               │
+          │   lru_queue.iter().next()        │
+          │   → (used_time: 100, id: "p1")   │
+          └────────────┬─────────────────────┘
+                       │
+                       ▼
+          ┌──────────────────────────────────┐
+          │ Remove from UPC                  │
+          │   store.remove("p1")             │
+          │   lru_queue.remove((100, "p1"))  │
+          │   → Arc<Page>                    │
+          └────────────┬─────────────────────┘
+                       │
+                       ▼
+          ┌──────────────────────────────────┐
+          │ Lifecycle callback               │
+          │   UncompressedToCompressed       │
+          │   .on_evict("p1", Arc<Page>)     │
+          └────────────┬─────────────────────┘
+                       │
+                       ▼
+          ┌──────────────────────────────────┐
+          │ Compress page                    │
+          │   bincode::serialize(&page)      │
+          │   lz4_flex::compress(&bytes)     │
+          │   → compressed_blob: Vec<u8>     │
+          └────────────┬─────────────────────┘
+                       │
+                       ▼
+          ┌──────────────────────────────────┐
+          │ Insert into CPC                  │
+          │   cpc.add("p1", compressed_blob) │
+          └──────────────────────────────────┘
+                       │
+                       ▼
+          ┌──────────────────────────────────┐
+          │ CPC eviction (if full)           │
+          │   → Lifecycle callback           │
+          │   → CompressedToDisk             │
+          │   → Write to storage file        │
+          └──────────────────────────────────┘
 ```
 
 ---
 
-## Level 13: Pipeline Builder - Step Generation
+## Level 4: Metadata Management
+
+### PageDirectory Structure
 
 ```
-╔═══════════════════════════════════════════════════════════════╗
-║ Input: QueryPlan with TableAccess                             ║
-║   filters: And([Leaf(age > 18), Leaf(name = 'John')])        ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                  build_pipeline()                             ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-           ┌────────────────┼────────────────┐
-           ▼                ▼                ▼
-    Extract Leaves   Group by Column   Create Steps
-           │                │                │
-           ▼                ▼                ▼
-    [Leaf(age>18),   {"age": [Leaf],   PipelineStep[
-     Leaf(name='J')]  "name": [Leaf]}   {col, filters}]
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                          Job                                  ║
-║                                                               ║
-║  table_name: "users"                                          ║
-║  cost: 2                                                      ║
-║  steps: [                                                     ║
-║    PipelineStep {                                             ║
-║      column: "age",                                           ║
-║      filters: [Leaf(age > 18)],                               ║
-║      is_root: true                                            ║
-║    },                                                         ║
-║    PipelineStep {                                             ║
-║      column: "name",                                          ║
-║      filters: [Leaf(name = 'John')],                          ║
-║      is_root: false                                           ║
-║    }                                                          ║
-║  ]                                                            ║
-╚═══════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════╗
+║                         PageDirectory                            ║
+║                         (façade layer)                           ║
+╚════════════════════════════╤═════════════════════════════════════╝
+                             │
+                             ▼
+╔══════════════════════════════════════════════════════════════════╗
+║                       TableMetaStore                             ║
+║                                                                  ║
+║  ┌──────────────────────────────────────────────────────────┐   ║
+║  │ tables: HashMap<TableName, Arc<RwLock<TableCatalog>>>    │   ║
+║  │   "users" → TableCatalog {                               │   ║
+║  │     columns: HashMap<ColumnName, ColumnCatalog>          │   ║
+║  │       "id" → ColumnCatalog {                             │   ║
+║  │         ranges: Vec<TableMetaStoreEntry>                 │   ║
+║  │           [                                              │   ║
+║  │             Entry { start: 0, end: 1000,                 │   ║
+║  │                     versions: [                          │   ║
+║  │                       MVCCEntry { page_id: "p1",         │   ║
+║  │                                   commit: 100 },         │   ║
+║  │                       MVCCEntry { page_id: "p2",         │   ║
+║  │                                   commit: 200 }          │   ║
+║  │                     ]                                    │   ║
+║  │             },                                           │   ║
+║  │             Entry { start: 1000, end: 2000,              │   ║
+║  │                     versions: [ ... ]                    │   ║
+║  │             }                                            │   ║
+║  │           ]                                              │   ║
+║  │       }                                                  │   ║
+║  │   }                                                      │   ║
+║  │                                                          │   ║
+║  │ page_metadata: HashMap<PageId, Arc<PageMetadata>>        │   ║
+║  │   "p1" → PageMetadata {                                  │   ║
+║  │     id: "p1",                                            │   ║
+║  │     disk_path: "storage/data.00000",                     │   ║
+║  │     offset: 0,                                           │   ║
+║  │     alloc_len: 49152,                                    │   ║
+║  │     actual_len: 45678,                                   │   ║
+║  │     entry_count: 1000                                    │   ║
+║  │   }                                                      │   ║
+║  └──────────────────────────────────────────────────────────┘   ║
+╚══════════════════════════════════════════════════════════════════╝
+```
+
+### Metadata Lookup: latest_for_column("users", "id")
+
+```
+Step 1: Acquire read lock on TableCatalog
+          │
+          ▼
+Step 2: Get column catalog
+          column_catalog = tables["users"].columns["id"]
+          │
+          ▼
+Step 3: Get last range entry
+          last_entry = column_catalog.ranges.last()
+          → Entry { start: 1000, end: 2000, versions: [...] }
+          │
+          ▼
+Step 4: Get last MVCC version
+          last_version = last_entry.versions.last()
+          → MVCCEntry { page_id: "p2", commit: 200 }
+          │
+          ▼
+Step 5: Lookup page metadata
+          metadata = page_metadata["p2"]
+          │
+          ▼
+Step 6: Build descriptor (lightweight copy)
+          PageDescriptor {
+            id: "p2",
+            disk_path: "storage/data.00000",
+            offset: 49152,
+            alloc_len: 49152,
+            actual_len: 45678,
+            entry_count: 1000
+          }
+          │
+          ▼
+Step 7: Release read lock, return descriptor
+```
+
+### Metadata Update: register_batch()
+
+```
+Input: Vec<PendingPage> for atomic batch insert
+
+Step 1: Acquire WRITE lock on TableCatalog
+          (blocks all readers and other writers)
+          │
+          ▼
+Step 2: For each PendingPage:
+          a) Generate unique page ID
+             page_id = format!("p{}", atomic_counter.fetch_add(1))
+          │
+          b) Insert into page_metadata map
+             page_metadata[page_id] = Arc::new(PageMetadata { ... })
+          │
+          c) Update column's range list
+             If replace_last:
+               ranges.last_mut().versions.push(MVCCEntry { page_id, commit: now })
+             Else:
+               ranges.push(Entry { start, end, versions: [MVCCEntry { ... }] })
+          │
+          ▼
+Step 3: Release write lock
+          │
+          ▼
+Step 4: Return Vec<PageDescriptor>
+          (all columns committed atomically)
 ```
 
 ---
 
-## Level 14: Pipeline Executor
+## Level 5: Complete Request Trace
+
+### Trace: SELECT with Filtering
 
 ```
 ╔═══════════════════════════════════════════════════════════════╗
-║                   Input: Job                                  ║
-║  table: "users"                                               ║
-║  cost: 3                                                      ║
-║  steps: [age, name, status]                                   ║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-╔═══════════════════════════════════════════════════════════════╗
-║                   Pipeline Executor                           ║
-║                                                               ║
-║  Job Queue (MPMC)                                             ║
-║    • Producers: planner/builder                               ║
-║    • Consumers: main workers                                  ║
-║                                                               ║
-║  Main Workers (≈85% threads)                                  ║
-║    1. recv() Job                                              ║
-║    2. insert Job into JobBoard (SkipSet ordered by cost)      ║
-║    3. send wake-up (bool) to reserve channel                  ║
-║    4. call job.get_next() (CAS claim + run PipelineStep)      ║
-║                                                               ║
-║  Reserve Workers (≈15% threads)                               ║
-║    1. block on wake-up channel                                ║
-║    2. pop heaviest Job from JobBoard                          ║
-║    3. call job.get_next() (dup execution allowed)             ║
-║                                                               ║
-║  JobBoard = crossbeam_skiplist::SkipSet<JobHandle>            ║
-║    • cost-major ordering, seq tie-breaker                     ║
-║    • lock-free steals for reserve workers                     ║
-╚═══════════════════════════════════════════════════════════════╝
+║ SQL: SELECT name, salary FROM employees WHERE age > 30       ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │
+                          ▼
+[1] Parse SQL → AST
+      sqlparser::Parser::parse_sql(sql)
+          │
+          ▼
+[2] Plan query
+      executor::execute_select()
+      • Required columns: [name, salary, age]
+      • WHERE filter: age > 30
+          │
+          ▼
+[3] Locate data
+      PageDirectory::locate_range("employees", 0, MAX)
+      → Returns: [PageDescriptor{"p100"}, PageDescriptor{"p101"}]
+          │
+          ▼
+[4] Fetch pages
+      PageHandler::get_pages([p100, p101])
+      ├─ Check UPC (miss both)
+      ├─ Check CPC (hit p100, miss p101)
+      │   └─ Decompress p100 → UPC
+      └─ Fetch p101 from disk → CPC → decompress → UPC
+      → Returns: [Arc<Page>, Arc<Page>]
+          │
+          ▼
+[5] Convert to columnar batch
+      For each page.entries:
+        Parse Entry.data as string
+        Try parse as Int64
+        If fail, try Float64
+        If fail, store as Text
+      → ColumnarBatch {
+          columns: {
+            0 → ColumnarPage { data: Text(["Alice", "Bob", ...]) },
+            1 → ColumnarPage { data: Int64([80000, 90000, ...]) },
+            2 → ColumnarPage { data: Int64([28, 35, ...]) }
+          },
+          num_rows: 2000
+        }
+          │
+          ▼
+[6] Apply WHERE filter
+      evaluate_selection_on_batch(&where_expr, &batch)
+      • Evaluate: age > 30
+      • For each row i:
+          if age_column[i] > 30:
+            selection_bitmap.set(i)
+      → Bitmap: [0,1,0,1,1,0,...]
+          │
+          ▼
+[7] Gather filtered rows
+      selected_indices = selection_bitmap.iter_ones().collect()
+      → [1, 3, 4, ...]  (1200 indices)
+      batch = batch.gather(&selected_indices)
+      → ColumnarBatch with 1200 rows
+          │
+          ▼
+[8] Project columns
+      Select only [name, salary] columns
+      Convert ColumnarBatch → Vec<Vec<String>>
+      → [
+          ["Alice", "80000"],
+          ["Bob", "90000"],
+          ...
+        ]
+          │
+          ▼
+[9] Return results
+```
 
-Execution characteristics:
-• No extra mutexes: skip list + channels do the coordination  
-• Main pool keeps ingesting Jobs; reserve pool relieves pressure  
-• Duplicated executions are intentional for heavy Jobs  
-• Future work: actual row filtering still runs inside job/step `get_next` / `execute`
+### Trace: INSERT with Batching
+
+```
+╔═══════════════════════════════════════════════════════════════╗
+║ SQL: INSERT INTO users (id, name) VALUES (1, 'Alice')        ║
+╚═════════════════════════╤═════════════════════════════════════╝
+                          │
+                          ▼
+[1] Parse INSERT → Extract values
+      executor::execute_insert()
+      • Table: "users"
+      • Columns: ["id", "name"]
+      • Values: [("1", "Alice")]
+          │
+          ▼
+[2] Create UpdateJob
+      UpdateJob {
+        table: "users",
+        columns: [
+          ColumnUpdate {
+            column: "id",
+            operations: [BufferRow { row: ["1"] }]
+          },
+          ColumnUpdate {
+            column: "name",
+            operations: [BufferRow { row: ["Alice"] }]
+          }
+        ]
+      }
+          │
+          ▼
+[3] Submit to Writer
+      writer.submit(job)
+      • Non-blocking, queues job in channel
+          │
+          ▼
+[4] Worker thread receives job
+      worker_context.handle_job(job)
+          │
+          ▼
+[5] Buffer row
+      buffered_rows["users"].push(["1", "Alice"])
+      • buffered_rows.len() = 1 (< 1000 threshold)
+      • Return (don't flush yet)
+      ... (999 more inserts) ...
+          │
+          ▼
+[6] Threshold reached (1000th insert)
+      flush_page_group("users", buffered_rows)
+          │
+          ├─▶ [6a] Sort rows by ORDER BY columns
+          │
+          ├─▶ [6b] For each column:
+          │     stage_column()
+          │     ├─ Create Page with 1000 entries
+          │     ├─ Serialize with bincode
+          │     └─ Allocate disk space
+          │     → StagedColumn { serialized, allocation, ... }
+          │
+          ├─▶ [6c] Commit metadata (atomic)
+          │     metadata_client.commit(table, staged)
+          │     ├─ Generate page IDs: ["p1001", "p1002"]
+          │     ├─ Update column chains
+          │     └─ Return descriptors
+          │
+          ├─▶ [6d] Persist to disk
+          │     For each (staged, descriptor):
+          │       ├─ Zero-pad buffer
+          │       ├─ write_all_at(buffer, offset)
+          │       └─ fsync
+          │
+          └─▶ [6e] Cache writeback
+                For each page:
+                  page_handler.write_back_uncompressed(id, page)
+                  → Insert into UPC
+          │
+          ▼
+[7] Return success
 ```
 
 ---
 
-## Level 15: Complete SQL Query Flow
+## Performance Characteristics
+
+### Cache Hit Rates
 
 ```
-╔═══════════════════════════════════════════════════════════════╗
-║ Client: "SELECT id FROM users WHERE age > 18 AND name='John'"║
-╚═══════════════════════════════════════════════════════════════╝
-                            │
-                            ▼
-[1] parse_sql(sql)
-                            │
-                            ▼
-                    GenericDialect
-                            │
-                            ▼
-                    Parser::parse_sql
-                            │
-                            ├─▶ Lexer tokenizes input
-                            ├─▶ Parser builds AST
-                            └─▶ Statement::Query
-                                     │
-                                     ▼
-[2] plan_statement(&stmt)
-                            │
-                            ▼
-                    plan_query()
-                            │
-                            ├─▶ extract_table_name() → "users"
-                            ├─▶ collect_select_columns() → {id}
-                            ├─▶ collect_expr_columns(WHERE) → {age, name}
-                            └─▶ build_filter(WHERE) → FilterExpr::And
-                                     │
-                                     ▼
-                            TableAccess {
-                              table: "users",
-                              read: {id, age, name},
-                              filters: And([age>18, name='John'])
-                            }
-                                     │
-                                     ▼
-                            QueryPlan {
-                              tables: [TableAccess]
-                            }
-                                     │
-                                     ▼
-[3] build_pipeline(&plan)
-                            │
-                            ├─▶ extract_leaf_filters()
-                            │     └─▶ [Leaf(age>18), Leaf(name='John')]
-                            │
-                            ├─▶ group_filters_by_column()
-                            │     └─▶ {"age": [...], "name": [...]}
-                            │
-                            └─▶ create PipelineSteps
-                                     │
-                                     ▼
-                            Job {
-                              table: "users",
-                              cost: 2,
-                              steps: [
-                                {col: "age", filters: [...]},
-                                {col: "name", filters: [...]}
-                              ]
-                            }
-                                     │
-                                     ▼
-[4] Execute (future)
-                            │
-                            ├─▶ Fetch all rows from "users"
-                            ├─▶ Apply step 1: filter age column
-                            ├─▶ Apply step 2: filter name column
-                            └─▶ Project id column
-                                     │
-                                     ▼
-                            Result rows
+Scenario: Random reads with 10-entry UPC
+  Working set: 100 unique pages
+  Hit rate: ~10% (UPC) + ~10% (CPC) = ~20% total
+  → 80% requests hit disk
+
+Scenario: Sequential scan (same pages)
+  Working set: 5 pages
+  Hit rate: ~100% after initial load
+  → Amortized disk cost across many queries
+
+Scenario: Write-heavy workload
+  Insertions trigger page group flushes (1000 rows)
+  Flushed pages immediately in UPC (100% hit rate)
+  Reads of recently written data: ~100% UPC hit rate
 ```
+
+### Columnar Batch Processing
+
+```
+Operation              Row-by-row    Columnar Batch
+──────────────────────────────────────────────────────
+WHERE age > 30         1 eval/row    1 eval/word (64 bits)
+  (1000 rows)          1000 ops      ~16 ops + bitmap ops
+
+SUM(salary)            1 parse/row   1 parse/row (but vectorized)
+  (1000 rows)          1000 parses   Potential SIMD: 4× speedup
+
+Sort by 2 columns      2 key builds  Batch key build
+  (1000 rows)          per row       → 1 allocation for all keys
+
+Memory layout          Cache-hostile Cache-friendly
+                       (scattered)   (sequential access)
+```
+
+### Write Amplification
+
+```
+Scenario: Single row insert (without batching)
+  1 row → 1 Page write → ~4 KiB minimum (4K alignment)
+  Write amplification: ~4000× (1 byte → 4096 bytes)
+
+Scenario: Page group batching (1000 rows)
+  1000 rows → 1 Page write → ~48 KiB (45 KB actual + 3 KB padding)
+  Write amplification: ~1.06× (45 KB → 48 KB)
+  → 99% reduction in write amplification
+```
+
+---
+
+## Related Documentation
+
+- [Architecture Overview](architecture_overview) - Component-level design
+- [SQL Executor](sql_executor) - Query execution engine
+- [Columnar Batch](columnar_batch) - Batch processing internals
+- [Writer](writer) - Write execution and atomicity
+- [Page Handler](page_handler) - Cache orchestration
+- [Metadata Store](metadata_store) - Catalog management
+- [Cache System](cache) - Two-tier LRU caches
