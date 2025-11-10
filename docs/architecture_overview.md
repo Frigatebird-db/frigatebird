@@ -341,82 +341,211 @@ Gather Pages in original order
 Collect Entry vectors (returns full pages, no row slicing)
 ```
 
-## SQL Parser & Planner (`src/sql/`)
+## SQL Engine (`src/sql/`)
 
-To reason about table access without a full execution engine, the repo now includes a small SQL surface located under `src/sql/`:
+The SQL engine provides complete query execution including SELECT, INSERT, UPDATE, DELETE, and CREATE TABLE operations. It consists of three main subsystems:
 
-- `parser.rs` wraps the `sqlparser` crate (GenericDialect) and exposes `parse_sql(&str)`.
-- `planner.rs` turns `SELECT`, `INSERT`, `UPDATE`, and `DELETE` statements (single table only, joins unsupported) into table-level plans.
-- `models.rs` defines the shared types: `QueryPlan`, `TableAccess`, `FilterExpr`, and `PlannerError`.
+### Parser & Planner
 
-Using `plan_sql(sql)` returns a `QueryPlan` with one `TableAccess` entry per referenced table. Each entry records:
+- `parser.rs` wraps the `sqlparser` crate (GenericDialect) and exposes `parse_sql(&str)`
+- `planner.rs` converts SQL statements into execution plans
+- `models.rs` defines shared types: `QueryPlan`, `TableAccess`, `FilterExpr`, `PlannerError`
 
-- `table_name`
-- `read_columns` / `write_columns` (`BTreeSet<String>`; `*` denotes unknown/all columns)
-- `filters: Option<FilterExpr>` combining `WHERE`/`HAVING`/`QUALIFY` (or DML predicates) into an AND/OR tree with original `sqlparser::ast::Expr` leaves
+### SQL Executor (`src/sql/executor/`)
 
-Example (`tests/sql_planner_tests.rs`):
+Full query execution engine with **~10,000 lines** across 14 modules:
 
-```
-SELECT id
-FROM accounts
-WHERE status = 'active'
-  AND (region = 'US' OR vip = true)
-```
+**Core Modules:**
+- `mod.rs` - Main SELECT execution with full feature support (3,445 lines)
+- `batch.rs` - Columnar batch processing with type-specific storage (655 lines)
+- `expressions.rs` - Expression evaluation engine supporting WHERE, projections, arithmetic (1,631 lines)
+- `aggregates.rs` - Complete aggregate functions: COUNT, SUM, AVG, MIN, MAX, VARIANCE, STDDEV, PERCENTILE_CONT (1,089 lines)
+- `window_helpers.rs` - Window functions: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, SUM OVER, etc. (1,375 lines)
+- `ordering.rs` - Advanced sorting with NULLS FIRST/LAST, multi-column keys (424 lines)
+- `grouping_helpers.rs` - GROUP BY with multi-column keys and HAVING clauses (170 lines)
 
-Produces:
+**Support Modules:**
+- `values.rs` - Type system with null encoding and coercion (174 lines)
+- `row_functions.rs` - Scalar functions (ABS, ROUND, CEIL, FLOOR, EXP, LN, LOG, POWER) (408 lines)
+- `scalar_functions.rs` - Additional scalar operations (167 lines)
+- `projection_helpers.rs` - Result set materialization (223 lines)
+- `helpers.rs` - Utilities for name extraction, LIKE/RLIKE patterns (460 lines)
+- `scan_helpers.rs` - Scan optimization helpers (110 lines)
+- `spill.rs` - Spill-to-disk infrastructure (24 lines, placeholder)
 
-```
-TableAccess {
-  table_name: "accounts",
-  read_columns: {"id", "region", "status", "vip"},
-  write_columns: {},
-  filters: Some(
-    And([
-      Leaf(status = 'active'),
-      Or([Leaf(region = 'US'), Leaf(vip = true)])
-    ])
-  ),
-}
-```
+### Columnar Batch Architecture
 
-Pipeline sketch:
+The executor uses a **columnar batch processing** model for performance:
 
 ```
-+------------------------------+
-| sql::plan_sql(\"SELECT ...\") |
-+---------------+--------------+
-                |
-                v
-        +-------+-------+
-        | parser.rs     |  (calls sqlparser)
-        +-------+-------+
-                |
-                v
-        +-------+-------+
-        | planner.rs    |  (walks AST, collects tables)
-        +-------+-------+
-                |
-                v
-        +-------+--------+
-        | models.rs      |
-        |  QueryPlan     |
-        |   └─ TableAccess{read/write cols, filters}
-        |  FilterExpr    |
-        +----------------+
-                |
-                v
-        +-------+--------+
-        | pipeline::build| (group filters → Job)
-        +-------+--------+
-                |
-                v
-        +-------+--------+
-        | executor.rs    | (main/reserve pools + JobBoard)
-        +----------------+
+ColumnarBatch
+  ├─ columns: HashMap<ordinal, ColumnarPage>
+  ├─ num_rows: usize
+  └─ aliases: HashMap<name, ordinal>
+
+ColumnarPage
+  ├─ data: ColumnData
+  │    ├─ Int64(Vec<i64>)
+  │    ├─ Float64(Vec<f64>)
+  │    └─ Text(Vec<String>)
+  ├─ null_bitmap: Bitmap
+  └─ num_rows: usize
+
+Bitmap
+  ├─ bits: Vec<u64>         (64-bit words for compact storage)
+  └─ operations: and, or, invert, count_ones, iter_ones
 ```
 
-Because plans are pure data, they can be fed into future query-planning layers, validation tooling, or observability hooks without touching the storage engine.
+**Benefits:**
+- Type-specific storage reduces parse overhead
+- Bitmap operations enable efficient filtering
+- Columnar layout improves cache locality
+- Batch operations reduce per-row overhead
+
+### SELECT Execution Pipeline
+
+```
+SQL Query
+    │
+    ├─▶ Parse & validate (parser.rs)
+    │
+    ├─▶ Plan query (executor/mod.rs)
+    │     ├─▶ Identify required columns
+    │     ├─▶ Detect aggregates/window functions
+    │     └─▶ Build execution plan
+    │
+    ├─▶ Load data into ColumnarBatch
+    │     ├─▶ Locate pages via PageDirectory
+    │     ├─▶ Materialize columns from pages
+    │     └─▶ Convert to type-specific arrays
+    │
+    ├─▶ Apply WHERE filters
+    │     ├─▶ Evaluate expressions on batch
+    │     ├─▶ Build selection bitmap
+    │     └─▶ Gather filtered rows
+    │
+    ├─▶ Apply GROUP BY (if present)
+    │     ├─▶ Evaluate group keys on batch
+    │     ├─▶ Hash-based aggregation
+    │     └─▶ Evaluate HAVING clause
+    │
+    ├─▶ Apply window functions (if present)
+    │     ├─▶ Partition by keys
+    │     ├─▶ Sort within partitions
+    │     └─▶ Compute window function outputs
+    │
+    ├─▶ Apply ORDER BY
+    │     ├─▶ Build multi-column sort keys
+    │     ├─▶ Sort with NULLS FIRST/LAST
+    │     └─▶ Reorder batch
+    │
+    └─▶ Apply LIMIT/OFFSET → Final results
+```
+
+### Supported SQL Features
+
+**SELECT:**
+- Projections with expressions: `SELECT price * 1.1 AS discounted`
+- WHERE with complex predicates: `age > 18 AND (status = 'active' OR vip = true)`
+- Aggregate functions: `COUNT(*), COUNT(col), SUM, AVG, MIN, MAX, VARIANCE, STDDEV, PERCENTILE_CONT`
+- GROUP BY with multi-column keys: `GROUP BY region, status`
+- HAVING clause: `HAVING COUNT(*) > 10`
+- Window functions: `ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC)`
+- ORDER BY with NULLS placement: `ORDER BY age DESC NULLS LAST`
+- LIMIT/OFFSET for pagination
+- Scalar functions: `ABS, ROUND, CEIL, FLOOR, EXP, LN, LOG, POWER, WIDTH_BUCKET`
+- Pattern matching: `LIKE, ILIKE, RLIKE` (regex)
+- Operators: arithmetic (`+, -, *, /`), comparison (`=, !=, <, >, <=, >=`), logical (`AND, OR, NOT`)
+- Range queries: `BETWEEN, IN`
+- Null handling: `IS NULL, IS NOT NULL`
+
+**DML:**
+- `INSERT INTO ... VALUES ...` with sorted insertion
+- `UPDATE ... SET ... WHERE ...` with row repositioning for sort key changes
+- `DELETE FROM ... WHERE ...` with metadata updates
+
+**DDL:**
+- `CREATE TABLE ... ORDER BY ...` for sorted tables
+
+See [sql_executor](sql_executor) for complete documentation on the execution engine.
+
+## Writer Architecture (`src/writer/`)
+
+The Writer module provides **transactional write execution** with O_DIRECT I/O support and atomic metadata updates.
+
+### Components
+
+```
+┌─────────────────────────────────────────────┐
+│              Writer                         │
+│  ┌─────────────────────────────────┐        │
+│  │   Crossbeam Channel (Unbounded) │        │
+│  └────────────┬────────────────────┘        │
+│               │                             │
+│               ▼                             │
+│  ┌─────────────────────────────────┐        │
+│  │      WorkerContext              │        │
+│  │   (Background Thread)           │        │
+│  └────────────┬────────────────────┘        │
+│               │                             │
+└───────────────┼─────────────────────────────┘
+                │
+    ┌───────────┴──────────────┐
+    │                          │
+    ▼                          ▼
+PageAllocator            MetadataClient
+DirectBlockAllocator     DirectoryMetadataClient
+```
+
+**Key Features:**
+- **DirectBlockAllocator**: 256 KiB block allocation with 4 KiB tail granularity
+- **O_DIRECT support**: 4K-aligned writes on Linux for bypassing page cache
+- **File rotation**: Automatic rotation at 4 GiB boundaries (storage/data.00000, data.00001, ...)
+- **Atomic commits**: All column updates in a job commit together via `register_batch()`
+- **Background execution**: Single worker thread serializes all writes
+
+### Write Execution Flow
+
+```
+UpdateJob { table, columns: [ColumnUpdate] }
+    │
+    ├─▶ Stage Phase (parallel per-column preparation)
+    │     ├─▶ Load latest page version from cache
+    │     ├─▶ Apply operations (Overwrite, Append, InsertAt, BufferRow)
+    │     ├─▶ Serialize with bincode
+    │     └─▶ Allocate disk space (4K-aligned)
+    │
+    ├─▶ Metadata Commit (atomic)
+    │     └─▶ PageDirectory::register_batch() with write lock
+    │
+    ├─▶ Persistence (I/O)
+    │     ├─▶ Zero-pad to alloc_len
+    │     ├─▶ Write to allocated offsets
+    │     └─▶ (O_DIRECT writes on Linux)
+    │
+    └─▶ Cache Writeback
+          └─▶ Insert new page versions into UPC
+```
+
+**Update Operations:**
+- `Overwrite { row, entry }` - Replace specific row, auto-extend page if needed
+- `Append { entry }` - Push to end of page
+- `InsertAt { row, entry }` - Insert at position, shifting subsequent rows
+- `BufferRow { row }` - Buffer for page-group batching (optimizes sorted inserts)
+
+### Page Group Batching
+
+For efficient sorted table inserts, the Writer buffers rows until reaching `ROWS_PER_PAGE_GROUP` (default: 1000), then writes complete page groups across all columns atomically:
+
+```
+INSERT rows 1-999   → Buffered in memory
+INSERT row 1000     → Triggers flush:
+                        ├─▶ Sort by ORDER BY columns
+                        ├─▶ Write page for each column
+                        └─▶ Atomic metadata commit
+```
+
+See [writer](writer) for detailed architecture documentation.
 
 ## Pipeline Executor (`src/executor.rs`)
 
