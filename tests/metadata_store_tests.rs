@@ -149,6 +149,7 @@ fn register_batch_replaces_tail_and_updates_prefix() {
         actual_len: 200 * 8,
         entry_count: 8,
         replace_last: false,
+        stats: None,
     }];
     store.register_batch(&first);
 
@@ -161,6 +162,7 @@ fn register_batch_replaces_tail_and_updates_prefix() {
         actual_len: 200 * 4,
         entry_count: 4,
         replace_last: false,
+        stats: None,
     }];
     store.register_batch(&second);
 
@@ -173,6 +175,7 @@ fn register_batch_replaces_tail_and_updates_prefix() {
         actual_len: 200 * 16,
         entry_count: 16,
         replace_last: true,
+        stats: None,
     }];
     store.register_batch(&third);
 
