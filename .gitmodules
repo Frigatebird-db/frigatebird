@@ -1,4 +1,0 @@
-[submodule "docs"]
-	path = docs
-	url = git@github.com:nubskr/satori-docs.git
-	branch = master
