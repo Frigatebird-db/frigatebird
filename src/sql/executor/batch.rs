@@ -71,7 +71,10 @@ impl Bitmap {
     }
 
     pub fn count_ones(&self) -> usize {
-        self.bits.iter().map(|word| word.count_ones() as usize).sum()
+        self.bits
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
     }
 
     pub fn and(&mut self, other: &Bitmap) {
@@ -383,9 +386,7 @@ impl ColumnarPage {
         if idx >= self.num_rows {
             return None;
         }
-        let value = self
-            .value_as_string(idx)
-            .unwrap_or_else(|| encode_null());
+        let value = self.value_as_string(idx).unwrap_or_else(|| encode_null());
         Some(Entry::new(&value))
     }
 
@@ -628,20 +629,36 @@ impl ColumnarPage {
 }
 
 fn infer_column_data(values: &[Option<String>]) -> ColumnData {
-    if values.iter().all(|opt| opt.as_ref().map(|s| s.parse::<i64>().is_ok()).unwrap_or(true)) {
+    if values.iter().all(|opt| {
+        opt.as_ref()
+            .map(|s| s.parse::<i64>().is_ok())
+            .unwrap_or(true)
+    }) {
         return ColumnData::Int64(
             values
                 .iter()
-                .map(|opt| opt.as_ref().and_then(|s| s.parse::<i64>().ok()).unwrap_or_default())
+                .map(|opt| {
+                    opt.as_ref()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or_default()
+                })
                 .collect(),
         );
     }
 
-    if values.iter().all(|opt| opt.as_ref().map(|s| s.parse::<f64>().is_ok()).unwrap_or(true)) {
+    if values.iter().all(|opt| {
+        opt.as_ref()
+            .map(|s| s.parse::<f64>().is_ok())
+            .unwrap_or(true)
+    }) {
         return ColumnData::Float64(
             values
                 .iter()
-                .map(|opt| opt.as_ref().and_then(|s| s.parse::<f64>().ok()).unwrap_or_default())
+                .map(|opt| {
+                    opt.as_ref()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or_default()
+                })
                 .collect(),
         );
     }

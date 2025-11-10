@@ -119,11 +119,8 @@ fn build_sql_executor() -> (
         Arc::new(Compressor::new()),
     ));
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     (executor, handler, directory, store)
 }
@@ -224,11 +221,8 @@ fn sql_executor_query_returns_projected_rows() {
         ],
         vec!["id".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let result = executor
         .query("SELECT id, name FROM users WHERE id = 2")
@@ -268,11 +262,8 @@ fn sql_executor_query_limit_offset_respected() {
         ],
         vec!["id".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let result = executor
         .query("SELECT name FROM users WHERE id = 1 LIMIT 1 OFFSET 1")
@@ -288,11 +279,8 @@ fn sql_executor_query_requires_sort_predicate() {
         &[("id", vec!["1", "2"]), ("name", vec!["Alice", "Bob"])],
         vec!["id".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let result = executor
         .query("SELECT name FROM users WHERE name = 'Alice'")
@@ -308,11 +296,8 @@ fn sql_executor_query_projects_expressions() {
         &[("id", vec!["1"]), ("name", vec!["Alice"])],
         vec!["id".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let result = executor
         .query("SELECT id + 1 FROM users WHERE id = 1")
@@ -331,11 +316,8 @@ fn sql_executor_query_group_by_table_prefix() {
         ],
         vec!["region".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let result = executor
         .query("SELECT region, SUM(amount) FROM sales GROUP BY region")
@@ -357,11 +339,8 @@ fn sql_executor_query_group_by_requires_prefix() {
         &[("region", vec!["east"]), ("amount", vec!["10"])],
         vec!["region".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let err = executor
         .query("SELECT amount, SUM(amount) FROM sales GROUP BY amount")
@@ -383,11 +362,8 @@ fn sql_executor_query_group_by_requires_aggregates() {
         ],
         vec!["region".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let err = executor
         .query("SELECT region FROM sales GROUP BY region")
@@ -410,11 +386,8 @@ fn sql_executor_query_supports_comparison_predicates() {
         ],
         vec!["id".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let result = executor
         .query("SELECT name FROM users WHERE id = 1 AND age >= 25 AND age < 50")
@@ -439,11 +412,8 @@ fn sql_executor_query_supports_like_predicates() {
         ],
         vec!["id".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let result = executor
         .query("SELECT name FROM users WHERE id = 1 AND name LIKE 'Al%'")
@@ -471,17 +441,17 @@ fn sql_executor_query_handles_nulls() {
         &[("id", vec!["1", "1"]), ("name", vec![null_marker, "Bob"])],
         vec!["id".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let result = executor
         .query("SELECT name FROM users WHERE id = 1")
         .expect("null handling");
     assert_eq!(result.columns, vec!["name".to_string()]);
-    assert_eq!(result.rows(), vec![vec![None], vec![Some("Bob".to_string())]]);
+    assert_eq!(
+        result.rows(),
+        vec![vec![None], vec![Some("Bob".to_string())]]
+    );
 }
 
 #[test]
@@ -495,11 +465,8 @@ fn sql_executor_numeric_aggregates() {
         ],
         vec!["id".to_string()],
     );
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
     let counts = executor
         .query("SELECT COUNT(*), COUNT(value), COUNT(DISTINCT value) FROM numbers WHERE id = 1")

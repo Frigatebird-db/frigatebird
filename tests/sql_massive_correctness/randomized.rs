@@ -58,10 +58,52 @@ fn debug_distinct_nullable_text_case() {
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(sql).expect("prep duckdb");
     let mut rows = stmt.query([]).expect("duckdb query");
-    let column_count = rows
-        .as_ref()
-        .expect("statement reference")
-        .column_count();
+    let column_count = rows.as_ref().expect("statement reference").column_count();
+    let mut duck_rows = Vec::new();
+    use duckdb::types::ValueRef;
+    while let Some(row) = rows.next().expect("duckdb step") {
+        let mut values = Vec::with_capacity(column_count);
+        for idx in 0..column_count {
+            let value = row.get_ref(idx).expect("duckdb value");
+            let cell = match value {
+                ValueRef::Null => None,
+                ValueRef::Text(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+                _ => Some(format!("{value:?}")),
+            };
+            values.push(cell);
+        }
+        duck_rows.push(values);
+    }
+    println!("duck rows: {:?}", duck_rows);
+}
+
+#[test]
+#[ignore]
+fn debug_window_case() {
+    let harness = setup_executor();
+    let mut config = MassiveFixtureConfig::default();
+    config.row_count = 2_000;
+    let fixture = MassiveFixture::install_with_config(&harness.executor, config);
+    let ExecutorHarness { executor, .. } = harness;
+    let sql = "SELECT tenant, quantity, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY created_at) AS rn, SUM(quantity) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_qty, LAG(price, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lag_price, LEAD(net_amount, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lead_net FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL QUALIFY rn <= 8 ORDER BY tenant, rn";
+    let ours = executor.query(sql).expect("satori query failed");
+    println!("ours rows:\n{}", ours);
+    if let Some(batch) = ours.batches.first() {
+        println!("raw running_qty column:");
+        if let Some(column) = batch.columns.get(&5) {
+            for row_idx in 0..batch.num_rows {
+                println!(
+                    "row {row_idx}: {:?}",
+                    column.value_as_string(row_idx).unwrap_or_default()
+                );
+            }
+        }
+    }
+
+    let conn = fixture.duckdb();
+    let mut stmt = conn.prepare(sql).expect("duckdb prepare");
+    let mut rows = stmt.query([]).expect("duckdb query");
+    let column_count = rows.as_ref().expect("statement reference").column_count();
     let mut duck_rows = Vec::new();
     use duckdb::types::ValueRef;
     while let Some(row) = rows.next().expect("duckdb step") {

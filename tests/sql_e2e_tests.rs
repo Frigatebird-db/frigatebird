@@ -32,11 +32,8 @@ fn setup_executor() -> (SqlExecutor, Arc<PageHandler>, Arc<PageDirectory>) {
         Arc::new(Compressor::new()),
     ));
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        false,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
     (executor, handler, directory)
 }
 
@@ -142,7 +139,11 @@ fn test_e2e_math_functions_comprehensive() {
         .query("SELECT AVG(value) FROM numbers WHERE id = '1'")
         .expect("avg for bounds check");
     // Average should be around 17.6
-    let avg_val = result.rows()[0][0].as_ref().unwrap().parse::<f64>().unwrap();
+    let avg_val = result.rows()[0][0]
+        .as_ref()
+        .unwrap()
+        .parse::<f64>()
+        .unwrap();
     assert!(avg_val > 17.0 && avg_val < 18.0);
 
     // Test POWER - sum of squares
@@ -324,7 +325,14 @@ fn test_e2e_exp_ln_log_functions() {
         .query("SELECT ROUND(AVG(EXP(value)), 2) FROM math WHERE id = '1'")
         .expect("exp");
     // e^1 + e^2 + e^10 + e^100 is huge, so this should be a large number
-    assert!(result.rows()[0][0].as_ref().unwrap().parse::<f64>().unwrap() > 1000.0);
+    assert!(
+        result.rows()[0][0]
+            .as_ref()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            > 1000.0
+    );
 
     // Test LN - average of ln(value)
     let result = executor
@@ -668,4 +676,268 @@ fn test_select_distinct_rows() {
         .query("SELECT DISTINCT status FROM distincts LIMIT 1")
         .expect("distinct limit");
     assert_eq!(result.row_count(), 1);
+}
+
+#[test]
+fn test_update_delete_with_sort_key_prefix_predicates() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute(
+            "CREATE TABLE users (region TEXT, user_id TEXT, name TEXT) ORDER BY (region, user_id)",
+        )
+        .expect("create users");
+
+    let seed_rows = vec![
+        ("US", "1", "Alice"),
+        ("US", "2", "Bob"),
+        ("US", "3", "Carol"),
+        ("EU", "1", "Eve"),
+        ("EU", "2", "Mallory"),
+    ];
+    for (region, user_id, name) in seed_rows {
+        executor
+            .execute(&format!(
+                "INSERT INTO users (region, user_id, name) VALUES ('{region}', '{user_id}', '{name}')"
+            ))
+            .expect("seed insert");
+    }
+
+    executor
+        .execute("UPDATE users SET name = 'Anon' WHERE user_id = '2'")
+        .expect("update without leading column");
+    let result = executor
+        .query("SELECT name FROM users WHERE region = 'US' AND user_id = '2'")
+        .expect("select updated us row");
+    assert_eq!(result.rows()[0], vec![Some("Anon".to_string())]);
+    let result = executor
+        .query("SELECT name FROM users WHERE region = 'EU' AND user_id = '2'")
+        .expect("select updated eu row");
+    assert_eq!(result.rows()[0], vec![Some("Anon".to_string())]);
+
+    executor
+        .execute("UPDATE users SET name = 'Priority' WHERE region = 'US' AND user_id > '1'")
+        .expect("update range");
+    let result = executor
+        .query("SELECT user_id, name FROM users WHERE region = 'US' ORDER BY user_id")
+        .expect("select us rows after range update");
+    assert_eq!(
+        result.rows(),
+        vec![
+            vec![Some("1".to_string()), Some("Alice".to_string())],
+            vec![Some("2".to_string()), Some("Priority".to_string())],
+            vec![Some("3".to_string()), Some("Priority".to_string())],
+        ]
+    );
+
+    executor
+        .execute("UPDATE users SET name = 'Special' WHERE user_id = '1' OR user_id = '3'")
+        .expect("update with or");
+    let result = executor
+        .query(
+            "SELECT region, user_id, name FROM users WHERE user_id IN ('1','3') ORDER BY region, user_id",
+        )
+        .expect("select rows after OR update");
+    assert_eq!(
+        result.rows(),
+        vec![
+            vec![
+                Some("EU".to_string()),
+                Some("1".to_string()),
+                Some("Special".to_string())
+            ],
+            vec![
+                Some("US".to_string()),
+                Some("1".to_string()),
+                Some("Special".to_string())
+            ],
+            vec![
+                Some("US".to_string()),
+                Some("3".to_string()),
+                Some("Special".to_string())
+            ],
+        ]
+    );
+
+    executor
+        .execute("DELETE FROM users WHERE user_id = '3'")
+        .expect("delete without leading column");
+    let result = executor
+        .query("SELECT COUNT(*) FROM users WHERE user_id = '3'")
+        .expect("count after delete");
+    assert_eq!(result.rows()[0], vec![Some("0".to_string())]);
+
+    executor
+        .execute("DELETE FROM users WHERE region = 'EU' AND user_id >= '2'")
+        .expect("delete range");
+    let result = executor
+        .query("SELECT COUNT(*) FROM users WHERE region = 'EU'")
+        .expect("count eu rows");
+    assert_eq!(result.rows()[0], vec![Some("1".to_string())]);
+
+    executor
+        .execute("DELETE FROM users WHERE user_id = '1' OR user_id = '2'")
+        .expect("delete with or");
+    let result = executor
+        .query("SELECT COUNT(*) FROM users")
+        .expect("count all rows");
+    assert_eq!(result.rows()[0], vec![Some("0".to_string())]);
+}
+
+#[test]
+fn test_select_with_sort_key_prefix_predicates() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute(
+            "CREATE TABLE users (region TEXT, user_id TEXT, name TEXT) ORDER BY (region, user_id)",
+        )
+        .expect("create users");
+
+    let seed_rows = vec![
+        ("US", "1", "Alice"),
+        ("US", "2", "Bob"),
+        ("US", "3", "Carol"),
+        ("EU", "1", "Eve"),
+        ("EU", "2", "Mallory"),
+    ];
+    for (region, user_id, name) in seed_rows {
+        executor
+            .execute(&format!(
+                "INSERT INTO users (region, user_id, name) VALUES ('{region}', '{user_id}', '{name}')"
+            ))
+            .expect("seed insert");
+    }
+
+    let result = executor
+        .query(
+            "SELECT region, user_id, name FROM users WHERE user_id = '2' ORDER BY region, user_id",
+        )
+        .expect("select missing leading predicate");
+    assert_eq!(
+        result.rows(),
+        vec![
+            vec![
+                Some("EU".to_string()),
+                Some("2".to_string()),
+                Some("Mallory".to_string())
+            ],
+            vec![
+                Some("US".to_string()),
+                Some("2".to_string()),
+                Some("Bob".to_string())
+            ]
+        ]
+    );
+
+    let result = executor
+        .query(
+            "SELECT user_id, name FROM users WHERE region = 'US' AND user_id >= '2' ORDER BY user_id",
+        )
+        .expect("select with range");
+    assert_eq!(
+        result.rows(),
+        vec![
+            vec![Some("2".to_string()), Some("Bob".to_string())],
+            vec![Some("3".to_string()), Some("Carol".to_string())],
+        ]
+    );
+
+    let result = executor
+        .query(
+            "SELECT region, user_id FROM users WHERE user_id = '1' OR user_id = '3' ORDER BY region, user_id",
+        )
+        .expect("select with or");
+    assert_eq!(
+        result.rows(),
+        vec![
+            vec![Some("EU".to_string()), Some("1".to_string())],
+            vec![Some("US".to_string()), Some("1".to_string())],
+            vec![Some("US".to_string()), Some("3".to_string())],
+        ]
+    );
+}
+
+#[test]
+fn test_case_expression_prevents_divide_by_zero() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute("CREATE TABLE metrics (id BIGINT, price DOUBLE, discount DOUBLE) ORDER BY id")
+        .expect("create table");
+    executor
+        .execute("INSERT INTO metrics (id, price, discount) VALUES (1, 2793.41, 0)")
+        .expect("insert row");
+
+    let result = executor
+        .query(
+            "SELECT CASE WHEN discount = 0 THEN NULL ELSE price / discount END AS safe FROM metrics WHERE id = '1'",
+        )
+        .expect("query");
+    assert_eq!(result.rows(), vec![vec![None]]);
+}
+
+#[test]
+fn test_case_expression_with_multi_column_order_by() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute(
+            "CREATE TABLE metrics2 (id BIGINT, created_at TEXT, price DOUBLE, discount DOUBLE) ORDER BY (id, created_at)",
+        )
+        .expect("create table");
+    executor
+        .execute(
+            "INSERT INTO metrics2 (id, created_at, price, discount) VALUES (1, '2024-01-01 00:00:00', 2793.41, 0)",
+        )
+        .expect("insert row");
+    executor
+        .execute(
+            "INSERT INTO metrics2 (id, created_at, price, discount) VALUES (2, '2024-01-02 00:00:00', 100.0, 5.0)",
+        )
+        .expect("insert row 2");
+
+    let result = executor
+        .query(
+            "SELECT id, CASE WHEN discount = 0 THEN NULL ELSE price / discount END AS safe FROM metrics2 WHERE id <= 2 ORDER BY id",
+        )
+        .expect("query");
+    assert_eq!(
+        result.rows(),
+        vec![
+            vec![Some("1".to_string()), None],
+            vec![Some("2".to_string()), Some("20".to_string())]
+        ]
+    );
+}
+
+#[test]
+fn test_case_expression_inside_aggregate() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute(
+            "CREATE TABLE agg_case (id BIGINT, active BOOLEAN, price DOUBLE, net_amount DOUBLE) ORDER BY id",
+        )
+        .expect("create table");
+    executor
+        .execute("INSERT INTO agg_case (id, active, price, net_amount) VALUES (1, true, 600, 500)")
+        .expect("insert row 1");
+    executor
+        .execute("INSERT INTO agg_case (id, active, price, net_amount) VALUES (2, false, 300, 250)")
+        .expect("insert row 2");
+
+    let result = executor
+        .query(
+            "SELECT COUNT(*) AS total, SUM(CASE WHEN active THEN 1 ELSE 0 END) AS active_count, SUM(CASE WHEN price > 500 THEN net_amount ELSE 0 END) AS high_price_revenue FROM agg_case",
+        )
+        .expect("aggregate case query");
+    assert_eq!(
+        result.rows(),
+        vec![vec![
+            Some("2".to_string()),
+            Some("1".to_string()),
+            Some("500".to_string())
+        ]]
+    );
 }

@@ -3,7 +3,7 @@ use super::aggregates::AggregateDataset;
 use super::expressions::evaluate_row_expr;
 use super::helpers::parse_interval_seconds;
 use super::values::{ScalarValue, scalar_from_f64};
-use chrono::{Datelike, DateTime, Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Value};
 
 pub(super) fn evaluate_row_function(
@@ -370,7 +370,11 @@ fn scalar_to_seconds(value: &ScalarValue) -> Option<(f64, TimeValueKind)> {
         ScalarValue::Bool(v) => Some((if *v { 1.0 } else { 0.0 }, TimeValueKind::Numeric)),
         ScalarValue::Text(text) => parse_timestamp(text)
             .map(|dt| (datetime_to_seconds(&dt), TimeValueKind::DateTime))
-            .or_else(|| text.parse::<f64>().ok().map(|num| (num, TimeValueKind::Numeric))),
+            .or_else(|| {
+                text.parse::<f64>()
+                    .ok()
+                    .map(|num| (num, TimeValueKind::Numeric))
+            }),
     }
 }
 

@@ -4,7 +4,7 @@ use idk_uwu_ig::cache::page_cache::{
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{
-    PageDescriptor, PageDirectory, TableMetaStore, ROWS_PER_PAGE_GROUP,
+    PageDescriptor, PageDirectory, ROWS_PER_PAGE_GROUP, TableMetaStore,
 };
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;

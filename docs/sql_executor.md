@@ -85,23 +85,28 @@ SQL Text
    - Flush writes complete page group atomically across all columns
 
 ### UPDATE
-1. Require a `WHERE` clause composed of `column = literal` predicates
-2. Validate that every ORDER BY column has an equality predicate
-3. Binary-search the leading ORDER BY column to locate candidate rows
+1. Require a `WHERE` clause for selective rewrites (full-table updates still fall back to a scan)
+2. Attempt to extract equality predicates over the leading ORDER BY columns; any prefix match
+   enables a binary search over that subset, while the remaining predicate (ranges, `IN`, `OR`, etc.)
+   is evaluated after materialising only the matching slice
+3. If no ORDER BY prefix is available, fall back to the vectorised full-table scan
 4. Apply assignments:
    - If ORDER BY columns remain unchanged, call `overwrite_row`
    - If an ORDER BY column changes, `delete_row` + `insert_sorted_row`
 5. Submit UpdateJob to Writer for atomic persistence
 
 ### DELETE
-1. Same predicate restrictions as UPDATE (equality on ORDER BY columns)
-2. Locate the target row(s) via the ORDER BY tuple search
+1. Same predicate handling as UPDATE (ORDER BY prefix lookup when possible, otherwise vectorised scan)
+2. Locate the target row(s) via the ORDER BY tuple search or scan fallback
 3. Remove rows from all columns using `delete_row`, which updates metadata
 4. Submit UpdateJob to Writer
 
 ## SELECT Execution (`src/sql/executor/mod.rs`)
 
 The SQL executor provides full SELECT support with aggregates, expressions, WHERE filtering, ORDER BY, LIMIT/OFFSET, and GROUP BY.
+Predicates that constrain a leading prefix of the table's ORDER BY columns reuse the same binary
+search fast path as UPDATE/DELETE, falling back to a vectorised scan only when no sortable prefix
+can be extracted.
 
 ### Query Processing Pipeline
 

@@ -69,11 +69,8 @@ pub fn setup_executor() -> ExecutorHarness {
     ));
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
     let use_writer = should_use_writer_inserts();
-    let executor = SqlExecutor::new_with_writer_mode(
-        Arc::clone(&handler),
-        Arc::clone(&directory),
-        use_writer,
-    );
+    let executor =
+        SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), use_writer);
     ExecutorHarness {
         executor,
         handler,
@@ -154,11 +151,15 @@ impl MassiveFixtureConfig {
             match value.parse::<usize>() {
                 Ok(rows) if rows > 0 => rows,
                 Ok(_) => {
-                    eprintln!("SATORI_MASSIVE_FIXTURE_ROWS must be greater than zero, using default");
+                    eprintln!(
+                        "SATORI_MASSIVE_FIXTURE_ROWS must be greater than zero, using default"
+                    );
                     default_test_rows
                 }
                 Err(err) => {
-                    eprintln!("failed to parse SATORI_MASSIVE_FIXTURE_ROWS ('{value}'): {err}, using default");
+                    eprintln!(
+                        "failed to parse SATORI_MASSIVE_FIXTURE_ROWS ('{value}'): {err}, using default"
+                    );
                     default_test_rows
                 }
             }
@@ -722,7 +723,8 @@ fn compare_results(
         for (col_idx, (lhs_val, rhs_val)) in lhs.values.iter().zip(rhs.values.iter()).enumerate() {
             if !lhs_val.equals_with_tol(rhs_val, options.float_abs_tol, options.float_rel_tol) {
                 panic!(
-                    "value mismatch at row {idx}, column {col_idx}: ours={lhs_val:?} duck={rhs_val:?}"
+                    "value mismatch at row {idx}, column {col_idx}: ours={lhs_val:?} duck={rhs_val:?} | row ours={:?} duck={:?}",
+                    lhs.values, rhs.values
                 );
             }
         }

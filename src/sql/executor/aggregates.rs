@@ -1,9 +1,9 @@
+use super::GroupKey;
 use super::SqlExecutionError;
-use super::batch::{ColumnarPage, ColumnData};
+use super::batch::{ColumnData, ColumnarPage};
 use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
 use super::helpers::collect_expr_column_ordinals;
 use super::values::{CachedValue, ScalarValue, format_float, scalar_from_f64};
-use super::GroupKey;
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, SelectItem};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -69,23 +69,21 @@ impl AggregateFunctionPlan {
                 }
                 if function.args.len() == 1 {
                     match &function.args[0] {
-                        FunctionArg::Unnamed(arg) | FunctionArg::Named { arg, .. } => {
-                            match arg {
-                                FunctionArgExpr::Wildcard => Ok(Self {
-                                    kind: AggregateFunctionKind::CountStar,
-                                    arg: None,
-                                }),
-                                FunctionArgExpr::Expr(expr) => Ok(Self {
-                                    kind: AggregateFunctionKind::CountExpr,
-                                    arg: Some(expr.clone()),
-                                }),
-                                FunctionArgExpr::QualifiedWildcard(_) => Err(
-                                    SqlExecutionError::Unsupported(
-                                        "vectorized COUNT does not support qualified *".into(),
-                                    ),
-                                ),
+                        FunctionArg::Unnamed(arg) | FunctionArg::Named { arg, .. } => match arg {
+                            FunctionArgExpr::Wildcard => Ok(Self {
+                                kind: AggregateFunctionKind::CountStar,
+                                arg: None,
+                            }),
+                            FunctionArgExpr::Expr(expr) => Ok(Self {
+                                kind: AggregateFunctionKind::CountExpr,
+                                arg: Some(expr.clone()),
+                            }),
+                            FunctionArgExpr::QualifiedWildcard(_) => {
+                                Err(SqlExecutionError::Unsupported(
+                                    "vectorized COUNT does not support qualified *".into(),
+                                ))
                             }
-                        }
+                        },
                     }
                 } else {
                     Err(SqlExecutionError::Unsupported(
@@ -284,7 +282,13 @@ fn numeric_value(page: &ColumnarPage, idx: usize) -> Option<f64> {
     match &page.data {
         ColumnData::Int64(values) => values.get(idx).copied().map(|v| v as f64),
         ColumnData::Float64(values) => values.get(idx).copied(),
-        _ => None,
+        ColumnData::Text(values) => values.get(idx).and_then(|value| {
+            if value.is_empty() {
+                None
+            } else {
+                value.parse::<f64>().ok()
+            }
+        }),
     }
 }
 

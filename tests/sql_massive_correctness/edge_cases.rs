@@ -231,8 +231,8 @@ fn very_small_numbers() {
     let mut options = QueryOptions::default();
     options.order_matters = true;
     options.skip_if_unsupported = true;
-    options.float_abs_tol = 1e-6;  // Very loose tolerance for tiny numbers
-    options.float_rel_tol = 0.2;    // 20% relative tolerance for very small divisions
+    options.float_abs_tol = 1e-6; // Very loose tolerance for tiny numbers
+    options.float_rel_tol = 0.2; // 20% relative tolerance for very small divisions
     assert_query_matches(&executor, &fixture, &sql, options);
 }
 

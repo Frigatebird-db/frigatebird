@@ -1,6 +1,6 @@
 use idk_uwu_ig::metadata_store::{
-    ColumnDefinition, DEFAULT_TABLE, PageDirectory, PendingPage, TableDefinition, TableMetaStore,
-    ROWS_PER_PAGE_GROUP,
+    ColumnDefinition, DEFAULT_TABLE, PageDirectory, PendingPage, ROWS_PER_PAGE_GROUP,
+    TableDefinition, TableMetaStore,
 };
 use std::sync::{Arc, RwLock};
 
@@ -176,8 +176,7 @@ fn register_batch_replaces_tail_and_updates_prefix() {
     }];
     store.register_batch(&third);
 
-    let slices =
-        store.locate_range(DEFAULT_TABLE, "users", 0, ROWS_PER_PAGE_GROUP + 15);
+    let slices = store.locate_range(DEFAULT_TABLE, "users", 0, ROWS_PER_PAGE_GROUP + 15);
     assert_eq!(slices.len(), 2);
     assert_eq!(slices[0].descriptor.entry_count, 8);
     assert_eq!(slices[1].descriptor.entry_count, 16);

@@ -124,8 +124,7 @@ impl<T> PageCache<T> {
 
     pub fn add(&mut self, id: &str, page: T) {
         if let Some(entry) = self.store.get(id) {
-            self.lru_queue
-                .remove(&(entry.used_time, String::from(id)));
+            self.lru_queue.remove(&(entry.used_time, String::from(id)));
         }
 
         let used_time = current_epoch_millis();
