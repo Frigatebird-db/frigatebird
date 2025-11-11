@@ -2,6 +2,5 @@
 
 test:
 	@set -e; \
-	cargo test; \
-	cargo test --doc; \
+	cargo test --release ; \
 	rm -rf wal_files
