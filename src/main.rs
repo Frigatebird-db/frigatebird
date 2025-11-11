@@ -20,7 +20,7 @@ mod wal;
 mod writer;
 use cache::lifecycle::{CompressedToDiskLifecycle, UncompressedToCompressedLifecycle};
 use helpers::compressor::Compressor;
-use metadata_store::{PageDirectory, TableMetaStore};
+use metadata_store::{MetaJournal, PageDirectory, TableMetaStore};
 use std::sync::{Arc, RwLock};
 
 fn main() {
@@ -63,21 +63,37 @@ fn main() {
 
     let allocator: Arc<dyn PageAllocator> =
         Arc::new(DirectBlockAllocator::new().expect("allocator init failed"));
-    let metadata_client: Arc<dyn MetadataClient> =
-        Arc::new(DirectoryMetadataClient::new(Arc::clone(&page_directory)));
-    let walrus = Arc::new(
-        Walrus::with_consistency_and_schedule(
+    let metadata_client: Arc<dyn MetadataClient>;
+    let writer_wal = Arc::new(
+        Walrus::with_consistency_and_schedule_for_key(
+            "satori-writer",
             ReadConsistency::StrictlyAtOnce,
             FsyncSchedule::SyncEach,
         )
-        .expect("wal init failed"),
+        .expect("writer wal init failed"),
     );
+    let meta_wal = Arc::new(
+        Walrus::with_consistency_and_schedule_for_key(
+            "satori-meta",
+            ReadConsistency::StrictlyAtOnce,
+            FsyncSchedule::SyncEach,
+        )
+        .expect("metadata wal init failed"),
+    );
+    let meta_journal = Arc::new(MetaJournal::new(Arc::clone(&meta_wal), 16));
+    meta_journal
+        .replay_into(&page_directory)
+        .expect("metadata journal replay failed");
+    metadata_client = Arc::new(DirectoryMetadataClient::new(
+        Arc::clone(&page_directory),
+        Arc::clone(&meta_journal),
+    ));
 
     let _writer = Writer::new(
         Arc::clone(&page_handler),
         Arc::clone(&allocator),
         Arc::clone(&metadata_client),
-        Arc::clone(&walrus),
+        Arc::clone(&writer_wal),
     );
 
     // cleanup

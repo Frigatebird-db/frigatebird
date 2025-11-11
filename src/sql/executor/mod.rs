@@ -17,7 +17,8 @@ use self::spill::SpillManager;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{
-    ColumnCatalog, ColumnStats, ColumnStatsKind, PageDescriptor, PageDirectory, TableCatalog,
+    ColumnCatalog, ColumnStats, ColumnStatsKind, MetaJournal, PageDescriptor, PageDirectory,
+    TableCatalog,
 };
 use crate::ops_handler::{
     create_table_from_plan, delete_row, insert_sorted_row, overwrite_row, read_row,
@@ -818,8 +819,6 @@ impl SqlExecutor {
     ) -> Self {
         let allocator: Arc<dyn PageAllocator> =
             Arc::new(DirectBlockAllocator::new().expect("allocator init failed"));
-        let metadata_client: Arc<dyn MetadataClient> =
-            Arc::new(DirectoryMetadataClient::new(Arc::clone(&page_directory)));
         let wal_id = SQL_EXECUTOR_WAL_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         let wal_namespace = format!("{SQL_EXECUTOR_WAL_PREFIX}{wal_id}");
         ensure_sql_executor_wal_root();
@@ -832,6 +831,23 @@ impl SqlExecutor {
             )
             .expect("wal init failed"),
         );
+        let meta_namespace = format!("{wal_namespace}-meta");
+        let meta_wal = Arc::new(
+            Walrus::with_consistency_and_schedule_for_key(
+                &meta_namespace,
+                ReadConsistency::StrictlyAtOnce,
+                FsyncSchedule::SyncEach,
+            )
+            .expect("metadata wal init failed"),
+        );
+        let meta_journal = Arc::new(MetaJournal::new(Arc::clone(&meta_wal), 16));
+        meta_journal
+            .replay_into(&page_directory)
+            .expect("metadata journal replay failed");
+        let metadata_client: Arc<dyn MetadataClient> = Arc::new(DirectoryMetadataClient::new(
+            Arc::clone(&page_directory),
+            Arc::clone(&meta_journal),
+        ));
         let writer = Arc::new(Writer::new(
             Arc::clone(&page_handler),
             allocator,
