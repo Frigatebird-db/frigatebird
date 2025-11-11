@@ -1,4 +1,4 @@
-use crate::metadata_store::{ColumnStats, PageDirectory, PendingPage};
+use crate::metadata_store::{ColumnDefinition, ColumnStats, PageDirectory, PendingPage, TableDefinition};
 use crate::wal::Walrus;
 use rkyv::{
     AlignedVec, Archive, Deserialize as RkyvDeserialize, Infallible, Serialize as RkyvSerialize,
@@ -23,10 +23,23 @@ pub struct MetaJournalEntry {
 
 #[derive(Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 #[archive(check_bytes)]
+pub struct JournalColumnDef {
+    pub name: String,
+    pub data_type: String,
+}
+
+#[derive(Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[archive(check_bytes)]
 pub enum MetaRecord {
     PublishPages {
         table: String,
         entries: Vec<MetaJournalEntry>,
+    },
+    CreateTable {
+        name: String,
+        columns: Vec<JournalColumnDef>,
+        sort_key: Vec<String>,
+        rows_per_page_group: u64,
     },
 }
 
@@ -83,6 +96,10 @@ impl MetaJournal {
     fn apply_record(&self, directory: &Arc<PageDirectory>, record: MetaRecord) {
         match record {
             MetaRecord::PublishPages { table, entries } => {
+                for entry in &entries {
+                    eprintln!("[journal_replay] PublishPages: table={}, column={}, path={}, offset={}, entry_count={}, replace_last={}",
+                        table, entry.column, entry.disk_path, entry.offset, entry.entry_count, entry.replace_last);
+                }
                 let pending: Vec<PendingPage> = entries
                     .into_iter()
                     .map(|entry| PendingPage {
@@ -99,6 +116,28 @@ impl MetaJournal {
                     })
                     .collect();
                 directory.register_batch(&pending);
+            }
+            MetaRecord::CreateTable {
+                name,
+                columns,
+                sort_key,
+                rows_per_page_group,
+            } => {
+                eprintln!(
+                    "[journal_replay] CreateTable: name={}, sort_key={:?}",
+                    name, sort_key
+                );
+                let column_defs: Vec<ColumnDefinition> = columns
+                    .into_iter()
+                    .map(|col| ColumnDefinition::new(col.name, col.data_type))
+                    .collect();
+                let table_def = TableDefinition {
+                    name,
+                    columns: column_defs,
+                    sort_key,
+                    rows_per_page_group,
+                };
+                let _ = directory.force_register_table(table_def);
             }
         }
     }

@@ -7,7 +7,7 @@ use idk_uwu_ig::writer::executor::{DirectoryMetadataClient, MetadataClient, Meta
 use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use tempfile::TempDir;
 
 static META_WAL_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
@@ -16,6 +16,7 @@ static META_WAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
 struct MetadataWalGuard {
     wal: Arc<Walrus>,
     _dir: TempDir,
+    _lock: MutexGuard<'static, ()>,
 }
 
 impl MetadataWalGuard {
@@ -23,7 +24,7 @@ impl MetadataWalGuard {
         let lock = META_WAL_MUTEX
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("metadata wal mutex poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let dir = TempDir::new().expect("create wal temp dir");
         let prev = env::var("WALRUS_DATA_DIR").ok();
         unsafe {
@@ -47,8 +48,11 @@ impl MetadataWalGuard {
                 env::remove_var("WALRUS_DATA_DIR");
             }
         }
-        drop(lock);
-        MetadataWalGuard { wal, _dir: dir }
+        MetadataWalGuard {
+            wal,
+            _dir: dir,
+            _lock: lock,
+        }
     }
 
     fn wal(&self) -> Arc<Walrus> {

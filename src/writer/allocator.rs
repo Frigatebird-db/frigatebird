@@ -32,16 +32,18 @@ struct FileState {
     offset: u64,
     file: File,
     max_size: u64,
+    data_dir: String,
 }
 
 impl FileState {
-    fn open(file_id: u32) -> io::Result<Self> {
-        let file = open_data_file(file_id)?;
+    fn open(file_id: u32, data_dir: String) -> io::Result<Self> {
+        let file = open_data_file(file_id, &data_dir)?;
         Ok(FileState {
             file_id,
             offset: 0,
             file,
             max_size: FILE_MAX_BYTES,
+            data_dir,
         })
     }
 
@@ -51,7 +53,7 @@ impl FileState {
         }
 
         self.file_id += 1;
-        self.file = open_data_file(self.file_id)?;
+        self.file = open_data_file(self.file_id, &self.data_dir)?;
         self.offset = 0;
         Ok(())
     }
@@ -60,7 +62,7 @@ impl FileState {
         self.ensure_capacity(alloc_len)?;
         let allocation = PageAllocation {
             file_id: self.file_id,
-            path: data_file_path(self.file_id).to_string_lossy().to_string(),
+            path: data_file_path(self.file_id, &self.data_dir).to_string_lossy().to_string(),
             offset: self.offset,
             actual_len,
             alloc_len,
@@ -70,19 +72,19 @@ impl FileState {
     }
 }
 
-fn data_file_path(file_id: u32) -> PathBuf {
-    Path::new(DATA_DIR).join(format!("data.{file_id:05}"))
+fn data_file_path(file_id: u32, data_dir: &str) -> PathBuf {
+    Path::new(data_dir).join(format!("data.{file_id:05}"))
 }
 
-fn open_data_file(file_id: u32) -> io::Result<File> {
-    fs::create_dir_all(DATA_DIR)?;
+fn open_data_file(file_id: u32, data_dir: &str) -> io::Result<File> {
+    fs::create_dir_all(data_dir)?;
     let mut opts = OpenOptions::new();
     opts.read(true).write(true).create(true);
     #[cfg(target_os = "linux")]
     {
         opts.custom_flags(libc::O_DIRECT);
     }
-    opts.open(data_file_path(file_id))
+    opts.open(data_file_path(file_id, data_dir))
 }
 
 fn round_up_4k(len: u64) -> u64 {
@@ -110,13 +112,17 @@ pub struct DirectBlockAllocator {
 
 impl DirectBlockAllocator {
     pub fn new() -> io::Result<Self> {
+        Self::with_data_dir(DATA_DIR)
+    }
+
+    pub fn with_data_dir(data_dir: impl Into<String>) -> io::Result<Self> {
         if BLOCK_SIZE % ALIGN_4K != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "BLOCK_SIZE must be 4K aligned",
             ));
         }
-        let state = FileState::open(0)?;
+        let state = FileState::open(0, data_dir.into())?;
         Ok(DirectBlockAllocator {
             state: Mutex::new(state),
         })

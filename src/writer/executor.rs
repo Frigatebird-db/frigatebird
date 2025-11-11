@@ -371,6 +371,7 @@ impl WorkerContext {
             return;
         }
         let total_rows = rows.len();
+        eprintln!("[flush_page_group] table={}, initial rows={}", table, total_rows);
 
         let catalog = match self.page_handler.table_catalog(table) {
             Some(catalog) => catalog,
@@ -392,13 +393,23 @@ impl WorkerContext {
             return;
         }
 
+        let sort_key_columns = catalog.sort_key();
         let sort_key_ordinals: Vec<usize> =
-            catalog.sort_key().iter().map(|col| col.ordinal).collect();
+            sort_key_columns.iter().map(|col| col.ordinal).collect();
 
         if sort_key_ordinals.is_empty() {
             eprintln!(
-                "writer: unable to flush rows for table {} - missing sort key",
-                table
+                "writer: unable to flush rows for table {} - missing sort key (columns={:?}, sort_key_columns={:?})",
+                table,
+                catalog
+                    .columns()
+                    .iter()
+                    .map(|col| col.name.clone())
+                    .collect::<Vec<_>>(),
+                sort_key_columns
+                    .iter()
+                    .map(|col| col.name.clone())
+                    .collect::<Vec<_>>()
             );
             return;
         }
@@ -406,6 +417,7 @@ impl WorkerContext {
         rows.sort_unstable_by(|left, right| compare_rows(left, right, &sort_key_ordinals));
 
         self.extend_partial_tail(table, &columns, catalog.rows_per_page_group, &mut rows);
+        eprintln!("[flush_page_group] after extend_partial_tail, rows remaining={}", rows.len());
 
         let full_group_size = catalog.rows_per_page_group as usize;
         while rows.len() >= full_group_size {
@@ -523,6 +535,7 @@ impl WorkerContext {
         }
 
         if !staged.is_empty() {
+            eprintln!("[extend_partial_tail] publishing {} staged columns, extending with {} rows", staged.len(), take);
             self.publish_staged_columns(table, staged);
             rows.drain(0..take);
         }

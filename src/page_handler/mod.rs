@@ -7,8 +7,10 @@ use crate::metadata_store::{
     CatalogError, PageDescriptor, PageDirectory, PageSlice, RowLocation, TableCatalog,
 };
 use crate::page_handler::page_io::PageIO;
+use bincode;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -472,6 +474,23 @@ impl PageHandler {
 
     pub fn write_back_uncompressed(&self, id: &str, page: PageCacheEntryUncompressed) {
         self.materializer.write_back(id, page);
+    }
+
+    pub fn persist_descriptor_page(
+        &self,
+        descriptor: &PageDescriptor,
+        page: &PageCacheEntryUncompressed,
+    ) -> io::Result<()> {
+        let disk_page = page.as_disk_page();
+        let serialized = bincode::serialize(&disk_page)
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("serialize page failed: {err}")))?;
+        self.fetcher
+            .page_io
+            .write_to_path(&descriptor.disk_path, descriptor.offset, serialized)?;
+        if let Ok(mut cache) = self.fetcher.compressed_page_cache.write() {
+            cache.evict(&descriptor.id);
+        }
+        Ok(())
     }
 
     pub fn flush_to_disk(&self, ids: &[String]) -> Result<(), std::io::Error> {

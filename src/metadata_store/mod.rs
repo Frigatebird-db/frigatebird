@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 pub mod journal;
-pub use journal::{MetaJournal, MetaJournalEntry, MetaRecord};
+pub use journal::{JournalColumnDef, MetaJournal, MetaJournalEntry, MetaRecord};
 
 pub const DEFAULT_TABLE: &str = "_default";
 pub const ROWS_PER_PAGE_GROUP: u64 = 8192;
@@ -438,14 +438,13 @@ impl TableMetaStore {
         self.column_chains.insert(key, ColumnChain::new());
     }
 
-    pub fn register_table(&mut self, definition: TableDefinition) -> Result<(), CatalogError> {
-        let TableDefinition {
-            name,
-            columns,
-            sort_key,
-            rows_per_page_group,
-        } = definition;
-
+    fn do_register_table(
+        &mut self,
+        name: String,
+        columns: Vec<ColumnDefinition>,
+        sort_key: Vec<String>,
+        rows_per_page_group: u64,
+    ) -> Result<(), CatalogError> {
         if self.tables.contains_key(&name) {
             return Err(CatalogError::TableExists(name.clone()));
         }
@@ -506,6 +505,65 @@ impl TableMetaStore {
             rows_per_page_group,
         );
         self.tables.insert(name, catalog);
+        Ok(())
+    }
+
+    pub fn register_table(&mut self, definition: TableDefinition) -> Result<(), CatalogError> {
+        let TableDefinition {
+            name,
+            columns,
+            sort_key,
+            rows_per_page_group,
+        } = definition;
+        self.do_register_table(name, columns, sort_key, rows_per_page_group)
+    }
+
+    pub fn force_register_table(
+        &mut self,
+        definition: TableDefinition,
+    ) -> Result<(), CatalogError> {
+        let TableDefinition {
+            name,
+            columns,
+            sort_key,
+            rows_per_page_group,
+        } = definition;
+        if !self.tables.contains_key(&name) {
+            return self.do_register_table(name, columns, sort_key, rows_per_page_group);
+        }
+
+        let catalog = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(name.clone()))?;
+        for column in columns {
+            if catalog.insert_column(column.name.clone(), column.data_type) {
+                let key = TableColumnKey::new(&name, &column.name);
+                self.column_chains
+                    .entry(key)
+                    .or_insert_with(ColumnChain::new);
+            }
+        }
+
+        let mut seen_sort = HashSet::with_capacity(sort_key.len());
+        let mut ordinals = Vec::with_capacity(sort_key.len());
+        for key in sort_key {
+            if !seen_sort.insert(key.clone()) {
+                return Err(CatalogError::DuplicateSortKey {
+                    table: name.clone(),
+                    column: key,
+                });
+            }
+            let ordinal = catalog.column_index.get(&key).cloned().ok_or_else(|| {
+                CatalogError::UnknownColumn {
+                    table: name.clone(),
+                    column: key.clone(),
+                }
+            })?;
+            ordinals.push(ordinal);
+        }
+        catalog.sort_key_ordinals = ordinals;
+        catalog.rows_per_page_group = rows_per_page_group;
         Ok(())
     }
 
@@ -729,13 +787,17 @@ impl TableMetaStore {
                 if page.replace_last {
                     old_id = chain.last().map(|p| p.id.clone());
                     if old_id.is_some() {
+                        eprintln!("[register_batch] replacing last page for {}.{}, old_id={:?}, new entry_count={}", page.table, page.column, old_id, page.entry_count);
                         chain.replace_last(descriptor.clone());
                     } else {
+                        eprintln!("[register_batch] replace_last=true but chain is empty, pushing for {}.{}", page.table, page.column);
                         chain.push(descriptor.clone());
                     }
                 } else {
+                    eprintln!("[register_batch] pushing new page for {}.{}, entry_count={}", page.table, page.column, page.entry_count);
                     chain.push(descriptor.clone());
                 }
+                eprintln!("[register_batch] chain for {}.{} now has {} pages", page.table, page.column, chain.pages.len());
             } else {
                 continue;
             }
@@ -812,6 +874,14 @@ impl PageDirectory {
             .write()
             .map_err(|_| CatalogError::StoreUnavailable)?;
         guard.register_table(definition)
+    }
+
+    pub fn force_register_table(&self, definition: TableDefinition) -> Result<(), CatalogError> {
+        let mut guard = self
+            .store
+            .write()
+            .map_err(|_| CatalogError::StoreUnavailable)?;
+        guard.force_register_table(definition)
     }
 
     pub fn add_columns_to_table(
