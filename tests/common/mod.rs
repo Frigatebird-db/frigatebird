@@ -8,14 +8,14 @@ use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutionError, SqlExecutor};
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use rand::distributions::{Alphanumeric, DistString};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 // Re-export commonly used types for test modules
 pub use idk_uwu_ig::sql::executor::{
@@ -414,9 +414,25 @@ fn random_code(index: usize, rng: &mut StdRng) -> String {
     buf
 }
 
+static MASSIVE_FIXTURE_SERIAL_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+struct SerialFixtureGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl SerialFixtureGuard {
+    fn new() -> Self {
+        let guard = MASSIVE_FIXTURE_SERIAL_LOCK
+            .lock()
+            .expect("massive fixture lock poisoned");
+        SerialFixtureGuard { _guard: guard }
+    }
+}
+
 pub struct MassiveFixture {
     dataset: Arc<BigFixtureDataset>,
     duckdb: Connection,
+    _serial_guard: SerialFixtureGuard,
 }
 
 impl MassiveFixture {
@@ -425,6 +441,7 @@ impl MassiveFixture {
     }
 
     pub fn install_with_config(executor: &SqlExecutor, config: MassiveFixtureConfig) -> Self {
+        let serial_guard = SerialFixtureGuard::new();
         let dataset = dataset(&config);
         executor
             .execute(&dataset.create_sql)
@@ -460,7 +477,11 @@ impl MassiveFixture {
             );
         }
 
-        MassiveFixture { dataset, duckdb }
+        MassiveFixture {
+            dataset,
+            duckdb,
+            _serial_guard: serial_guard,
+        }
     }
 
     pub fn table_name(&self) -> &'static str {
