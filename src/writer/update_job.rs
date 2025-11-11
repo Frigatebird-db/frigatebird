@@ -1,7 +1,9 @@
 use crate::entry::Entry;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// Represents a per-column mutation batch within an update job.
-#[derive(Clone)]
+#[derive(Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[archive(check_bytes)]
 pub struct ColumnUpdate {
     pub column: String,
     pub operations: Vec<UpdateOp>,
@@ -17,7 +19,8 @@ impl ColumnUpdate {
 }
 
 /// Individual mutations that can be applied to a page.
-#[derive(Clone)]
+#[derive(Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[archive(check_bytes)]
 pub enum UpdateOp {
     /// Overwrite a specific logical row with the provided entry.
     Overwrite { row: u64, entry: Entry },
@@ -30,7 +33,8 @@ pub enum UpdateOp {
 }
 
 /// A unit of work handed to the Writer.
-#[derive(Clone)]
+#[derive(Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[archive(check_bytes)]
 pub struct UpdateJob {
     pub table: String,
     pub columns: Vec<ColumnUpdate>,

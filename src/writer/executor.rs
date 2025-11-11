@@ -7,11 +7,14 @@ use crate::metadata_store::{
 use crate::page::Page;
 use crate::page_handler::{PageHandler, page_io::PageIO};
 use crate::sql::executor::batch::{ColumnData, ColumnarPage};
+use crate::wal::Walrus;
+use crate::writer::GLOBAL_WRITER_SHARD_COUNT;
 use crate::writer::allocator::PageAllocator;
 use crate::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
-use crate::writer::GLOBAL_WRITER_SHARD_COUNT;
 use bincode;
 use crossbeam::channel::{self, Receiver, Sender};
+use rkyv::Deserialize as RkyvDeserialize;
+use rkyv::{AlignedVec, Infallible, archived_root, to_bytes};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeSet, HashMap};
 use std::io;
@@ -25,6 +28,9 @@ use std::thread::{self, JoinHandle};
 pub trait MetadataClient: Send + Sync {
     fn latest_descriptor(&self, table: &str, column: &str) -> Option<PageDescriptor>;
     fn commit(&self, table: &str, updates: Vec<MetadataUpdate>) -> Vec<PageDescriptor>;
+    fn table_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Describes a staged update ready to be made visible.
@@ -64,6 +70,10 @@ impl MetadataClient for NoopMetadataClient {
                 stats: update.stats,
             })
             .collect()
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -147,6 +157,10 @@ impl MetadataClient for DirectoryMetadataClient {
             .collect();
         self.directory.register_batch(&pending)
     }
+
+    fn table_names(&self) -> Vec<String> {
+        self.directory.table_names()
+    }
 }
 
 enum WriterMessage {
@@ -159,8 +173,16 @@ struct WorkerContext {
     page_handler: Arc<PageHandler>,
     allocator: Arc<dyn PageAllocator>,
     metadata: Arc<dyn MetadataClient>,
+    wal: Arc<Walrus>,
     rx: Receiver<WriterMessage>,
     buffered_rows: HashMap<String, Vec<Vec<String>>>,
+    wal_mode: WalAckMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalAckMode {
+    Runtime,
+    Replay,
 }
 
 impl WorkerContext {
@@ -188,6 +210,7 @@ impl WorkerContext {
         }
 
         self.publish_staged_columns(&table, staged);
+        self.ack_wal_entries(&table, 1);
     }
 
     fn stage_column(&self, table: &str, update: ColumnUpdate) -> Option<StagedColumn> {
@@ -271,6 +294,22 @@ impl WorkerContext {
         }
     }
 
+    fn ack_wal_entries(&self, table: &str, mut count: usize) {
+        if matches!(self.wal_mode, WalAckMode::Replay) || count == 0 {
+            return;
+        }
+        while count > 0 {
+            match self.wal.read_next(table, true) {
+                Ok(Some(_)) => count -= 1,
+                Ok(None) => break,
+                Err(err) => {
+                    eprintln!("writer: wal ack failed for table {}: {}", table, err);
+                    break;
+                }
+            }
+        }
+    }
+
     fn buffer_row(&mut self, table: &str, row: Vec<String>) {
         let rows_per_group = self
             .page_handler
@@ -295,6 +334,7 @@ impl WorkerContext {
         if rows.is_empty() {
             return;
         }
+        let total_rows = rows.len();
 
         let catalog = match self.page_handler.table_catalog(table) {
             Some(catalog) => catalog,
@@ -340,6 +380,8 @@ impl WorkerContext {
         if !rows.is_empty() {
             self.stage_rows_as_new_group(table, &columns, rows);
         }
+
+        self.ack_wal_entries(table, total_rows);
     }
 
     fn flush_pending(&mut self, table: &str) {
@@ -558,6 +600,7 @@ struct WriterShard {
 /// Sharded writer that serializes updates per table while allowing parallel tables.
 pub struct Writer {
     shards: Vec<WriterShard>,
+    wal: Arc<Walrus>,
     is_shutdown: AtomicBool,
 }
 
@@ -566,19 +609,27 @@ impl Writer {
         page_handler: Arc<PageHandler>,
         allocator: Arc<dyn PageAllocator>,
         metadata: Arc<dyn MetadataClient>,
+        wal: Arc<Walrus>,
     ) -> Self {
-        let shard_count = GLOBAL_WRITER_SHARD_COUNT
-            .load(Ordering::Acquire)
-            .max(1);
-        Writer::with_shard_count(page_handler, allocator, metadata, shard_count)
+        let shard_count = GLOBAL_WRITER_SHARD_COUNT.load(Ordering::Acquire).max(1);
+        Writer::with_shard_count(page_handler, allocator, metadata, wal, shard_count)
     }
 
     pub fn with_shard_count(
         page_handler: Arc<PageHandler>,
         allocator: Arc<dyn PageAllocator>,
         metadata: Arc<dyn MetadataClient>,
+        wal: Arc<Walrus>,
         shard_count: usize,
     ) -> Self {
+        Self::replay_pending_jobs(
+            Arc::clone(&page_handler),
+            Arc::clone(&allocator),
+            Arc::clone(&metadata),
+            Arc::clone(&wal),
+        )
+        .expect("writer: wal replay failed");
+
         let shard_total = shard_count.max(1);
         let mut shards = Vec::with_capacity(shard_total);
         for _ in 0..shard_total {
@@ -588,8 +639,10 @@ impl Writer {
                 page_handler: Arc::clone(&page_handler),
                 allocator: Arc::clone(&allocator),
                 metadata: Arc::clone(&metadata),
+                wal: Arc::clone(&wal),
                 rx,
                 buffered_rows: HashMap::new(),
+                wal_mode: WalAckMode::Runtime,
             };
             let shutdown_flag = Arc::clone(&is_shutdown);
             let handle = thread::spawn(move || run_worker(ctx, shutdown_flag));
@@ -602,6 +655,7 @@ impl Writer {
 
         Writer {
             shards,
+            wal,
             is_shutdown: AtomicBool::new(false),
         }
     }
@@ -610,6 +664,7 @@ impl Writer {
         if self.is_shutdown.load(Ordering::Acquire) {
             return Err(WriterError::Shutdown);
         }
+        self.append_to_wal(&job)?;
         let shard_index = self.shard_index_for_table(&job.table);
         self.send_job_to_shard(shard_index, WriterMessage::Job(job))
     }
@@ -654,6 +709,57 @@ impl Writer {
                 let _ = handle.join();
             }
         }
+    }
+
+    fn append_to_wal(&self, job: &UpdateJob) -> Result<(), WriterError> {
+        let bytes: AlignedVec = to_bytes::<_, 512>(job)
+            .map_err(|err| WriterError::Serialization(format!("{err:?}")))?;
+        self.wal
+            .append_for_topic(&job.table, &bytes)
+            .map_err(WriterError::Wal)
+    }
+
+    fn replay_pending_jobs(
+        page_handler: Arc<PageHandler>,
+        allocator: Arc<dyn PageAllocator>,
+        metadata: Arc<dyn MetadataClient>,
+        wal: Arc<Walrus>,
+    ) -> Result<(), WriterError> {
+        let tables = metadata.table_names();
+        if tables.is_empty() {
+            return Ok(());
+        }
+
+        let (_stub_tx, stub_rx) = channel::unbounded::<WriterMessage>();
+        let mut ctx = WorkerContext {
+            page_handler,
+            allocator,
+            metadata,
+            wal: Arc::clone(&wal),
+            rx: stub_rx,
+            buffered_rows: HashMap::new(),
+            wal_mode: WalAckMode::Replay,
+        };
+
+        for table in tables {
+            loop {
+                match wal.read_next(&table, true) {
+                    Ok(Some(entry)) => {
+                        let mut aligned = AlignedVec::with_capacity(entry.data.len());
+                        aligned.extend_from_slice(&entry.data);
+                        let archived = unsafe { archived_root::<UpdateJob>(&aligned[..]) };
+                        let job = archived.deserialize(&mut Infallible).map_err(|_| {
+                            WriterError::Serialization("wal replay deserialize failed".to_string())
+                        })?;
+                        ctx.handle_job(job);
+                    }
+                    Ok(None) => break,
+                    Err(err) => return Err(WriterError::Wal(err)),
+                }
+            }
+            ctx.flush_pending(&table);
+        }
+        Ok(())
     }
 
     fn shard_index_for_table(&self, table: &str) -> usize {
@@ -900,6 +1006,8 @@ fn ensure_capacity(page: &mut Page, row_idx: usize) {
 pub enum WriterError {
     Shutdown,
     ChannelClosed,
+    Wal(std::io::Error),
+    Serialization(String),
 }
 
 fn compare_rows(left: &[String], right: &[String], sort_ordinals: &[usize]) -> CmpOrdering {

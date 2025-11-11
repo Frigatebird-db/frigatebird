@@ -25,6 +25,7 @@ use crate::ops_handler::{
 use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
+use crate::wal::{FsyncSchedule, ReadConsistency, Walrus};
 use crate::writer::{
     ColumnUpdate, DirectBlockAllocator, DirectoryMetadataClient, MetadataClient, PageAllocator,
     UpdateJob, UpdateOp, Writer,
@@ -37,7 +38,10 @@ use sqlparser::ast::{
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, Once};
 
 use aggregates::{
     AggregateDataset, AggregateFunctionKind, AggregateFunctionPlan, AggregateProjection,
@@ -790,11 +794,16 @@ const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
 const WINDOW_BATCH_CHUNK_SIZE: usize = 1_024;
 const SORT_OUTPUT_BATCH_SIZE: usize = 1_024;
 
+static SQL_EXECUTOR_WAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static SQL_EXECUTOR_WAL_CLEANUP: Once = Once::new();
+const SQL_EXECUTOR_WAL_PREFIX: &str = "sql-executor-";
+
 pub struct SqlExecutor {
     page_handler: Arc<PageHandler>,
     page_directory: Arc<PageDirectory>,
     writer: Arc<Writer>,
     use_writer_inserts: bool,
+    wal_namespace: String,
 }
 
 impl SqlExecutor {
@@ -811,16 +820,30 @@ impl SqlExecutor {
             Arc::new(DirectBlockAllocator::new().expect("allocator init failed"));
         let metadata_client: Arc<dyn MetadataClient> =
             Arc::new(DirectoryMetadataClient::new(Arc::clone(&page_directory)));
+        let wal_id = SQL_EXECUTOR_WAL_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        let wal_namespace = format!("{SQL_EXECUTOR_WAL_PREFIX}{wal_id}");
+        ensure_sql_executor_wal_root();
+        remove_sql_executor_wal_dir(&wal_namespace);
+        let wal = Arc::new(
+            Walrus::with_consistency_and_schedule_for_key(
+                &wal_namespace,
+                ReadConsistency::StrictlyAtOnce,
+                FsyncSchedule::SyncEach,
+            )
+            .expect("wal init failed"),
+        );
         let writer = Arc::new(Writer::new(
             Arc::clone(&page_handler),
             allocator,
             metadata_client,
+            wal,
         ));
         Self {
             page_handler,
             page_directory,
             writer,
             use_writer_inserts,
+            wal_namespace,
         }
     }
 
@@ -3229,6 +3252,42 @@ impl SqlExecutor {
             }
         }
         Ok(0)
+    }
+}
+
+impl Drop for SqlExecutor {
+    fn drop(&mut self) {
+        remove_sql_executor_wal_dir(&self.wal_namespace);
+    }
+}
+
+fn sql_executor_wal_base_dir() -> PathBuf {
+    std::env::var("WALRUS_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("wal_files"))
+}
+
+fn ensure_sql_executor_wal_root() {
+    SQL_EXECUTOR_WAL_CLEANUP.call_once(|| {
+        let base = sql_executor_wal_base_dir();
+        let _ = fs::create_dir_all(&base);
+        if let Ok(entries) = fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with(SQL_EXECUTOR_WAL_PREFIX) {
+                        let _ = fs::remove_dir_all(entry.path());
+                    }
+                }
+            }
+        }
+    });
+    let _ = fs::create_dir_all(sql_executor_wal_base_dir());
+}
+
+fn remove_sql_executor_wal_dir(namespace: &str) {
+    let dir = sql_executor_wal_base_dir().join(namespace);
+    if dir.exists() {
+        let _ = fs::remove_dir_all(dir);
     }
 }
 

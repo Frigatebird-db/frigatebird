@@ -342,6 +342,10 @@ impl TableMetaStore {
         }
     }
 
+    fn table_names(&self) -> Vec<String> {
+        self.tables.keys().cloned().collect()
+    }
+
     fn ensure_default_table_column(&mut self, column: &str) {
         if !self.tables.contains_key(DEFAULT_TABLE) {
             let mut column_index = HashMap::new();
@@ -723,6 +727,13 @@ pub struct PageDirectory {
 impl PageDirectory {
     pub fn new(store: Arc<RwLock<TableMetaStore>>) -> Self {
         Self { store }
+    }
+
+    pub fn table_names(&self) -> Vec<String> {
+        self.store
+            .read()
+            .map(|guard| guard.table_names())
+            .unwrap_or_default()
     }
 
     pub fn register_table(&self, definition: TableDefinition) -> Result<(), CatalogError> {
