@@ -2,6 +2,7 @@ use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEnt
 use crate::page_handler::{
     PageFetcher, PageHandler, PageLocator, PageMaterializer, page_io::PageIO,
 };
+use crate::wal::{FsyncSchedule, ReadConsistency, Walrus};
 use crate::writer::{
     DirectBlockAllocator, DirectoryMetadataClient, MetadataClient, PageAllocator, Writer,
 };
@@ -14,6 +15,8 @@ mod page;
 mod page_handler;
 mod pool;
 mod sql;
+#[path = "wal/lib.rs"]
+mod wal;
 mod writer;
 use cache::lifecycle::{CompressedToDiskLifecycle, UncompressedToCompressedLifecycle};
 use helpers::compressor::Compressor;
@@ -62,11 +65,19 @@ fn main() {
         Arc::new(DirectBlockAllocator::new().expect("allocator init failed"));
     let metadata_client: Arc<dyn MetadataClient> =
         Arc::new(DirectoryMetadataClient::new(Arc::clone(&page_directory)));
+    let walrus = Arc::new(
+        Walrus::with_consistency_and_schedule(
+            ReadConsistency::StrictlyAtOnce,
+            FsyncSchedule::SyncEach,
+        )
+        .expect("wal init failed"),
+    );
 
     let _writer = Writer::new(
         Arc::clone(&page_handler),
         Arc::clone(&allocator),
         Arc::clone(&metadata_client),
+        Arc::clone(&walrus),
     );
 
     // cleanup

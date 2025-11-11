@@ -5,15 +5,73 @@ use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::writer::allocator::DirectBlockAllocator;
-use idk_uwu_ig::writer::executor::{DirectoryMetadataClient, Writer};
+use idk_uwu_ig::wal::{FsyncSchedule, ReadConsistency, Walrus};
+use idk_uwu_ig::writer::GLOBAL_WRITER_SHARD_COUNT;
+use idk_uwu_ig::writer::allocator::{DirectBlockAllocator, PageAllocator};
+use idk_uwu_ig::writer::executor::{DirectoryMetadataClient, MetadataClient, Writer};
 use idk_uwu_ig::writer::update_job::{ColumnUpdate, UpdateJob, UpdateOp};
 use idk_uwu_ig::{ops_handler::create_table_from_plan, sql::plan_create_table_sql};
-use idk_uwu_ig::writer::GLOBAL_WRITER_SHARD_COUNT;
-use std::sync::{Arc, RwLock};
-use std::sync::atomic::Ordering;
+use rkyv::to_bytes;
+use std::env;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
+use tempfile::TempDir;
+
+static TEST_WAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+static WAL_ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct WalTestInstance {
+    wal: Arc<Walrus>,
+    _dir: TempDir,
+}
+
+impl WalTestInstance {
+    fn new() -> Self {
+        let lock = WAL_ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("wal env mutex poisoned");
+        let dir = TempDir::new().expect("create wal temp dir");
+        let prev = env::var("WALRUS_DATA_DIR").ok();
+        unsafe {
+            env::set_var("WALRUS_DATA_DIR", dir.path());
+        }
+
+        let id = TEST_WAL_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let wal = Arc::new(
+            Walrus::with_consistency_and_schedule_for_key(
+                &format!("writer-test-{id}"),
+                ReadConsistency::StrictlyAtOnce,
+                FsyncSchedule::SyncEach,
+            )
+            .expect("wal init failed for tests"),
+        );
+
+        if let Some(value) = prev {
+            unsafe {
+                env::set_var("WALRUS_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                env::remove_var("WALRUS_DATA_DIR");
+            }
+        }
+        drop(lock);
+
+        WalTestInstance { wal, _dir: dir }
+    }
+
+    fn wal(&self) -> Arc<Walrus> {
+        Arc::clone(&self.wal)
+    }
+}
+
+fn test_wal_instance() -> WalTestInstance {
+    WalTestInstance::new()
+}
 
 struct ShardGuard {
     previous: usize,
@@ -32,7 +90,13 @@ impl Drop for ShardGuard {
     }
 }
 
-fn setup_writer() -> (Arc<Writer>, Arc<PageHandler>, Arc<PageDirectory>) {
+fn setup_writer_components() -> (
+    Arc<PageHandler>,
+    Arc<PageDirectory>,
+    Arc<dyn PageAllocator>,
+    Arc<dyn MetadataClient>,
+    WalTestInstance,
+) {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
     let directory = Arc::new(PageDirectory::new(Arc::clone(&store)));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -52,12 +116,30 @@ fn setup_writer() -> (Arc<Writer>, Arc<PageHandler>, Arc<PageDirectory>) {
 
     let page_handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
 
-    let allocator = Arc::new(DirectBlockAllocator::new().expect("allocator creation failed"));
-    let metadata = Arc::new(DirectoryMetadataClient::new(Arc::clone(&directory)));
+    let allocator: Arc<dyn PageAllocator> =
+        Arc::new(DirectBlockAllocator::new().expect("allocator creation failed"));
+    let metadata: Arc<dyn MetadataClient> =
+        Arc::new(DirectoryMetadataClient::new(Arc::clone(&directory)));
+    let wal = test_wal_instance();
 
-    let writer = Arc::new(Writer::new(Arc::clone(&page_handler), allocator, metadata));
+    (page_handler, directory, allocator, metadata, wal)
+}
 
-    (writer, page_handler, directory)
+fn setup_writer() -> (
+    Arc<Writer>,
+    Arc<PageHandler>,
+    Arc<PageDirectory>,
+    WalTestInstance,
+) {
+    let (page_handler, directory, allocator, metadata, wal_guard) = setup_writer_components();
+    let writer = Arc::new(Writer::new(
+        Arc::clone(&page_handler),
+        Arc::clone(&allocator),
+        Arc::clone(&metadata),
+        wal_guard.wal(),
+    ));
+
+    (writer, page_handler, directory, wal_guard)
 }
 
 fn entry_values(page: &PageCacheEntryUncompressed) -> Vec<String> {
@@ -73,14 +155,14 @@ fn entry_values(page: &PageCacheEntryUncompressed) -> Vec<String> {
 
 #[test]
 fn writer_new_creates_instance() {
-    let (writer, _, _) = setup_writer();
+    let (writer, _, _, _wal_guard) = setup_writer();
     // Writer created successfully, verify it exists
     let _ = format!("{:?}", &*writer as *const _);
 }
 
 #[test]
 fn writer_submit_single_column_append() {
-    let (writer, _, directory) = setup_writer();
+    let (writer, _, directory, _wal_guard) = setup_writer();
 
     let job = UpdateJob::new(
         "users",
@@ -106,7 +188,7 @@ fn writer_submit_single_column_append() {
 
 #[test]
 fn writer_submit_multiple_columns() {
-    let (writer, _, directory) = setup_writer();
+    let (writer, _, directory, _wal_guard) = setup_writer();
 
     let job = UpdateJob::new(
         "users",
@@ -136,7 +218,7 @@ fn writer_submit_multiple_columns() {
 
 #[test]
 fn writer_submit_insert_at_operation() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Seed two entries so we can insert between them.
     let seed_job = UpdateJob::new(
@@ -181,7 +263,7 @@ fn writer_submit_insert_at_operation() {
 
 #[test]
 fn writer_submit_overwrite_operation() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // First, append an entry
     let job1 = UpdateJob::new(
@@ -221,7 +303,7 @@ fn writer_submit_overwrite_operation() {
 #[test]
 fn writer_preserves_order_with_multiple_shards() {
     let _guard = ShardGuard::set(4);
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     let append_job = UpdateJob::new(
         "users",
@@ -244,7 +326,9 @@ fn writer_preserves_order_with_multiple_shards() {
             }],
         )],
     );
-    writer.submit(overwrite_job).expect("overwrite submit failed");
+    writer
+        .submit(overwrite_job)
+        .expect("overwrite submit failed");
 
     thread::sleep(Duration::from_millis(150));
 
@@ -257,7 +341,7 @@ fn writer_preserves_order_with_multiple_shards() {
 #[test]
 fn writer_updates_multiple_tables_across_shards() {
     let _guard = ShardGuard::set(4);
-    let (writer, _, directory) = setup_writer();
+    let (writer, _, directory, _wal_guard) = setup_writer();
 
     let user_job = UpdateJob::new(
         "users",
@@ -295,7 +379,7 @@ fn writer_updates_multiple_tables_across_shards() {
 
 #[test]
 fn writer_submit_overwrite_extends_page() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Overwrite at row 5 when page is empty (should extend with empty entries)
     let job = UpdateJob::new(
@@ -322,7 +406,7 @@ fn writer_submit_overwrite_extends_page() {
 
 #[test]
 fn writer_submit_multiple_operations_same_column() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     let job = UpdateJob::new(
         "users",
@@ -356,7 +440,7 @@ fn writer_submit_multiple_operations_same_column() {
 
 #[test]
 fn writer_submit_sequential_jobs_ordering() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Submit 3 jobs sequentially
     for i in 0..3 {
@@ -390,7 +474,7 @@ fn writer_submit_sequential_jobs_ordering() {
 
 #[test]
 fn writer_write_back_populates_cache() {
-    let (writer, page_handler, _) = setup_writer();
+    let (writer, page_handler, _, _wal_guard) = setup_writer();
 
     let job = UpdateJob::new(
         "users",
@@ -412,7 +496,7 @@ fn writer_write_back_populates_cache() {
 
 #[test]
 fn writer_shutdown_graceful() {
-    let (writer, _, _) = setup_writer();
+    let (writer, _, _, _wal_guard) = setup_writer();
 
     // Submit a job
     let job = UpdateJob::new(
@@ -453,7 +537,8 @@ fn writer_submit_after_shutdown_returns_error() {
     let allocator = Arc::new(DirectBlockAllocator::new().unwrap());
     let metadata = Arc::new(DirectoryMetadataClient::new(directory));
 
-    let mut writer = Writer::new(page_handler, allocator, metadata);
+    let wal_guard = test_wal_instance();
+    let mut writer = Writer::new(page_handler, allocator, metadata, wal_guard.wal());
 
     // Explicit shutdown
     writer.shutdown();
@@ -475,7 +560,7 @@ fn writer_submit_after_shutdown_returns_error() {
 
 #[test]
 fn writer_concurrent_submits() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
     let writer_clone1 = Arc::clone(&writer);
     let writer_clone2 = Arc::clone(&writer);
     let writer_clone3 = Arc::clone(&writer);
@@ -547,7 +632,7 @@ fn writer_concurrent_submits() {
 
 #[test]
 fn writer_empty_job_no_effect() {
-    let (writer, _, directory) = setup_writer();
+    let (writer, _, directory, _wal_guard) = setup_writer();
 
     // Job with no columns
     let job = UpdateJob::new("users", vec![]);
@@ -560,7 +645,7 @@ fn writer_empty_job_no_effect() {
 
 #[test]
 fn writer_metadata_commit_atomicity() {
-    let (writer, _, directory) = setup_writer();
+    let (writer, _, directory, _wal_guard) = setup_writer();
 
     // Submit job with multiple columns
     let job = UpdateJob::new(
@@ -605,7 +690,7 @@ fn writer_metadata_commit_atomicity() {
 
 #[test]
 fn writer_updates_existing_page() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // First write
     let job1 = UpdateJob::new(
@@ -650,7 +735,7 @@ fn writer_updates_existing_page() {
 
 #[test]
 fn writer_large_page() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Create a large page with many entries
     let mut operations = Vec::new();
@@ -675,7 +760,7 @@ fn writer_large_page() {
 
 #[test]
 fn writer_special_characters_in_data() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     let special_data = "hello\nworld\t\r\0\x01\x02";
     let job = UpdateJob::new(
@@ -700,7 +785,7 @@ fn writer_special_characters_in_data() {
 
 #[test]
 fn writer_unicode_data() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     let unicode_data = "Hello 世界 🌍 Здравствуй مرحبا";
     let job = UpdateJob::new(
@@ -727,7 +812,7 @@ fn writer_unicode_data() {
 
 #[test]
 fn integration_full_write_read_cycle() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Write multiple columns
     let job = UpdateJob::new(
@@ -783,7 +868,7 @@ fn integration_full_write_read_cycle() {
 
 #[test]
 fn integration_write_update_read() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Initial write
     let job1 = UpdateJob::new(
@@ -832,7 +917,7 @@ fn integration_write_update_read() {
 
 #[test]
 fn integration_concurrent_writes_different_tables() {
-    let (writer, _, directory) = setup_writer();
+    let (writer, _, directory, _wal_guard) = setup_writer();
     let w1 = Arc::clone(&writer);
     let w2 = Arc::clone(&writer);
 
@@ -878,7 +963,7 @@ fn integration_concurrent_writes_different_tables() {
 
 #[test]
 fn integration_write_with_cache_eviction() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Write more than cache size (10 pages) to trigger evictions
     for i in 0..15 {
@@ -894,7 +979,7 @@ fn integration_write_with_cache_eviction() {
         writer.submit(job).expect("write failed");
     }
 
-    thread::sleep(Duration::from_millis(500));
+    writer.flush_table("users").expect("flush users");
 
     // Verify metadata exists for all columns
     // (Reading pages may fail if data is still being compressed/written)
@@ -918,7 +1003,7 @@ fn integration_write_with_cache_eviction() {
 
 #[test]
 fn integration_append_after_overwrite() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Append some entries
     let job1 = UpdateJob::new(
@@ -976,7 +1061,7 @@ fn integration_append_after_overwrite() {
 
 #[test]
 fn integration_create_table_plan_then_write() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
     let ddl = "CREATE TABLE items (id UUID, name String) ORDER BY (id)";
     let plan = plan_create_table_sql(ddl).expect("plan create table");
     create_table_from_plan(&directory, &plan).expect("register table");
@@ -1003,8 +1088,79 @@ fn integration_create_table_plan_then_write() {
 }
 
 #[test]
+fn writer_replays_pending_wal_jobs_on_startup() {
+    let (page_handler, directory, allocator, metadata, wal_guard) = setup_writer_components();
+    let wal = wal_guard.wal();
+    let ddl = "CREATE TABLE replay (name String) ORDER BY (name)";
+    let plan = plan_create_table_sql(ddl).expect("plan create table");
+    create_table_from_plan(&directory, &plan).expect("register table");
+
+    let job = UpdateJob::new(
+        "replay",
+        vec![ColumnUpdate::new(
+            "name",
+            vec![UpdateOp::Append {
+                entry: Entry::new("boot"),
+            }],
+        )],
+    );
+    let bytes = to_bytes::<_, 512>(&job).expect("serialize job");
+    wal.append_for_topic("replay", &bytes).expect("append to wal");
+
+    let writer = Arc::new(Writer::new(
+        Arc::clone(&page_handler),
+        allocator,
+        metadata,
+        wal_guard.wal(),
+    ));
+
+    writer.flush_table("replay").unwrap();
+
+    let desc = directory
+        .latest_in_table("replay", "name")
+        .expect("replayed descriptor");
+    let page = page_handler.get_page(desc).expect("page available");
+    assert_eq!(entry_values(&page), vec!["boot".to_string()]);
+}
+
+#[test]
+fn writer_replays_buffered_rows_on_startup() {
+    let (page_handler, directory, allocator, metadata, wal_guard) = setup_writer_components();
+    let wal = wal_guard.wal();
+    let ddl = "CREATE TABLE buffered (id String, name String) ORDER BY (id)";
+    let plan = plan_create_table_sql(ddl).expect("plan create table");
+    create_table_from_plan(&directory, &plan).expect("register table");
+
+    let job = UpdateJob::new(
+        "buffered",
+        vec![ColumnUpdate::new(
+            "*",
+            vec![UpdateOp::BufferRow {
+                row: vec!["1".into(), "delta".into()],
+            }],
+        )],
+    );
+    let bytes = to_bytes::<_, 512>(&job).expect("serialize buffer row");
+    wal.append_for_topic("buffered", &bytes)
+        .expect("append to wal");
+
+    let _writer = Arc::new(Writer::new(
+        Arc::clone(&page_handler),
+        allocator,
+        metadata,
+        wal_guard.wal(),
+    ));
+
+    let desc = directory
+        .latest_in_table("buffered", "name")
+        .expect("descriptor after replay");
+    let page = page_handler.get_page(desc).expect("page available");
+    assert_eq!(entry_values(&page), vec!["delta".to_string()]);
+}
+
+#[test]
 fn integration_mixed_operations_single_job() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Create initial data
     let job1 = UpdateJob::new(
@@ -1074,7 +1230,7 @@ fn integration_mixed_operations_single_job() {
 fn integration_persistence_survives_restart() {
     // Test that writer can shutdown gracefully
     // Note: Cross-session persistence depends on storage configuration
-    let (writer, _, directory) = setup_writer();
+    let (writer, _, directory, _wal_guard) = setup_writer();
 
     let job = UpdateJob::new(
         "persistent",
@@ -1100,7 +1256,7 @@ fn integration_persistence_survives_restart() {
 
 #[test]
 fn integration_rapid_sequential_writes() {
-    let (writer, page_handler, directory) = setup_writer();
+    let (writer, page_handler, directory, _wal_guard) = setup_writer();
 
     // Submit 50 jobs rapidly without waiting
     for i in 0..50 {
@@ -1117,7 +1273,7 @@ fn integration_rapid_sequential_writes() {
     }
 
     // Wait for all to complete
-    thread::sleep(Duration::from_millis(1000));
+    writer.flush_table("rapid").expect("flush rapid");
 
     let desc = directory.latest_in_table("rapid", "seq").unwrap();
     let page = page_handler.get_page(desc).unwrap();
