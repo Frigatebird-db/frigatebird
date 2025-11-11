@@ -46,6 +46,9 @@ pub fn overwrite_row(
         if !in_bounds {
             return Err(other_error(format!("row {row_idx} out of bounds")));
         }
+        handler
+            .persist_descriptor_page(&descriptor, &updated)
+            .map_err(|err| other_error(format!("failed to persist {table}.{}: {err}", column.name)))?;
         handler.write_back_uncompressed(&descriptor.id, updated);
     }
 
@@ -90,6 +93,9 @@ pub fn update_column_entry_in_table(
         return Ok(false);
     }
 
+    handler
+        .persist_descriptor_page(&page_meta, &updated)
+        .map_err(|err| other_error(format!("failed to persist {table}.{col}: {err}")))?;
     handler.write_back_uncompressed(&page_meta.id, updated);
 
     Ok(true)

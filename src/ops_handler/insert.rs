@@ -40,6 +40,9 @@ pub fn upsert_data_into_table_column(
         disk_page.add_entry(Entry::new(data));
     });
 
+    handler
+        .persist_descriptor_page(&page_meta, &updated)
+        .map_err(|err| other_error(format!("failed to persist {table}.{col}: {err}")))?;
     handler.write_back_uncompressed(&page_meta.id, updated);
 
     Ok(true)
@@ -67,6 +70,9 @@ pub fn sorted_insert_single_column(
         new_entry_count = disk_page.entries.len() as u64;
     });
 
+    handler
+        .persist_descriptor_page(&page_meta, &updated)
+        .map_err(|err| other_error(format!("failed to persist {table}.{col}: {err}")))?;
     handler.write_back_uncompressed(&page_meta.id, updated);
     handler
         .update_entry_count_in_table(table, col, new_entry_count)
@@ -168,6 +174,9 @@ pub fn sorted_insert_row(
                 .insert(insert_pos, Entry::new(&final_row[ordinal]));
         });
 
+        handler
+            .persist_descriptor_page(&descriptor, &updated)
+            .map_err(|err| other_error(format!("failed to persist {table}.{}: {err}", column.name)))?;
         handler.write_back_uncompressed(&descriptor.id, updated);
         handler
             .update_entry_count_in_table(table, &column.name, new_count as u64)

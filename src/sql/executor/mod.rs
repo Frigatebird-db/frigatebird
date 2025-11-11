@@ -17,8 +17,8 @@ use self::spill::SpillManager;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{
-    ColumnCatalog, ColumnStats, ColumnStatsKind, MetaJournal, PageDescriptor, PageDirectory,
-    TableCatalog,
+    ColumnCatalog, ColumnStats, ColumnStatsKind, JournalColumnDef, MetaJournal, MetaRecord,
+    PageDescriptor, PageDirectory, ROWS_PER_PAGE_GROUP, TableCatalog,
 };
 use crate::ops_handler::{
     create_table_from_plan, delete_row, insert_sorted_row, overwrite_row, read_row,
@@ -803,8 +803,11 @@ pub struct SqlExecutor {
     page_handler: Arc<PageHandler>,
     page_directory: Arc<PageDirectory>,
     writer: Arc<Writer>,
+    meta_journal: Option<Arc<MetaJournal>>,
     use_writer_inserts: bool,
     wal_namespace: String,
+    meta_namespace: String,
+    cleanup_wal_on_drop: bool,
 }
 
 impl SqlExecutor {
@@ -817,25 +820,49 @@ impl SqlExecutor {
         page_directory: Arc<PageDirectory>,
         use_writer_inserts: bool,
     ) -> Self {
-        let allocator: Arc<dyn PageAllocator> =
-            Arc::new(DirectBlockAllocator::new().expect("allocator init failed"));
         let wal_id = SQL_EXECUTOR_WAL_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         let wal_namespace = format!("{SQL_EXECUTOR_WAL_PREFIX}{wal_id}");
+        let options = SqlExecutorWalOptions::new(wal_namespace);
+        SqlExecutor::with_wal_options(page_handler, page_directory, use_writer_inserts, options)
+    }
+
+    pub fn with_wal_options(
+        page_handler: Arc<PageHandler>,
+        page_directory: Arc<PageDirectory>,
+        use_writer_inserts: bool,
+        options: SqlExecutorWalOptions,
+    ) -> Self {
+        let SqlExecutorWalOptions {
+            namespace,
+            cleanup_on_drop,
+            reset_namespace,
+            storage_dir,
+        } = options;
+        let allocator: Arc<dyn PageAllocator> = if let Some(dir) = storage_dir {
+            Arc::new(DirectBlockAllocator::with_data_dir(dir).expect("allocator init failed"))
+        } else {
+            Arc::new(DirectBlockAllocator::new().expect("allocator init failed"))
+        };
         ensure_sql_executor_wal_root();
-        remove_sql_executor_wal_dir(&wal_namespace);
+        let meta_namespace = format!("{namespace}-meta");
+        if reset_namespace {
+            remove_sql_executor_wal_dir(&namespace);
+            remove_sql_executor_wal_dir(&meta_namespace);
+        }
         let wal = Arc::new(
             Walrus::with_consistency_and_schedule_for_key(
-                &wal_namespace,
+                &namespace,
                 ReadConsistency::StrictlyAtOnce,
                 FsyncSchedule::SyncEach,
             )
             .expect("wal init failed"),
         );
-        let meta_namespace = format!("{wal_namespace}-meta");
         let meta_wal = Arc::new(
             Walrus::with_consistency_and_schedule_for_key(
                 &meta_namespace,
-                ReadConsistency::StrictlyAtOnce,
+                ReadConsistency::AtLeastOnce {
+                    persist_every: u32::MAX,
+                },
                 FsyncSchedule::SyncEach,
             )
             .expect("metadata wal init failed"),
@@ -854,13 +881,22 @@ impl SqlExecutor {
             metadata_client,
             wal,
         ));
-        Self {
+        SqlExecutor {
             page_handler,
             page_directory,
             writer,
+            meta_journal: Some(meta_journal),
             use_writer_inserts,
-            wal_namespace,
+            wal_namespace: namespace,
+            meta_namespace,
+            cleanup_wal_on_drop: cleanup_on_drop,
         }
+    }
+
+    pub fn flush_table(&self, table: &str) -> Result<(), SqlExecutionError> {
+        self.writer.flush_table(table).map_err(|err| {
+            SqlExecutionError::OperationFailed(format!("writer flush failed for {table}: {err:?}"))
+        })
     }
 
     pub fn execute(&self, sql: &str) -> Result<(), SqlExecutionError> {
@@ -2211,6 +2247,28 @@ impl SqlExecutor {
         let plan: CreateTablePlan = plan_create_table_statement(&statement)?;
         create_table_from_plan(&self.page_directory, &plan)
             .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+
+        // Write table schema to metadata journal for crash recovery
+        if let Some(ref journal) = self.meta_journal {
+            let columns: Vec<JournalColumnDef> = plan
+                .columns
+                .iter()
+                .map(|spec| JournalColumnDef {
+                    name: spec.name.clone(),
+                    data_type: spec.data_type.clone(),
+                })
+                .collect();
+            let record = MetaRecord::CreateTable {
+                name: plan.table_name.clone(),
+                columns,
+                sort_key: plan.order_by.clone(),
+                rows_per_page_group: ROWS_PER_PAGE_GROUP,
+            };
+            journal
+                .append_commit(&plan.table_name, &record)
+                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -3273,7 +3331,48 @@ impl SqlExecutor {
 
 impl Drop for SqlExecutor {
     fn drop(&mut self) {
-        remove_sql_executor_wal_dir(&self.wal_namespace);
+        if self.cleanup_wal_on_drop {
+            remove_sql_executor_wal_dir(&self.wal_namespace);
+            remove_sql_executor_wal_dir(&self.meta_namespace);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SqlExecutorWalOptions {
+    namespace: String,
+    cleanup_on_drop: bool,
+    reset_namespace: bool,
+    storage_dir: Option<String>,
+}
+
+impl SqlExecutorWalOptions {
+    pub fn new(namespace: impl Into<String>) -> Self {
+        SqlExecutorWalOptions {
+            namespace: namespace.into(),
+            cleanup_on_drop: true,
+            reset_namespace: true,
+            storage_dir: None,
+        }
+    }
+
+    pub fn cleanup_on_drop(mut self, value: bool) -> Self {
+        self.cleanup_on_drop = value;
+        self
+    }
+
+    pub fn reset_namespace(mut self, value: bool) -> Self {
+        self.reset_namespace = value;
+        self
+    }
+
+    pub fn storage_dir(mut self, dir: impl Into<String>) -> Self {
+        self.storage_dir = Some(dir.into());
+        self
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
     }
 }
 
