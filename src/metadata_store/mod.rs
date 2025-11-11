@@ -1,5 +1,9 @@
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+
+pub mod journal;
+pub use journal::{MetaJournal, MetaJournalEntry, MetaRecord};
 
 pub const DEFAULT_TABLE: &str = "_default";
 pub const ROWS_PER_PAGE_GROUP: u64 = 8192;
@@ -82,7 +86,8 @@ pub struct ColumnCatalog {
 }
 
 /// Supported statistic kinds emitted by the writer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+#[archive(check_bytes)]
 pub enum ColumnStatsKind {
     Int64,
     Float64,
@@ -96,7 +101,8 @@ impl Default for ColumnStatsKind {
 }
 
 /// Lightweight per-column statistics tracked for each physical page.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+#[archive(check_bytes)]
 pub struct ColumnStats {
     pub min_value: Option<String>,
     pub max_value: Option<String>,
@@ -315,6 +321,7 @@ pub struct PageSlice {
 pub struct PendingPage {
     pub table: String,
     pub column: String,
+    pub descriptor_id: Option<String>,
     pub disk_path: String,
     pub offset: u64,
     pub alloc_len: u64,
@@ -339,6 +346,20 @@ impl TableMetaStore {
             column_chains: HashMap::new(),
             page_index: HashMap::new(),
             next_page_id: 1,
+        }
+    }
+
+    fn reserve_descriptor_id(&mut self) -> String {
+        let id = format!("{:016x}", self.next_page_id);
+        self.next_page_id = self.next_page_id.wrapping_add(1);
+        id
+    }
+
+    fn bump_next_page_id(&mut self, id: &str) {
+        if let Ok(value) = u64::from_str_radix(id, 16) {
+            if value >= self.next_page_id {
+                self.next_page_id = value.wrapping_add(1);
+            }
         }
     }
 
@@ -379,6 +400,42 @@ impl TableMetaStore {
                 }
             }
         }
+    }
+
+    fn ensure_table_column(&mut self, table: &str, column: &str) {
+        let key = TableColumnKey::new(table, column);
+        if self.column_chains.contains_key(&key) {
+            return;
+        }
+
+        if table == DEFAULT_TABLE {
+            self.ensure_default_table_column(column);
+            return;
+        }
+
+        if let Some(catalog) = self.tables.get_mut(table) {
+            if catalog.insert_column(column.to_string(), "String".to_string()) {
+                self.column_chains.insert(key, ColumnChain::new());
+            }
+            return;
+        }
+
+        let mut column_index = HashMap::new();
+        column_index.insert(column.to_string(), 0);
+        let catalog_columns = vec![ColumnCatalog {
+            name: column.to_string(),
+            data_type: "String".to_string(),
+            ordinal: 0,
+        }];
+        let catalog = TableCatalog::new(
+            table.to_string(),
+            catalog_columns,
+            column_index,
+            Vec::new(),
+            ROWS_PER_PAGE_GROUP,
+        );
+        self.tables.insert(table.to_string(), catalog);
+        self.column_chains.insert(key, ColumnChain::new());
     }
 
     pub fn register_table(&mut self, definition: TableDefinition) -> Result<(), CatalogError> {
@@ -489,6 +546,7 @@ impl TableMetaStore {
 
     fn allocate_descriptor(
         &mut self,
+        descriptor_id: Option<String>,
         disk_path: String,
         offset: u64,
         alloc_len: u64,
@@ -496,8 +554,12 @@ impl TableMetaStore {
         entry_count: u64,
         stats: Option<ColumnStats>,
     ) -> PageDescriptor {
-        let id = format!("{:016x}", self.next_page_id);
-        self.next_page_id = self.next_page_id.wrapping_add(1);
+        let id = if let Some(id) = descriptor_id {
+            self.bump_next_page_id(&id);
+            id
+        } else {
+            self.reserve_descriptor_id()
+        };
         let mut descriptor =
             PageDescriptor::new(id, disk_path, offset, alloc_len, actual_len, entry_count);
         descriptor.stats = stats;
@@ -616,15 +678,20 @@ impl TableMetaStore {
     ) -> Option<PageDescriptor> {
         let key = TableColumnKey::new(table, column);
         if !self.column_chains.contains_key(&key) {
-            if table == DEFAULT_TABLE {
-                self.ensure_default_table_column(column);
-            }
+            self.ensure_table_column(table, column);
         }
         if !self.column_chains.contains_key(&key) {
             return None;
         }
-        let descriptor =
-            self.allocate_descriptor(disk_path, offset, alloc_len, actual_len, entry_count, None);
+        let descriptor = self.allocate_descriptor(
+            None,
+            disk_path,
+            offset,
+            alloc_len,
+            actual_len,
+            entry_count,
+            None,
+        );
         {
             let chain = self
                 .column_chains
@@ -642,14 +709,13 @@ impl TableMetaStore {
         for page in pages {
             let key = TableColumnKey::new(&page.table, &page.column);
             if !self.column_chains.contains_key(&key) {
-                if page.table == DEFAULT_TABLE {
-                    self.ensure_default_table_column(&page.column);
-                }
+                self.ensure_table_column(&page.table, &page.column);
                 if !self.column_chains.contains_key(&key) {
                     continue;
                 }
             }
             let descriptor = self.allocate_descriptor(
+                page.descriptor_id.clone(),
                 page.disk_path.clone(),
                 page.offset,
                 page.alloc_len,
@@ -684,6 +750,10 @@ impl TableMetaStore {
             registered.push(descriptor);
         }
         registered
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tables.is_empty() && self.column_chains.is_empty() && self.page_index.is_empty()
     }
 
     pub fn update_latest_entry_count(
@@ -940,6 +1010,18 @@ impl PageDirectory {
             Err(_) => return Vec::new(),
         };
         guard.register_batch(pages)
+    }
+
+    pub fn reserve_descriptor_id(&self) -> Option<String> {
+        let mut guard = self.store.write().ok()?;
+        Some(guard.reserve_descriptor_id())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.store
+            .read()
+            .map(|guard| guard.is_empty())
+            .unwrap_or(true)
     }
 
     pub fn update_latest_entry_count(

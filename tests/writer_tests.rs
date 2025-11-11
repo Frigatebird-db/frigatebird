@@ -1,7 +1,7 @@
 use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
+use idk_uwu_ig::metadata_store::{MetaJournal, PageDirectory, TableMetaStore};
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
@@ -25,6 +25,7 @@ static WAL_ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct WalTestInstance {
     wal: Arc<Walrus>,
+    meta_wal: Arc<Walrus>,
     _dir: TempDir,
 }
 
@@ -49,6 +50,14 @@ impl WalTestInstance {
             )
             .expect("wal init failed for tests"),
         );
+        let meta_wal = Arc::new(
+            Walrus::with_consistency_and_schedule_for_key(
+                &format!("writer-test-meta-{id}"),
+                ReadConsistency::StrictlyAtOnce,
+                FsyncSchedule::SyncEach,
+            )
+            .expect("metadata wal init failed for tests"),
+        );
 
         if let Some(value) = prev {
             unsafe {
@@ -60,12 +69,19 @@ impl WalTestInstance {
             }
         }
         drop(lock);
-
-        WalTestInstance { wal, _dir: dir }
+        WalTestInstance {
+            wal,
+            meta_wal,
+            _dir: dir,
+        }
     }
 
     fn wal(&self) -> Arc<Walrus> {
         Arc::clone(&self.wal)
+    }
+
+    fn meta_wal(&self) -> Arc<Walrus> {
+        Arc::clone(&self.meta_wal)
     }
 }
 
@@ -118,9 +134,17 @@ fn setup_writer_components() -> (
 
     let allocator: Arc<dyn PageAllocator> =
         Arc::new(DirectBlockAllocator::new().expect("allocator creation failed"));
-    let metadata: Arc<dyn MetadataClient> =
-        Arc::new(DirectoryMetadataClient::new(Arc::clone(&directory)));
     let wal = test_wal_instance();
+    let wal_arc = wal.wal();
+    let meta_wal = wal.meta_wal();
+    let meta_journal = Arc::new(MetaJournal::new(meta_wal, 16));
+    meta_journal
+        .replay_into(&directory)
+        .expect("metadata journal replay failed");
+    let metadata: Arc<dyn MetadataClient> = Arc::new(DirectoryMetadataClient::new(
+        Arc::clone(&directory),
+        Arc::clone(&meta_journal),
+    ));
 
     (page_handler, directory, allocator, metadata, wal)
 }
@@ -535,10 +559,19 @@ fn writer_submit_after_shutdown_returns_error() {
     let page_handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
 
     let allocator = Arc::new(DirectBlockAllocator::new().unwrap());
-    let metadata = Arc::new(DirectoryMetadataClient::new(directory));
-
     let wal_guard = test_wal_instance();
-    let mut writer = Writer::new(page_handler, allocator, metadata, wal_guard.wal());
+    let wal = wal_guard.wal();
+    let meta_wal = wal_guard.meta_wal();
+    let meta_journal = Arc::new(MetaJournal::new(meta_wal, 16));
+    meta_journal
+        .replay_into(&directory)
+        .expect("metadata journal replay failed");
+    let metadata = Arc::new(DirectoryMetadataClient::new(
+        Arc::clone(&directory),
+        Arc::clone(&meta_journal),
+    ));
+
+    let mut writer = Writer::new(page_handler, allocator, metadata, wal);
 
     // Explicit shutdown
     writer.shutdown();
@@ -1105,7 +1138,8 @@ fn writer_replays_pending_wal_jobs_on_startup() {
         )],
     );
     let bytes = to_bytes::<_, 512>(&job).expect("serialize job");
-    wal.append_for_topic("replay", &bytes).expect("append to wal");
+    wal.append_for_topic("replay", &bytes)
+        .expect("append to wal");
 
     let writer = Arc::new(Writer::new(
         Arc::clone(&page_handler),
