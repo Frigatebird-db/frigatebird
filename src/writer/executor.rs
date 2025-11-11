@@ -1,8 +1,9 @@
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{
-    CatalogError, ColumnCatalog, ColumnDefinition, ColumnStats, ColumnStatsKind, PageDescriptor,
-    PageDirectory, PendingPage, ROWS_PER_PAGE_GROUP, TableDefinition,
+    CatalogError, ColumnCatalog, ColumnDefinition, ColumnStats, ColumnStatsKind, MetaJournal,
+    MetaJournalEntry, MetaRecord, PageDescriptor, PageDirectory, PendingPage, ROWS_PER_PAGE_GROUP,
+    TableDefinition,
 };
 use crate::page::Page;
 use crate::page_handler::{PageHandler, page_io::PageIO};
@@ -38,6 +39,7 @@ pub trait MetadataClient: Send + Sync {
 pub struct MetadataUpdate {
     pub table: String,
     pub column: String,
+    pub descriptor_id: Option<String>,
     pub disk_path: String,
     pub offset: u64,
     pub alloc_len: u64,
@@ -61,7 +63,9 @@ impl MetadataClient for NoopMetadataClient {
             .into_iter()
             .enumerate()
             .map(|(idx, update)| PageDescriptor {
-                id: format!("noop-{}-{idx}", update.column),
+                id: update
+                    .descriptor_id
+                    .unwrap_or_else(|| format!("noop-{}-{idx}", update.column)),
                 disk_path: update.disk_path,
                 offset: update.offset,
                 alloc_len: update.alloc_len,
@@ -80,11 +84,12 @@ impl MetadataClient for NoopMetadataClient {
 /// Metadata client backed by the shared page directory.
 pub struct DirectoryMetadataClient {
     directory: Arc<PageDirectory>,
+    journal: Arc<MetaJournal>,
 }
 
 impl DirectoryMetadataClient {
-    pub fn new(directory: Arc<PageDirectory>) -> Self {
-        DirectoryMetadataClient { directory }
+    pub fn new(directory: Arc<PageDirectory>, journal: Arc<MetaJournal>) -> Self {
+        DirectoryMetadataClient { directory, journal }
     }
 }
 
@@ -137,24 +142,54 @@ impl MetadataClient for DirectoryMetadataClient {
             }
         }
 
+        let mut journal_entries = Vec::with_capacity(updates.len());
         let pending: Vec<PendingPage> = updates
             .into_iter()
-            .map(|update| PendingPage {
-                table: if update.table.is_empty() {
+            .map(|update| {
+                let descriptor_id = update.descriptor_id.unwrap_or_else(|| {
+                    self.directory
+                        .reserve_descriptor_id()
+                        .expect("descriptor id allocation failed")
+                });
+                let table_for_update = if update.table.is_empty() {
                     table_name.clone()
                 } else {
                     update.table
-                },
-                column: update.column,
-                disk_path: update.disk_path,
-                offset: update.offset,
-                alloc_len: update.alloc_len,
-                actual_len: update.actual_len,
-                entry_count: update.entry_count,
-                replace_last: update.replace_last,
-                stats: update.stats,
+                };
+                journal_entries.push(MetaJournalEntry {
+                    column: update.column.clone(),
+                    descriptor_id: descriptor_id.clone(),
+                    disk_path: update.disk_path.clone(),
+                    offset: update.offset,
+                    alloc_len: update.alloc_len,
+                    actual_len: update.actual_len,
+                    entry_count: update.entry_count,
+                    replace_last: update.replace_last,
+                    stats: update.stats.clone(),
+                });
+                PendingPage {
+                    table: table_for_update,
+                    column: update.column,
+                    descriptor_id: Some(descriptor_id),
+                    disk_path: update.disk_path,
+                    offset: update.offset,
+                    alloc_len: update.alloc_len,
+                    actual_len: update.actual_len,
+                    entry_count: update.entry_count,
+                    replace_last: update.replace_last,
+                    stats: update.stats,
+                }
             })
             .collect();
+
+        let record = MetaRecord::PublishPages {
+            table: table_name.clone(),
+            entries: journal_entries,
+        };
+
+        self.journal
+            .append_commit(&table_name, &record)
+            .expect("metadata journal append failed");
         self.directory.register_batch(&pending)
     }
 
@@ -262,6 +297,7 @@ impl WorkerContext {
             .map(|prepared| MetadataUpdate {
                 table: table.to_string(),
                 column: prepared.column.clone(),
+                descriptor_id: None,
                 disk_path: prepared.disk_path.clone(),
                 offset: prepared.offset,
                 alloc_len: prepared.alloc_len,
