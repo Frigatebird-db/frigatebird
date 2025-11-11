@@ -5,7 +5,7 @@ use io_uring::{IoUring, opcode, types};
 use libc;
 use rkyv::ser::{Serializer, serializers::AllocSerializer};
 use rkyv::{Archive, Deserialize, Serialize};
-use std::fs::File;
+use std::fs::{self, File};
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
 use std::io;
@@ -16,6 +16,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 
 pub struct IOHandler {}
 
@@ -122,6 +123,7 @@ impl PageIO {
     }
 
     pub fn write_to_path(&self, path: &str, offset: u64, data: Vec<u8>) -> Result<(), io::Error> {
+        ensure_parent_dir(path)?;
         let mut fd = open_direct_writer(path)?;
 
         fd.seek(SeekFrom::Start(offset))?;
@@ -157,6 +159,7 @@ impl PageIO {
             return Ok(());
         }
 
+        ensure_parent_dir(path)?;
         let file = open_direct_writer(path)?;
         let fd = types::Fd(file.as_raw_fd());
         let mut ring = IoUring::new(writes.len() as u32)?;
@@ -212,11 +215,21 @@ impl PageIO {
 
     #[cfg(not(target_os = "linux"))]
     pub fn write_batch_to_path(&self, path: &str, writes: &[(u64, Vec<u8>)]) -> io::Result<()> {
+        ensure_parent_dir(path)?;
         for (offset, data) in writes.iter() {
             self.write_to_path(path, *offset, data.clone())?;
         }
         Ok(())
     }
+}
+
+fn ensure_parent_dir(path: &str) -> io::Result<()> {
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]

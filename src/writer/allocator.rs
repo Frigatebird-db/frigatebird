@@ -140,6 +140,21 @@ impl PageAllocator for DirectBlockAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn state_with(max_size: u64, offset: u64) -> (FileState, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_string_lossy().to_string();
+        let file = open_data_file(0, &data_dir).unwrap();
+        let state = FileState {
+            file_id: 0,
+            offset,
+            file,
+            max_size,
+            data_dir,
+        };
+        (state, temp_dir)
+    }
 
     #[test]
     fn round_up_4k_aligns_lengths() {
@@ -162,12 +177,7 @@ mod tests {
 
     #[test]
     fn file_state_allocates_monotonically() {
-        let mut state = FileState {
-            file_id: 0,
-            offset: 0,
-            file: open_data_file(0).unwrap(),
-            max_size: BLOCK_SIZE * 2,
-        };
+        let (mut state, _tmp_dir) = state_with(BLOCK_SIZE * 2, 0);
 
         let first = state.allocate(BLOCK_SIZE, BLOCK_SIZE).unwrap();
         assert_eq!(first.file_id, 0);
@@ -183,12 +193,7 @@ mod tests {
 
     #[test]
     fn file_state_rotates_when_full() {
-        let mut state = FileState {
-            file_id: 0,
-            offset: BLOCK_SIZE - ALIGN_4K,
-            file: open_data_file(0).unwrap(),
-            max_size: BLOCK_SIZE,
-        };
+        let (mut state, _tmp_dir) = state_with(BLOCK_SIZE, BLOCK_SIZE - ALIGN_4K);
 
         let tail = round_up_4k(ALIGN_4K);
         let alloc = state.allocate(ALIGN_4K, tail).unwrap();

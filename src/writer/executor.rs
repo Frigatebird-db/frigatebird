@@ -211,13 +211,6 @@ struct WorkerContext {
     wal: Arc<Walrus>,
     rx: Receiver<WriterMessage>,
     buffered_rows: HashMap<String, Vec<Vec<String>>>,
-    wal_mode: WalAckMode,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum WalAckMode {
-    Runtime,
-    Replay,
 }
 
 impl WorkerContext {
@@ -331,13 +324,23 @@ impl WorkerContext {
     }
 
     fn ack_wal_entries(&self, table: &str, mut count: usize) {
-        if matches!(self.wal_mode, WalAckMode::Replay) || count == 0 {
+        if count == 0 {
             return;
         }
+        let mut handled = 0usize;
         while count > 0 {
             match self.wal.read_next(table, true) {
-                Ok(Some(_)) => count -= 1,
-                Ok(None) => break,
+                Ok(Some(_)) => {
+                    count -= 1;
+                    handled += 1;
+                }
+                Ok(None) => {
+                    eprintln!(
+                        "writer: wal ack shortfall for table {} (wanted {}, handled {})",
+                        table, count + handled, handled
+                    );
+                    break;
+                }
                 Err(err) => {
                     eprintln!("writer: wal ack failed for table {}: {}", table, err);
                     break;
@@ -430,6 +433,7 @@ impl WorkerContext {
         }
 
         self.ack_wal_entries(table, total_rows);
+        self.wal.mark_topic_clean(table);
     }
 
     fn flush_pending(&mut self, table: &str) {
@@ -691,7 +695,6 @@ impl Writer {
                 wal: Arc::clone(&wal),
                 rx,
                 buffered_rows: HashMap::new(),
-                wal_mode: WalAckMode::Runtime,
             };
             let shutdown_flag = Arc::clone(&is_shutdown);
             let handle = thread::spawn(move || run_worker(ctx, shutdown_flag));
@@ -787,10 +790,12 @@ impl Writer {
             wal: Arc::clone(&wal),
             rx: stub_rx,
             buffered_rows: HashMap::new(),
-            wal_mode: WalAckMode::Replay,
         };
 
         for table in tables {
+            if wal.topic_is_clean(&table) {
+                continue;
+            }
             loop {
                 match wal.read_next(&table, true) {
                     Ok(Some(entry)) => {
@@ -807,6 +812,7 @@ impl Writer {
                 }
             }
             ctx.flush_pending(&table);
+            wal.mark_topic_clean(&table);
         }
         Ok(())
     }
