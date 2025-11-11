@@ -1,0 +1,863 @@
+
+running 123 tests
+test pipeline::builder::tests::test_apply_filters_filters_rows ... ok
+test pipeline::builder::tests::test_apply_filters_empty_batch ... ok
+test pipeline::builder::tests::test_apply_filters_no_filters ... ok
+test executor::tests::job_handles_sort_by_cost ... ok
+test pipeline::builder::tests::test_apply_filters_no_pages_clears_batch ... ok
+test pipeline::builder::tests::test_compare_values_boolean_false ... ok
+test pipeline::builder::tests::test_build_pipeline_no_filters ... ok
+test pipeline::builder::tests::test_compare_values_boolean_gt ... ok
+test pipeline::builder::tests::test_build_pipeline_with_filters ... ok
+test pipeline::builder::tests::test_compare_values_boolean_true ... ok
+test pipeline::builder::tests::test_compare_values_float_gt ... ok
+test pipeline::builder::tests::test_compare_values_float_lte ... ok
+test pipeline::builder::tests::test_compare_values_gte_float ... ok
+test pipeline::builder::tests::test_compare_values_float_scientific ... ok
+test pipeline::builder::tests::test_compare_values_integer_gt ... ok
+test pipeline::builder::tests::test_compare_values_integer_lt ... ok
+test pipeline::builder::tests::test_compare_values_integer_negative ... ok
+test pipeline::builder::tests::test_compare_values_integer_eq ... ok
+test pipeline::builder::tests::test_compare_values_integer_vs_float ... ok
+test pipeline::builder::tests::test_compare_values_large_numbers ... ok
+test pipeline::builder::tests::test_compare_values_not_eq_integer ... ok
+test pipeline::builder::tests::test_compare_values_mixed_numeric_string ... ok
+test pipeline::builder::tests::test_compare_values_string_eq ... ok
+test pipeline::builder::tests::test_compare_values_string_fallback ... ok
+test pipeline::builder::tests::test_compare_values_zero_comparisons ... ok
+test pipeline::builder::tests::test_datetime_common_format_mdy ... ok
+test pipeline::builder::tests::test_datetime_iso_date_comparison ... ok
+test pipeline::builder::tests::test_datetime_leap_year ... ok
+test pipeline::builder::tests::test_datetime_iso_timestamp_comparison ... ok
+test pipeline::builder::tests::test_datetime_unix_timestamp ... ok
+test pipeline::builder::tests::test_duration_compact_format ... ok
+test pipeline::builder::tests::test_duration_complex_compact ... ok
+test pipeline::builder::tests::test_duration_days_vs_hours ... ok
+test pipeline::builder::tests::test_duration_simple_format ... ok
+test pipeline::builder::tests::test_duration_weeks ... ok
+test pipeline::builder::tests::test_eval_expr_eq_matches ... ok
+test pipeline::builder::tests::test_eval_expr_gt_lexicographic ... ok
+test pipeline::builder::tests::test_eval_expr_gte ... ok
+test pipeline::builder::tests::test_eval_expr_lt ... ok
+test pipeline::builder::tests::test_eval_expr_lte ... ok
+test pipeline::builder::tests::test_eval_expr_not_eq ... ok
+test pipeline::builder::tests::test_eval_expr_unsupported_returns_true ... ok
+test pipeline::builder::tests::test_eval_expr_unsupported_right_side ... ok
+test pipeline::builder::tests::test_eval_filter_and_both_true ... ok
+test pipeline::builder::tests::test_eval_filter_and_short_circuit ... ok
+test pipeline::builder::tests::test_eval_filter_leaf ... ok
+test pipeline::builder::tests::test_eval_filter_nested_and_or ... ok
+test pipeline::builder::tests::test_extract_leaf_filters ... ok
+test pipeline::builder::tests::test_eval_filter_or_any_true ... ok
+test pipeline::builder::tests::test_extract_primary_column_binary_op ... ok
+test pipeline::builder::tests::test_extract_primary_column_simple ... ok
+test pipeline::builder::tests::test_ilike_case_insensitive ... ok
+test pipeline::builder::tests::test_ilike_starts_with_case_insensitive ... ok
+test pipeline::builder::tests::test_ip_address_comparison_lexicographic_wrong ... ok
+test pipeline::builder::tests::test_ip_address_comparison_gt ... ok
+test pipeline::builder::tests::test_is_not_null ... ok
+test pipeline::builder::tests::test_is_null_empty_string ... ok
+test pipeline::builder::tests::test_is_null_null_string ... ok
+test pipeline::builder::tests::test_like_contains ... ok
+test pipeline::builder::tests::test_like_ends_with ... ok
+test pipeline::builder::tests::test_ip_address_different_octets ... ok
+test pipeline::builder::tests::test_like_exact_match ... ok
+test pipeline::builder::tests::test_like_negated ... ok
+test pipeline::builder::tests::test_like_single_char_wildcard ... ok
+test pipeline::builder::tests::test_like_starts_with ... ok
+test pipeline::builder::tests::test_mixed_types_fallback_correctly ... ok
+test pipeline::builder::tests::test_number_vs_date_priority ... ok
+test pipeline::builder::tests::test_multiple_filters_and_logic ... ok
+test pipeline::builder::tests::test_pipeline_step_execute_root ... ignored
+test pipeline::builder::tests::test_parse_bool_variations ... ok
+test pipeline::builder::tests::test_pipeline_step_execute_with_filters ... ignored
+test pipeline::builder::tests::test_regex_both_anchors ... ok
+test pipeline::builder::tests::test_regex_ends_with_anchor ... ok
+test pipeline::builder::tests::test_regex_negated ... ok
+test pipeline::builder::tests::test_regex_simple_contains ... ok
+test pipeline::builder::tests::test_regex_starts_with_anchor ... ok
+test pipeline::builder::tests::test_uuid_case_insensitive ... ok
+test pipeline::builder::tests::test_uuid_no_hyphens ... ok
+test pipeline::builder::tests::test_uuid_comparison ... ok
+test pipeline::builder::tests::test_version_major_comparison ... ok
+test pipeline::builder::tests::test_version_minor_comparison ... ok
+test pipeline::builder::tests::test_version_short_format ... ok
+test pipeline::builder::tests::test_version_patch_comparison ... ok
+test pipeline::builder::tests::test_version_with_prerelease ... ok
+test pipeline::parsers::tests::version_comparison_orders_patches ... ok
+test pool::scheduler::tests::thread_pool_graceful_shutdown ... ok
+test pool::scheduler::tests::thread_pool_executes_multiple_jobs ... ok
+test sql::executor::pruning_tests::does_not_prune_when_overlap_exists ... ok
+test pool::scheduler::tests::thread_pool_job_ordering_with_single_worker ... ok
+test sql::executor::pruning_tests::extract_prunable_predicates_from_conjunction ... ok
+test sql::executor::pruning_tests::prunes_is_null_when_page_has_no_nulls ... ok
+test sql::executor::pruning_tests::prunes_is_not_null_when_page_all_nulls ... ok
+test sql::executor::pruning_tests::should_prune_when_range_disjoint ... ok
+test pool::scheduler::tests::thread_pool_new_creates_pool ... ok
+test pool::scheduler::tests::thread_pool_handles_panicking_job ... ok
+test pool::scheduler::tests::thread_pool_jobs_execute_concurrently ... ok
+test pool::scheduler::tests::thread_pool_executes_single_job ... ok
+test pool::scheduler::tests::thread_pool_single_worker ... ok
+test sql::executor::pruning_tests::unsupported_expression_returns_none ... ok
+test pool::scheduler::tests::thread_pool_many_workers ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_full_key ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_ignores_trailing_columns ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_rejects_missing_leading_column ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_single_column ... ok
+test writer::allocator::tests::compute_alloc_len_handles_full_blocks_and_tail ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_with_or ... ok
+test writer::allocator::tests::round_up_4k_aligns_lengths ... ok
+test writer::executor::writer_stats_tests::derive_stats_from_int_page ... ok
+test writer::allocator::tests::file_state_allocates_monotonically ... ok
+test writer::executor::writer_stats_tests::derive_stats_respects_null_entries ... ok
+test writer::allocator::tests::file_state_rotates_when_full ... ok
+test writer::executor::writer_stats_tests::derive_stats_tracks_all_null_pages ... ok
+test writer::update_job::tests::column_update_clone_works ... ok
+test writer::update_job::tests::column_update_new_creates_update ... ok
+test writer::update_job::tests::column_update_with_operations ... ok
+test writer::update_job::tests::update_job_mixed_operations ... ok
+test writer::update_job::tests::update_job_multiple_columns ... ok
+test writer::update_job::tests::update_job_new_creates_job ... ok
+test writer::update_job::tests::update_job_with_columns ... ok
+test writer::update_job::tests::update_op_append_stores_entry ... ok
+test writer::update_job::tests::update_op_clone_works ... ok
+test writer::update_job::tests::update_op_insert_at_stores_row_and_entry ... ok
+test writer::update_job::tests::update_op_overwrite_stores_row_and_entry ... ok
+
+test result: ok. 121 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 38 tests
+test pool::scheduler::tests::thread_pool_job_ordering_with_single_worker ... ok
+test sql::executor::pruning_tests::prunes_is_not_null_when_page_all_nulls ... ok
+test pool::scheduler::tests::thread_pool_graceful_shutdown ... ok
+test sql::executor::pruning_tests::does_not_prune_when_overlap_exists ... ok
+test sql::executor::pruning_tests::extract_prunable_predicates_from_conjunction ... ok
+test pool::scheduler::tests::thread_pool_single_worker ... ok
+test pool::scheduler::tests::thread_pool_executes_single_job ... ok
+test pool::scheduler::tests::thread_pool_executes_multiple_jobs ... ok
+test sql::executor::pruning_tests::prunes_is_null_when_page_has_no_nulls ... ok
+test sql::executor::pruning_tests::should_prune_when_range_disjoint ... ok
+test pool::scheduler::tests::thread_pool_jobs_execute_concurrently ... ok
+test sql::executor::pruning_tests::unsupported_expression_returns_none ... ok
+test pool::scheduler::tests::thread_pool_new_creates_pool ... ok
+test pool::scheduler::tests::thread_pool_handles_panicking_job ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_rejects_missing_leading_column ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_full_key ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_ignores_trailing_columns ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_single_column ... ok
+test writer::allocator::tests::compute_alloc_len_handles_full_blocks_and_tail ... ok
+test sql::executor::scan_helpers::tests::test_collect_prefix_with_or ... ok
+test writer::allocator::tests::round_up_4k_aligns_lengths ... ok
+test writer::executor::writer_stats_tests::derive_stats_from_int_page ... ok
+test writer::allocator::tests::file_state_allocates_monotonically ... ok
+test writer::executor::writer_stats_tests::derive_stats_respects_null_entries ... ok
+test writer::executor::writer_stats_tests::derive_stats_tracks_all_null_pages ... ok
+test writer::update_job::tests::column_update_clone_works ... ok
+test writer::allocator::tests::file_state_rotates_when_full ... ok
+test writer::update_job::tests::column_update_new_creates_update ... ok
+test writer::update_job::tests::column_update_with_operations ... ok
+test writer::update_job::tests::update_job_mixed_operations ... ok
+test writer::update_job::tests::update_job_multiple_columns ... ok
+test writer::update_job::tests::update_job_new_creates_job ... ok
+test writer::update_job::tests::update_job_with_columns ... ok
+test writer::update_job::tests::update_op_append_stores_entry ... ok
+test writer::update_job::tests::update_op_clone_works ... ok
+test pool::scheduler::tests::thread_pool_many_workers ... ok
+test writer::update_job::tests::update_op_insert_at_stores_row_and_entry ... ok
+test writer::update_job::tests::update_op_overwrite_stores_row_and_entry ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 13 tests
+test ensure_pages_cached_empty_list ... ok
+test fetch_batch_empty_list ... ok
+test ensure_pages_cached_nonexistent ... ok
+test ensure_pages_cached_already_cached ... ok
+test prefetch_empty_list ... ok
+test column_chain_handles_many_versions ... ok
+test prefetch_k_equals_zero ... ok
+test prefetch_nonexistent_pages ... ok
+test compress_alternating_pattern ... ok
+test compress_random_binary_data ... ok
+test compress_degenerate_case_all_same_char ... ok
+test cache_thrash_add_evict_repeatedly ... ok
+test cache_concurrent_readers_single_writer ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 12 tests
+test compress_then_decompress_empty_page ... ok
+test compress_empty_entries ... ok
+test compress_arc_sharing ... ok
+test compressor_new_creates_instance ... ok
+test compress_then_decompress_single_entry ... ok
+test compress_with_special_characters ... ok
+test compress_then_decompress_multiple_entries ... ok
+test compress_decompress_multiple_times ... ok
+test compress_incompressible_data ... ok
+test compress_actually_compresses ... ok
+test compress_large_page ... ok
+test compress_very_large_entry ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 39 tests
+test cache_get_nonexistent_key ... ok
+test compress_empty_page ... ok
+test entry_empty_string ... ok
+test entry_null_bytes ... ok
+test compress_single_entry_page ... ok
+test entry_special_characters ... ok
+test fetcher_collect_cached_all_miss ... ok
+test fetcher_collect_cached_empty_list ... ok
+test fetcher_collect_cached_partial_hit ... ok
+test job_get_next_after_completion ... ok
+test cache_add_same_key_repeatedly ... ok
+test job_single_step ... ok
+test job_with_zero_steps ... ok
+test metadata_column_name_with_special_chars ... ok
+test cache_concurrent_add_same_key ... ok
+test compress_already_compressed_data ... ok
+test metadata_empty_column_name ... ok
+test metadata_lookup_nonexistent_id ... ok
+test metadata_range_end_before_start ... ok
+test metadata_lookup_empty_id ... ok
+test metadata_range_boundary_exact_match ... ok
+test metadata_range_start_equals_end ... ok
+test compress_decompress_preserves_order ... ok
+test concurrent_range_queries_same_column ... ok
+test page_empty_entries_vector ... ok
+test page_handler_get_pages_duplicate_descriptors ... ok
+test page_handler_get_pages_empty_list ... ok
+test page_handler_write_back_then_read ... ok
+test page_single_entry ... ok
+test prefetch_all_pages_k_equals_total ... ok
+test prefetch_k_greater_than_total ... ok
+test range_query_max_timestamp ... ok
+test range_query_large_range ... ok
+test range_query_min_timestamp ... ok
+test page_handler_concurrent_write_back_same_id ... ok
+test entry_very_long_string ... ok
+test page_many_entries ... ok
+test cache_has_after_eviction ... ok
+test metadata_register_same_offset_multiple_times ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 20 tests
+test empty_column_range_query ... ok
+test compressor_zero_byte_page ... ok
+test max_u64_timestamp_query ... ok
+test entry_unicode_boundary_cases ... ok
+test mvcc_multiple_versions_same_timestamp ... ok
+test compressor_single_byte_entries ... ok
+test range_query_exact_boundary ... ok
+test range_query_far_past_existing_entries ... ok
+test cache_update_same_key_rapidly ... ok
+test range_query_zero_width ... ok
+test zero_timestamp_query ... ok
+test page_directory_lookup_after_many_versions ... ok
+test entry_max_size_string ... ok
+test concurrent_register_same_column ... ok
+test compressor_highly_repetitive_data ... ok
+test page_cache_concurrent_eviction_and_add ... ok
+test page_cache_eviction_lru_order_stress ... ok
+test mvcc_timestamp_boundary_exact_match ... ok
+test mvcc_timestamp_before_all_versions ... ok
+test concurrent_register_and_query ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+running 16 tests
+test test_complex_filter_with_edge_cases ... ok
+test test_interleaved_multi_table_operations ... ok
+test test_boundary_row_indices ... ok
+test test_alternating_insert_delete_pattern ... ok
+test test_insert_after_delete_all ... ok
+test test_delete_patterns ... ok
+test test_mixed_numeric_string_sorting ... ok
+test test_overwrite_row_via_update ... ok
+test test_numeric_edge_cases ... ok
+test test_many_duplicates_sort_stability ... ok
+test test_delete_all_rows_one_by_one ... ok
+test test_empty_table_operations ... ok
+test test_rapid_insert_delete_insert_same_value ... ok
+test test_special_characters_and_edge_values ... ok
+test test_update_same_row_multiple_times ... ok
+test test_very_long_strings ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+
+running 9 tests
+test current_epoch_millis_reasonable_range ... ok
+test current_epoch_millis_returns_positive ... ok
+test entry_clone_works ... ok
+test entry_new_creates_with_data ... ok
+test entry_new_with_empty_string ... ok
+test entry_serialization_roundtrip ... ok
+test entry_with_special_characters ... ok
+test entry_new_with_large_data ... ok
+test current_epoch_millis_increases ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 16 tests
+test executor_empty_job ... ok
+test executor_job_cost_equals_step_count ... ok
+test executor_job_table_name ... ok
+test executor_job_id_generated ... ok
+test executor_job_unique_ids ... ok
+test executor_job_ordering_by_cost ... ok
+test executor_job_get_next_executes_steps ... ok
+test executor_job_get_next_multiple_workers ... ok
+test executor_new_creates_with_threads ... ok
+test executor_step_execution_sequence ... ok
+test executor_submit_single_job ... ok
+test executor_with_minimum_threads ... ok
+test executor_submit_multiple_jobs ... ok
+test executor_concurrent_job_submission ... ok
+test executor_with_many_threads ... ok
+test executor_stress_test ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+
+running 24 tests
+test add_columns_extends_existing_table ... ok
+test default_table_column_created_on_page_registration ... ok
+test page_directory_latest_nonexistent_column ... ok
+test page_directory_lookup_nonexistent_id ... ok
+test page_directory_multiple_columns ... ok
+test page_directory_new_creates_empty ... ok
+test page_directory_range_empty_result ... ok
+test page_directory_overlapping_ranges ... ok
+test page_directory_range_query ... ok
+test page_directory_concurrent_lookup ... ok
+test page_directory_large_range ... ok
+test page_directory_register_and_lookup ... ok
+test page_directory_concurrent_register ... ok
+test register_batch_replaces_tail_and_updates_prefix ... ok
+test register_table_records_columns_and_ordering ... ok
+test table_meta_store_new_creates_empty ... ok
+test update_latest_entry_count_adjusts_metadata ... ok
+test page_directory_latest_returns_most_recent ... ok
+test directory_metadata_client_commit_round_trips_via_journal ... ok
+test page_directory_range_with_timestamp_bound ... ok
+test meta_journal_randomized_sequences_survive_replay ... ok
+test meta_journal_replay_handles_replacements_and_stats ... ok
+test meta_journal_replay_publishes_pages ... ok
+test metadata_commit_crash_recovery_preserves_latest_state ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s
+
+
+running 29 tests
+test multiple_scans_same_column ... ok
+test ops_handler_column_names_with_slashes ... ok
+test ops_handler_empty_column_name ... ok
+test ops_handler_very_long_column_name ... ok
+test create_table_plan_registers_metadata ... ok
+test ops_handler_special_column_names ... ok
+test range_scan_column_entry_empty_range ... ok
+test ops_handler_very_long_data ... ok
+test ops_handler_whitespace_column_names ... ok
+test range_scan_column_entry_zero_width_range ... ok
+test range_scan_column_entry_nonexistent_column ... ok
+test ops_handler_concurrent_operations ... ok
+test range_scan_handles_inverted_range ... ok
+test range_scan_single_row ... ok
+test range_scan_with_different_commit_times ... ok
+test range_scan_with_max_bounds ... ok
+test update_and_scan_interaction ... ok
+test update_column_entry_large_row_index ... ok
+test update_column_entry_basic ... ok
+test sorted_upsert_inserts_in_order ... ok
+test update_column_entry_row_zero ... ok
+test update_handles_out_of_bounds ... ok
+test update_with_empty_data ... ok
+test upsert_data_into_column_creates_new_page ... ok
+test upsert_data_large_string ... ok
+test upsert_data_with_empty_string ... ok
+test upsert_data_with_special_characters ... ok
+test upsert_data_with_unicode ... ok
+test upsert_handles_error_cases ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 22 tests
+test order_by_lexicographic_inserts_keep_sorted_strings ... ok
+test composite_order_by_inserts_are_sorted ... ok
+test order_by_numeric_random_inserts_preserve_order_and_metadata ... ok
+test order_by_numeric_duplicates_update_prefix_counts ... ok
+test composite_order_by_numeric_then_lexicographic ... ok
+test long_end_to_end_empty_strings_and_mixed_types ... ok
+test long_end_to_end_single_column_order_by_with_updates_and_deletes ... ok
+test long_end_to_end_multi_column_order_by_complex_operations ... ok
+test sql_executor_end_to_end_sorted_insert ... ok
+test long_end_to_end_three_column_order_by ... ok
+test sql_executor_query_group_by_requires_aggregates ... ok
+test sql_executor_query_group_by_requires_prefix ... ok
+test sql_executor_numeric_aggregates ... ok
+test sql_executor_query_handles_nulls ... ok
+test sql_executor_query_limit_offset_respected ... ok
+test long_end_to_end_stress_many_inserts_updates_deletes ... ok
+test sql_executor_query_group_by_table_prefix ... ok
+test sql_executor_query_projects_expressions ... ok
+test sql_executor_query_requires_sort_predicate ... ok
+test sql_executor_query_returns_projected_rows ... ok
+test sql_executor_query_supports_comparison_predicates ... ok
+test sql_executor_query_supports_like_predicates ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+
+running 19 tests
+test page_cache_arc_sharing ... ok
+test page_cache_add_multiple_pages ... ok
+test page_cache_add_single_page ... ok
+test page_cache_compressed_entry_creation ... ok
+test page_cache_get_existing_page ... ok
+test page_cache_evict_nonexistent ... ok
+test page_cache_get_nonexistent_page_returns_none ... ok
+test page_cache_clone_entries ... ok
+test page_cache_has_returns_correct_status ... ok
+test page_cache_lifecycle_called_on_evict ... ok
+test page_cache_manual_evict ... ok
+test page_cache_new_creates_empty ... ok
+test page_cache_set_lifecycle_after_creation ... ok
+test page_cache_uncompressed_entry_creation ... ok
+test page_cache_update_existing_page ... ok
+test page_cache_eviction_at_capacity ... ok
+test page_cache_rapid_adds_and_evicts ... ok
+test page_cache_lifecycle_called_on_capacity_evict ... ok
+test page_cache_lru_order ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+
+running 20 tests
+test page_fetcher_get_cached_miss ... ok
+test page_fetcher_get_cached_hit ... ok
+test page_fetcher_collect_cached_multiple ... ok
+test page_handler_get_pages_with_prefetch_empty ... ok
+test page_handler_ensure_pages_cached_empty ... ok
+test page_handler_locate_latest ... ok
+test page_handler_get_pages_with_prefetch_zero_k ... ok
+test page_handler_new_creates_components ... ok
+test page_handler_ensure_pages_cached_already_in_cache ... ok
+test page_locator_lookup_works ... ok
+test page_handler_write_back_uncompressed ... ok
+test page_materializer_get_cached_hit ... ok
+test page_locator_range_for_column ... ok
+test page_materializer_get_cached_miss ... ok
+test page_materializer_collect_cached ... ok
+test page_materializer_write_back ... ok
+test page_materializer_materialize_one ... ok
+test page_handler_concurrent_access ... ok
+test page_materializer_materialize_many ... ok
+test page_locator_latest_for_column ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 9 tests
+test page_add_entry_increases_count ... ok
+test page_clone_works ... ok
+test page_new_creates_empty ... ok
+test page_add_multiple_entries ... ok
+test page_empty_serialization ... ok
+test page_entries_maintain_order ... ok
+test page_with_empty_entries ... ok
+test page_serialization_roundtrip ... ok
+test page_with_large_entries ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 14 tests
+test test_pipeline_no_filters ... ok
+test test_pipeline_with_delete_statement ... ok
+test test_pipeline_step_execution_flow ... ok
+test test_pipeline_step_execute_flow ... ok
+test test_multiple_filters_on_same_column ... ok
+test test_pipeline_root_step_behavior ... ok
+test test_pipeline_with_complex_filters ... ok
+test test_pipeline_execute_sequence ... ok
+test test_pipeline_multi_step_with_page_handler ... ok
+test test_pipeline_with_page_handler ... ok
+test test_pipeline_channel_wiring ... ok
+test test_job_cost_calculation ... ok
+test test_job_comparison_by_cost ... ok
+test test_pipeline_with_update_statement ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 10 tests
+test builds_empty_pipeline_for_no_filters ... ok
+test builds_pipeline_for_delete_with_filter ... ok
+test groups_multiple_filters_on_same_column ... ok
+test builds_single_step_for_single_column_filter ... ok
+test wires_channel_chain_between_steps ... ok
+test builds_pipeline_for_update_with_filter ... ok
+test builds_multiple_steps_for_multiple_column_filters ... ok
+test job_get_next_advances_steps ... ok
+test compares_jobs_by_cost ... ok
+test builds_pipeline_for_complex_query ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test sql_crash_multiple_rounds_accumulate_rows ... FAILED
+test sql_crash_multi_table_state_is_preserved ... FAILED
+test sql_crash_simple_select_persists_rows ... FAILED
+
+failures:
+
+---- sql_crash_multiple_rounds_accumulate_rows stdout ----
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673654, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 1
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673654
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673658, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 1
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673658
+[reader] read_next start: col=meta.critical.00, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.01, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.02, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.03, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.04, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.05, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.06, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.07, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.08, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.09, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.10, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.11, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.12, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.13, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.14, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.15, chain_len=0, idx=0, offset=0
+[alloc] handout: block_id=1, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673654, offset=0, limit=10485760
+[writer] wrote: col=kv, block_id=1, offset_before=0, bytes=152, offset_after=152
+[writer] immediate fsync: col=kv, block_id=1
+[writer] wrote: col=kv, block_id=1, offset_before=152, bytes=152, offset_after=304
+[writer] immediate fsync: col=kv, block_id=1
+[alloc] handout: block_id=1, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673658, offset=0, limit=10485760
+[writer] wrote: col=meta.critical.04, block_id=1, offset_before=0, bytes=380, offset_after=380
+[writer] immediate fsync: col=meta.critical.04, block_id=1
+writer: flushed 2 rows into table kv
+[reader] read_next start: col=kv, chain_len=0, idx=0, offset=0
+[reader] read_next: tail OK col=kv, block_id=1, consumed=152, new_tail_off=152
+[reader] read_next start: col=kv, chain_len=0, idx=0, offset=0
+[reader] read_next: tail OK col=kv, block_id=1, consumed=152, new_tail_off=304
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673696, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 2
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673654
+[reader] chain append(slow/new): col=kv, block_id=1, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673654, block_id=1, used=304, col=kv
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673696
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673700, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 2
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673658
+[reader] chain append(slow/new): col=meta.critical.04, block_id=1, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673658, block_id=1, used=380, col=meta.critical.04
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673700
+[reader] read_next start: col=meta.critical.00, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.01, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.02, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.03, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.04, chain_len=1, idx=0, offset=0
+[reader] read_next: OK col=meta.critical.04, block_id=1, consumed=380, new_offset=380
+[reader] read_next start: col=meta.critical.04, chain_len=1, idx=0, offset=380
+[reader] read_next: advance block col=meta.critical.04, block_id=1, offset=380, used=380
+[reader] read_next start: col=meta.critical.05, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.06, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.07, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.08, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.09, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.10, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.11, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.12, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.13, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.14, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.15, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=kv, chain_len=1, idx=1, offset=0
+[reader] read_next: advance block col=kv, block_id=1, offset=304, used=304
+[alloc] handout: block_id=1, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673696, offset=0, limit=10485760
+[writer] wrote: col=kv, block_id=1, offset_before=0, bytes=152, offset_after=152
+[writer] immediate fsync: col=kv, block_id=1
+[alloc] handout: block_id=1, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673700, offset=0, limit=10485760
+[writer] wrote: col=meta.critical.04, block_id=1, offset_before=0, bytes=380, offset_after=380
+[writer] immediate fsync: col=meta.critical.04, block_id=1
+[reader] read_next start: col=kv, chain_len=1, idx=1, offset=0
+[reader] read_next: tail OK col=kv, block_id=1, consumed=152, new_tail_off=152
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673731, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 3
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673654
+[reader] chain append(slow/new): col=kv, block_id=1, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673654, block_id=1, used=304, col=kv
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673696
+[reader] chain append(fast): col=kv, block_id=2, chain_len 1->2
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673696, block_id=2, used=152, col=kv
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0/1762829673731
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673735, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 3
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673658
+[reader] chain append(slow/new): col=meta.critical.04, block_id=1, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673658, block_id=1, used=380, col=meta.critical.04
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673700
+[reader] chain append(fast): col=meta.critical.04, block_id=2, chain_len 1->2
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673700, block_id=2, used=380, col=meta.critical.04
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpP8e7jd/sql-crash-test-0-meta/1762829673735
+[reader] read_next start: col=meta.critical.00, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.01, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.02, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.03, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.04, chain_len=2, idx=0, offset=380
+[reader] read_next: advance block col=meta.critical.04, block_id=1, offset=380, used=380
+[reader] read_next: OK col=meta.critical.04, block_id=2, consumed=380, new_offset=380
+[reader] read_next start: col=meta.critical.04, chain_len=2, idx=1, offset=380
+[reader] read_next: advance block col=meta.critical.04, block_id=2, offset=380, used=380
+[reader] read_next start: col=meta.critical.05, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.06, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.07, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.08, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.09, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.10, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.11, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.12, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.13, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.14, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.15, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=kv, chain_len=2, idx=2, offset=0
+[reader] read_next: OK col=kv, block_id=1, consumed=152, new_offset=304
+[reader] read_next start: col=kv, chain_len=2, idx=0, offset=304
+[reader] read_next: advance block col=kv, block_id=1, offset=304, used=304
+[reader] read_next: OK col=kv, block_id=2, consumed=152, new_offset=152
+[reader] read_next start: col=kv, chain_len=2, idx=1, offset=152
+[reader] read_next: advance block col=kv, block_id=2, offset=152, used=152
+writer: unable to flush rows for table kv - missing sort key
+
+thread 'sql_crash_multiple_rounds_accumulate_rows' panicked at tests/sql_crash_recovery_tests.rs:262:9:
+assertion `left == right` failed
+  left: []
+ right: [("k1", "v1"), ("k2", "v2b"), ("k3", "v3")]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- sql_crash_multi_table_state_is_preserved stdout ----
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1/1762829673751, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 1
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1/1762829673751
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1-meta/1762829673755, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 1
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1-meta/1762829673755
+[reader] read_next start: col=meta.critical.00, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.01, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.02, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.03, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.04, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.05, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.06, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.07, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.08, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.09, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.10, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.11, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.12, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.13, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.14, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.15, chain_len=0, idx=0, offset=0
+[alloc] handout: block_id=1, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1/1762829673751, offset=0, limit=10485760
+[writer] wrote: col=accounts, block_id=1, offset_before=0, bytes=160, offset_after=160
+[writer] immediate fsync: col=accounts, block_id=1
+[alloc] handout: block_id=1, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1-meta/1762829673755, offset=0, limit=10485760
+[writer] wrote: col=meta.critical.13, block_id=1, offset_before=0, bytes=388, offset_after=388
+[writer] immediate fsync: col=meta.critical.13, block_id=1
+writer: flushed 1 rows into table accounts
+[reader] read_next start: col=accounts, chain_len=0, idx=0, offset=0
+[reader] read_next: tail OK col=accounts, block_id=1, consumed=160, new_tail_off=160
+[writer] wrote: col=accounts, block_id=1, offset_before=160, bytes=160, offset_after=320
+[writer] immediate fsync: col=accounts, block_id=1
+[writer] wrote: col=meta.critical.13, block_id=1, offset_before=388, bytes=388, offset_after=776
+[writer] immediate fsync: col=meta.critical.13, block_id=1
+[reader] read_next start: col=accounts, chain_len=0, idx=0, offset=0
+[reader] read_next: tail OK col=accounts, block_id=1, consumed=160, new_tail_off=320
+[alloc] handout: block_id=2, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1/1762829673751, offset=10485760, limit=10485760
+[writer] wrote: col=audit, block_id=2, offset_before=0, bytes=160, offset_after=160
+[writer] immediate fsync: col=audit, block_id=2
+[writer] wrote: col=audit, block_id=2, offset_before=160, bytes=160, offset_after=320
+[writer] immediate fsync: col=audit, block_id=2
+[alloc] handout: block_id=2, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1-meta/1762829673755, offset=10485760, limit=10485760
+[writer] wrote: col=meta.critical.08, block_id=2, offset_before=0, bytes=396, offset_after=396
+[writer] immediate fsync: col=meta.critical.08, block_id=2
+writer: flushed 2 rows into table audit
+[reader] read_next start: col=audit, chain_len=0, idx=0, offset=0
+[reader] read_next: tail OK col=audit, block_id=2, consumed=160, new_tail_off=160
+[reader] read_next start: col=audit, chain_len=0, idx=0, offset=0
+[reader] read_next: tail OK col=audit, block_id=2, consumed=160, new_tail_off=320
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1/1762829673857, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 2
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1/1762829673751
+[reader] chain append(slow/new): col=accounts, block_id=1, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1/1762829673751, block_id=1, used=320, col=accounts
+[reader] chain append(slow/new): col=audit, block_id=2, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1/1762829673751, block_id=2, used=320, col=audit
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1/1762829673857
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1-meta/1762829673861, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 2
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1-meta/1762829673755
+[reader] chain append(slow/new): col=meta.critical.13, block_id=1, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1-meta/1762829673755, block_id=1, used=776, col=meta.critical.13
+[reader] chain append(slow/new): col=meta.critical.08, block_id=2, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1-meta/1762829673755, block_id=2, used=396, col=meta.critical.08
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpztzmzT/sql-crash-test-1-meta/1762829673861
+[reader] read_next start: col=meta.critical.00, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.01, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.02, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.03, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.04, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.05, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.06, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.07, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.08, chain_len=1, idx=0, offset=0
+[reader] read_next: OK col=meta.critical.08, block_id=2, consumed=396, new_offset=396
+[reader] read_next start: col=meta.critical.08, chain_len=1, idx=0, offset=396
+[reader] read_next: advance block col=meta.critical.08, block_id=2, offset=396, used=396
+[reader] read_next start: col=meta.critical.09, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.10, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.11, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.12, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.13, chain_len=1, idx=0, offset=0
+[reader] read_next: OK col=meta.critical.13, block_id=1, consumed=388, new_offset=388
+[reader] read_next start: col=meta.critical.13, chain_len=1, idx=0, offset=388
+[reader] read_next: OK col=meta.critical.13, block_id=1, consumed=388, new_offset=776
+[reader] read_next start: col=meta.critical.13, chain_len=1, idx=0, offset=776
+[reader] read_next: advance block col=meta.critical.13, block_id=1, offset=776, used=776
+[reader] read_next start: col=meta.critical.14, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.15, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=audit, chain_len=1, idx=1, offset=0
+[reader] read_next: advance block col=audit, block_id=2, offset=320, used=320
+[reader] read_next start: col=accounts, chain_len=1, idx=1, offset=0
+[reader] read_next: advance block col=accounts, block_id=1, offset=320, used=320
+
+thread 'sql_crash_multi_table_state_is_preserved' panicked at tests/sql_crash_recovery_tests.rs:208:9:
+assertion `left == right` failed
+  left: []
+ right: [("a", "15")]
+
+---- sql_crash_simple_select_persists_rows stdout ----
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2/1762829673882, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 1
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2/1762829673882
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2-meta/1762829673887, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 1
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2-meta/1762829673887
+[reader] read_next start: col=meta.critical.00, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.01, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.02, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.03, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.04, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.05, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.06, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.07, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.08, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.09, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.10, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.11, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.12, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.13, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.14, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.15, chain_len=0, idx=0, offset=0
+[alloc] handout: block_id=1, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2/1762829673882, offset=0, limit=10485760
+[writer] wrote: col=logs, block_id=1, offset_before=0, bytes=152, offset_after=152
+[writer] immediate fsync: col=logs, block_id=1
+[alloc] handout: block_id=1, file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2-meta/1762829673887, offset=0, limit=10485760
+[writer] wrote: col=meta.critical.06, block_id=1, offset_before=0, bytes=380, offset_after=380
+[writer] immediate fsync: col=meta.critical.06, block_id=1
+writer: flushed 1 rows into table logs
+[reader] read_next start: col=logs, chain_len=0, idx=0, offset=0
+[reader] read_next: tail OK col=logs, block_id=1, consumed=152, new_tail_off=152
+[writer] wrote: col=logs, block_id=1, offset_before=152, bytes=152, offset_after=304
+[writer] immediate fsync: col=logs, block_id=1
+[writer] wrote: col=meta.critical.06, block_id=1, offset_before=380, bytes=380, offset_after=760
+[writer] immediate fsync: col=meta.critical.06, block_id=1
+[reader] read_next start: col=logs, chain_len=0, idx=0, offset=0
+[reader] read_next: tail OK col=logs, block_id=1, consumed=152, new_tail_off=304
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2/1762829673944, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 2
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2/1762829673882
+[reader] chain append(slow/new): col=logs, block_id=1, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2/1762829673882, block_id=1, used=304, col=logs
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2/1762829673944
+[walrus] new
+[alloc] init: created file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2-meta/1762829673948, max_file_size=1048576000B, block_size=10485760B
+[recovery] scanning files: 2
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2-meta/1762829673887
+[reader] chain append(slow/new): col=meta.critical.06, block_id=1, chain_len 0->1
+[recovery] appended block: file=/var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2-meta/1762829673887, block_id=1, used=760, col=meta.critical.06
+[recovery] file /var/folders/4p/xjzmpjd16bn9b6rhqw2kwwp80000gn/T/.tmpZghMN3/sql-crash-test-2-meta/1762829673948
+[reader] read_next start: col=meta.critical.00, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.01, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.02, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.03, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.04, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.05, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.06, chain_len=1, idx=0, offset=0
+[reader] read_next: OK col=meta.critical.06, block_id=1, consumed=380, new_offset=380
+[reader] read_next start: col=meta.critical.06, chain_len=1, idx=0, offset=380
+[reader] read_next: OK col=meta.critical.06, block_id=1, consumed=380, new_offset=760
+[reader] read_next start: col=meta.critical.06, chain_len=1, idx=0, offset=760
+[reader] read_next: advance block col=meta.critical.06, block_id=1, offset=760, used=760
+[reader] read_next start: col=meta.critical.07, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.08, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.09, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.10, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.11, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.12, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.13, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.14, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=meta.critical.15, chain_len=0, idx=0, offset=0
+[reader] read_next start: col=logs, chain_len=1, idx=1, offset=0
+[reader] read_next: advance block col=logs, block_id=1, offset=304, used=304
+
+thread 'sql_crash_simple_select_persists_rows' panicked at tests/sql_crash_recovery_tests.rs:154:9:
+assertion `left == right` failed
+  left: []
+ right: ["boot", "ready"]
+
+
+failures:
+    sql_crash_multi_table_state_is_preserved
+    sql_crash_multiple_rounds_accumulate_rows
+    sql_crash_simple_select_persists_rows
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+

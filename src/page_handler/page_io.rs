@@ -234,8 +234,13 @@ fn read_single_sync(fd: &mut File, offset: u64) -> io::Result<PageCacheEntryComp
 }
 
 fn read_size_from_meta(buf: &[u8]) -> usize {
-    let archived = unsafe { rkyv::archived_root::<Metadata>(buf) };
-    archived.read_size as usize
+    const SIZE_BYTES: usize = std::mem::size_of::<usize>();
+    if buf.len() < SIZE_BYTES {
+        return 0;
+    }
+    let mut raw = [0u8; SIZE_BYTES];
+    raw.copy_from_slice(&buf[..SIZE_BYTES]);
+    usize::from_le_bytes(raw)
 }
 
 #[cfg(target_os = "linux")]
@@ -291,7 +296,6 @@ fn open_direct_writer(path: &str) -> io::Result<File> {
     OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
         .custom_flags(libc::O_DIRECT)
         .open(path)
 }
@@ -303,7 +307,10 @@ fn open_direct_reader(path: &str) -> io::Result<File> {
 
 #[cfg(not(target_os = "linux"))]
 fn open_direct_writer(path: &str) -> io::Result<File> {
-    File::create(path)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(path)
 }
 
 #[cfg(all(test, target_os = "linux"))]

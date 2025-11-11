@@ -14,7 +14,7 @@ use idk_uwu_ig::{ops_handler::create_table_from_plan, sql::plan_create_table_sql
 use rkyv::to_bytes;
 use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -27,6 +27,7 @@ struct WalTestInstance {
     wal: Arc<Walrus>,
     meta_wal: Arc<Walrus>,
     _dir: TempDir,
+    _lock: MutexGuard<'static, ()>,
 }
 
 impl WalTestInstance {
@@ -34,7 +35,7 @@ impl WalTestInstance {
         let lock = WAL_ENV_MUTEX
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("wal env mutex poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let dir = TempDir::new().expect("create wal temp dir");
         let prev = env::var("WALRUS_DATA_DIR").ok();
         unsafe {
@@ -68,11 +69,11 @@ impl WalTestInstance {
                 env::remove_var("WALRUS_DATA_DIR");
             }
         }
-        drop(lock);
         WalTestInstance {
             wal,
             meta_wal,
             _dir: dir,
+            _lock: lock,
         }
     }
 

@@ -37,6 +37,9 @@ pub fn delete_row(
         if !in_bounds {
             return Err(other_error(format!("row {row_idx} out of bounds")));
         }
+        handler
+            .persist_descriptor_page(&descriptor, &updated)
+            .map_err(|err| other_error(format!("failed to persist {table}.{}: {err}", column.name)))?;
         handler.write_back_uncompressed(&descriptor.id, updated);
         handler
             .update_entry_count_in_table(table, &column.name, new_len)
