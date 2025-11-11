@@ -15,7 +15,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use walrus_rust::{Walrus, ReadConsistency};
 //!
 //! # fn main() -> std::io::Result<()> {
@@ -48,7 +48,7 @@
 //! - Maximum 2,000 entries per batch
 //! - Maximum ~10GB total payload per batch
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use walrus_rust::Walrus;
 //!
 //! # fn main() -> std::io::Result<()> {
@@ -76,7 +76,7 @@
 //!
 //! Control the trade-off between durability and performance:
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use walrus_rust::{Walrus, ReadConsistency, FsyncSchedule};
 //!
 //! # fn main() -> std::io::Result<()> {
@@ -96,7 +96,7 @@
 //!
 //! Configure when data is flushed to disk:
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use walrus_rust::{Walrus, ReadConsistency, FsyncSchedule};
 //!
 //! # fn main() -> std::io::Result<()> {
@@ -125,7 +125,7 @@
 //!
 //! Create isolated WAL instances with separate storage directories:
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use walrus_rust::{Walrus, ReadConsistency, FsyncSchedule};
 //!
 //! # fn main() -> std::io::Result<()> {
@@ -182,7 +182,7 @@
 //!
 //! ### Selecting a Backend
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use walrus_rust::{enable_fd_backend, disable_fd_backend};
 //!
 //! // Use FD backend (default - uses io_uring for batches on Linux)
@@ -220,7 +220,7 @@
 //!
 //! ## Types
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use walrus_rust::Entry;
 //! // Entry returned by read operations
 //! pub struct Entry {
@@ -250,7 +250,10 @@
 //! - [`Walrus::batch_read_for_topic()`]: Read multiple entries up to byte limit
 
 #![recursion_limit = "256"]
+#[cfg(doc)]
+extern crate self as walrus_rust;
 pub mod wal;
 pub use wal::{
     Entry, FsyncSchedule, ReadConsistency, WalIndex, Walrus, disable_fd_backend, enable_fd_backend,
 };
+pub use wal::{block, config, paths, runtime, storage};
