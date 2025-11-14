@@ -1,7 +1,7 @@
 pub mod block;
 pub mod config;
 pub mod paths;
-pub mod runtime;
+mod runtime;
 pub mod storage;
 
 pub use block::Entry;
