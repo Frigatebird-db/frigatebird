@@ -26,20 +26,25 @@ pub fn delete_row(
         let idx = row_idx as usize;
         let mut new_len = descriptor.entry_count;
         let mut in_bounds = true;
-        updated.mutate_disk_page(|disk_page| {
-            if idx >= disk_page.entries.len() {
-                in_bounds = false;
-                return;
-            }
-            disk_page.entries.remove(idx);
-            new_len = disk_page.entries.len() as u64;
-        });
+        updated.mutate_disk_page(
+            |disk_page| {
+                if idx >= disk_page.entries.len() {
+                    in_bounds = false;
+                    return;
+                }
+                disk_page.entries.remove(idx);
+                new_len = disk_page.entries.len() as u64;
+            },
+            crate::sql::types::DataType::String,
+        );
         if !in_bounds {
             return Err(other_error(format!("row {row_idx} out of bounds")));
         }
         handler
             .persist_descriptor_page(&descriptor, &updated)
-            .map_err(|err| other_error(format!("failed to persist {table}.{}: {err}", column.name)))?;
+            .map_err(|err| {
+                other_error(format!("failed to persist {table}.{}: {err}", column.name))
+            })?;
         handler.write_back_uncompressed(&descriptor.id, updated);
         handler
             .update_entry_count_in_table(table, &column.name, new_len)

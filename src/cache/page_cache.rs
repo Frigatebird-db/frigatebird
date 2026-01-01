@@ -1,6 +1,7 @@
 use crate::entry::current_epoch_millis;
 use crate::page::Page;
 use crate::sql::executor::batch::ColumnarPage;
+use crate::sql::types::DataType;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,9 +43,9 @@ pub struct PageCacheEntryUncompressed {
 }
 
 impl PageCacheEntryUncompressed {
-    pub fn from_disk_page(page: Page) -> Self {
+    pub fn from_disk_page(page: Page, dtype: DataType) -> Self {
         Self {
-            page: ColumnarPage::from_disk_page(page),
+            page: ColumnarPage::load(page, dtype),
         }
     }
 
@@ -52,17 +53,17 @@ impl PageCacheEntryUncompressed {
         self.page.as_disk_page()
     }
 
-    pub fn replace_with_disk_page(&mut self, page: Page) {
-        self.page.replace_with_disk_page(page);
+    pub fn replace_with_disk_page(&mut self, page: Page, dtype: DataType) {
+        self.page.replace_with_disk_page(page, dtype);
     }
 
-    pub fn mutate_disk_page<F>(&mut self, mutator: F)
+    pub fn mutate_disk_page<F>(&mut self, mutator: F, dtype: DataType)
     where
         F: FnOnce(&mut Page),
     {
         let mut page = self.as_disk_page();
         mutator(&mut page);
-        self.replace_with_disk_page(page);
+        self.replace_with_disk_page(page, dtype);
     }
 }
 

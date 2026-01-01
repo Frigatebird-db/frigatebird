@@ -249,7 +249,6 @@
 //! - [`Walrus::read_next()`]: Read next entry (checkpoint=true consumes, false peeks)
 //! - [`Walrus::batch_read_for_topic()`]: Read multiple entries up to byte limit
 
-#![recursion_limit = "256"]
 #[cfg(doc)]
 extern crate self as walrus_rust;
 pub mod wal;

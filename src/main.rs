@@ -1,3 +1,11 @@
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_assignments,
+    unused_mut
+)]
+
 use crate::cache::page_cache::{PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed};
 use crate::page_handler::{
     PageFetcher, PageHandler, PageLocator, PageMaterializer, page_io::PageIO,

@@ -315,7 +315,7 @@ mod tests {
     fn col(name: &str, ordinal: usize) -> ColumnCatalog {
         ColumnCatalog {
             name: name.to_string(),
-            data_type: "TEXT".into(),
+            data_type: crate::sql::types::DataType::String,
             ordinal,
         }
     }

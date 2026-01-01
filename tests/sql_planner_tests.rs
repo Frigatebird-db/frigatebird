@@ -1,4 +1,68 @@
+use idk_uwu_ig::metadata_store::{
+    ColumnDefinition, PageDirectory, TableDefinition, TableMetaStore,
+};
+use idk_uwu_ig::sql::types::DataType;
 use idk_uwu_ig::sql::{FilterExpr, QueryPlan, TableAccess, plan_create_table_sql, plan_sql};
+use std::sync::{Arc, RwLock};
+
+fn empty_directory() -> Arc<PageDirectory> {
+    let store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = Arc::new(PageDirectory::new(store));
+
+    directory
+        .register_table(TableDefinition::new(
+            "users",
+            vec![
+                ColumnDefinition::from_type("id", DataType::Int64),
+                ColumnDefinition::from_type("name", DataType::String),
+                ColumnDefinition::from_type("status", DataType::String),
+            ],
+            vec![],
+        ))
+        .unwrap();
+    directory
+        .register_table(TableDefinition::new(
+            "archive",
+            vec![ColumnDefinition::from_type("id", DataType::Int64)],
+            vec![],
+        ))
+        .unwrap();
+    directory
+        .register_table(TableDefinition::new(
+            "entries",
+            vec![
+                ColumnDefinition::from_type("id", DataType::Int64),
+                ColumnDefinition::from_type("published", DataType::Boolean),
+            ],
+            vec![],
+        ))
+        .unwrap();
+    directory
+        .register_table(TableDefinition::new(
+            "accounts",
+            vec![
+                ColumnDefinition::from_type("id", DataType::Int64),
+                ColumnDefinition::from_type("balance", DataType::Int64),
+                ColumnDefinition::from_type("status", DataType::String),
+                ColumnDefinition::from_type("region", DataType::String),
+                ColumnDefinition::from_type("vip", DataType::Boolean),
+            ],
+            vec![],
+        ))
+        .unwrap();
+    directory
+        .register_table(TableDefinition::new(
+            "sessions",
+            vec![ColumnDefinition::from_type(
+                "expires_at",
+                DataType::Timestamp,
+            )],
+            vec![],
+        ))
+        .unwrap();
+
+    directory
+}
 
 fn table_by_name<'a>(plan: &'a QueryPlan, name: &str) -> &'a TableAccess {
     plan.tables
@@ -16,7 +80,12 @@ fn assert_leaf(filter: &FilterExpr, expected_sql: &str) {
 
 #[test]
 fn plans_basic_select_reads() {
-    let plan = plan_sql("SELECT id, name FROM users WHERE status = 'active'").unwrap();
+    let directory = empty_directory();
+    let plan = plan_sql(
+        "SELECT id, name FROM users WHERE status = 'active'",
+        &directory,
+    )
+    .unwrap();
     let users = table_by_name(&plan, "users");
 
     assert!(users.write_columns.is_empty());
@@ -29,8 +98,12 @@ fn plans_basic_select_reads() {
 
 #[test]
 fn plans_insert_and_source_tables() {
-    let plan =
-        plan_sql("INSERT INTO archive (id) SELECT id FROM entries WHERE published = true").unwrap();
+    let directory = empty_directory();
+    let plan = plan_sql(
+        "INSERT INTO archive (id) SELECT id FROM entries WHERE published = true",
+        &directory,
+    )
+    .unwrap();
 
     let archive = table_by_name(&plan, "archive");
     assert!(archive.read_columns.is_empty());
@@ -45,7 +118,12 @@ fn plans_insert_and_source_tables() {
 
 #[test]
 fn plans_update_reads_and_writes() {
-    let plan = plan_sql("UPDATE accounts SET balance = balance + 10 WHERE id = 42").unwrap();
+    let directory = empty_directory();
+    let plan = plan_sql(
+        "UPDATE accounts SET balance = balance + 10 WHERE id = 42",
+        &directory,
+    )
+    .unwrap();
     let accounts = table_by_name(&plan, "accounts");
 
     assert!(accounts.write_columns.contains("balance"));
@@ -55,7 +133,8 @@ fn plans_update_reads_and_writes() {
 
 #[test]
 fn plans_delete_filters() {
-    let plan = plan_sql("DELETE FROM sessions WHERE expires_at < NOW()").unwrap();
+    let directory = empty_directory();
+    let plan = plan_sql("DELETE FROM sessions WHERE expires_at < NOW()", &directory).unwrap();
     let sessions = table_by_name(&plan, "sessions");
 
     assert!(sessions.write_columns.is_empty());
@@ -66,8 +145,10 @@ fn plans_delete_filters() {
 
 #[test]
 fn captures_and_or_filters() {
+    let directory = empty_directory();
     let plan = plan_sql(
         "SELECT id FROM accounts WHERE status = 'active' AND (region = 'US' OR vip = true)",
+        &directory,
     )
     .unwrap();
     let accounts = table_by_name(&plan, "accounts");

@@ -5,9 +5,9 @@ use io_uring::{IoUring, opcode, types};
 use libc;
 use rkyv::ser::{Serializer, serializers::AllocSerializer};
 use rkyv::{Archive, Deserialize, Serialize};
-use std::fs::{self, File};
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io;
 #[cfg(not(target_os = "linux"))]
 use std::io::Read;

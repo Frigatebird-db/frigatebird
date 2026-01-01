@@ -1,3 +1,12 @@
+#![recursion_limit = "256"]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_assignments,
+    unused_mut
+)]
+
 pub mod cache;
 pub mod entry;
 pub mod executor;

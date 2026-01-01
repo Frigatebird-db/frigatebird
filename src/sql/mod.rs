@@ -1,12 +1,17 @@
 pub mod executor;
 pub mod models;
 pub mod parser;
+pub mod physical_plan;
 pub mod planner;
+pub mod types;
+pub mod utils;
 
 pub use models::{ColumnSpec, CreateTablePlan, FilterExpr, PlannerError, QueryPlan, TableAccess};
 pub use parser::parse_sql;
 pub use planner::{plan_create_table_statement, plan_statement};
+pub use types::DataType;
 
+use crate::metadata_store::PageDirectory;
 use sqlparser::ast::Statement;
 
 /// Groups parsing and planning errors under a single type for consumers.
@@ -47,7 +52,7 @@ impl From<PlannerError> for SqlPlannerError {
 }
 
 /// Parse and plan a single SQL statement.
-pub fn plan_sql(sql: &str) -> Result<QueryPlan, SqlPlannerError> {
+pub fn plan_sql(sql: &str, directory: &PageDirectory) -> Result<QueryPlan, SqlPlannerError> {
     let mut statements = parse_sql(sql)?;
     if statements.is_empty() {
         return Err(PlannerError::EmptyStatement.into());
@@ -59,7 +64,7 @@ pub fn plan_sql(sql: &str) -> Result<QueryPlan, SqlPlannerError> {
         .into());
     }
     let statement = statements.pop().expect("len checked above");
-    plan_statement(&statement).map_err(Into::into)
+    plan_statement(&statement, directory).map_err(Into::into)
 }
 
 /// Parse and plan a CREATE TABLE statement.
@@ -79,6 +84,9 @@ pub fn plan_create_table_sql(sql: &str) -> Result<CreateTablePlan, SqlPlannerErr
 }
 
 /// Convenience for callers that already parsed the SQL.
-pub fn plan_statement_ref(statement: &Statement) -> Result<QueryPlan, SqlPlannerError> {
-    plan_statement(statement).map_err(Into::into)
+pub fn plan_statement_ref(
+    statement: &Statement,
+    directory: &PageDirectory,
+) -> Result<QueryPlan, SqlPlannerError> {
+    plan_statement(statement, directory).map_err(Into::into)
 }

@@ -168,17 +168,18 @@ fn compare_scalar_with_clause(
 
 fn scalar_to_string(value: &ScalarValue) -> String {
     match value {
-        ScalarValue::Null => String::new(),
-        ScalarValue::Int(value) => value.to_string(),
-        ScalarValue::Float(value) => format_float(*value),
-        ScalarValue::Text(text) => text.clone(),
-        ScalarValue::Bool(value) => {
+        ScalarValue::Int64(value) => value.to_string(),
+        ScalarValue::Float64(value) => format_float(*value),
+        ScalarValue::String(text) => text.clone(),
+        ScalarValue::Boolean(value) => {
             if *value {
-                "true".into()
+                "true".to_string()
             } else {
-                "false".into()
+                "false".to_string()
             }
         }
+        ScalarValue::Timestamp(ts) => ts.to_string(),
+        ScalarValue::Null => "NULL".to_string(),
     }
 }
 
@@ -225,7 +226,7 @@ pub(super) fn sort_batch_in_memory(
 }
 
 fn column_scalar_from_text(value: &str) -> ScalarValue {
-    ScalarValue::Text(value.to_string())
+    ScalarValue::String(value.to_string())
 }
 
 fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
@@ -233,9 +234,11 @@ fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
         return ScalarValue::Null;
     }
     match &page.data {
-        ColumnData::Int64(values) => ScalarValue::Int(values[idx] as i128),
-        ColumnData::Float64(values) => ScalarValue::Float(values[idx]),
+        ColumnData::Int64(values) => ScalarValue::Int64(values[idx]),
+        ColumnData::Float64(values) => ScalarValue::Float64(values[idx]),
         ColumnData::Text(values) => column_scalar_from_text(&values[idx]),
+        ColumnData::Boolean(values) => ScalarValue::Boolean(values[idx]),
+        ColumnData::Timestamp(values) => ScalarValue::Timestamp(values[idx]),
     }
 }
 

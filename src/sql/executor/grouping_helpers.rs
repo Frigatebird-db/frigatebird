@@ -3,7 +3,6 @@ use super::batch::ColumnarBatch;
 use super::expressions::{
     evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
 };
-use super::values::ScalarValue;
 use super::{GroupByInfo, GroupKey, GroupingSetPlan, SqlExecutionError};
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{Expr, GroupByExpr};

@@ -197,6 +197,7 @@ mod tests {
             steps.push(PipelineStep::new(
                 "test_table".to_string(),
                 format!("c{idx}"),
+                idx,
                 Vec::new(),
                 idx == 0,
                 Arc::clone(&page_handler),

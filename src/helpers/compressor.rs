@@ -1,6 +1,5 @@
 use crate::cache::page_cache::{PageCacheEntryCompressed, PageCacheEntryUncompressed};
 use crate::page::Page;
-use crate::sql::executor::batch::ColumnarPage;
 use bincode;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use std::sync::Arc;
@@ -23,22 +22,22 @@ impl Compressor {
         PageCacheEntryCompressed { page: compressed }
     }
 
-    pub fn decompress(&self, data: Arc<PageCacheEntryCompressed>) -> ColumnarPage {
+    pub fn decompress(&self, data: Arc<PageCacheEntryCompressed>) -> Page {
         let payload = &data.as_ref().page;
         if payload.is_empty() {
-            return ColumnarPage::empty();
+            return Page::new();
         }
 
         match decompress_size_prepended(payload) {
             Ok(bytes) => {
                 let page: Page =
                     bincode::deserialize(&bytes).expect("failed to deserialize decompressed page");
-                ColumnarPage::from_disk_page(page)
+                page
             }
             Err(_) => {
                 // Fallback for legacy/uncompressed pages or truncated buffers.
                 match bincode::deserialize::<Page>(payload) {
-                    Ok(page) => ColumnarPage::from_disk_page(page),
+                    Ok(page) => page,
                     Err(err) => panic!("failed to decompress page payload: {err}"),
                 }
             }

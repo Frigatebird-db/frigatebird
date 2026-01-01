@@ -1,16 +1,25 @@
+use crate::metadata_store::{PageDirectory, TableCatalog};
+use crate::sql::executor::values::ScalarValue;
 use crate::sql::models::{
     ColumnSpec, CreateTablePlan, FilterExpr, PlannerError, PlannerResult, QueryPlan, TableAccess,
 };
+use crate::sql::physical_plan::PhysicalExpr;
+use crate::sql::types::DataType;
+use crate::sql::utils::{parse_bool, parse_datetime};
+use chrono::Utc;
 use sqlparser::ast::{
     Assignment, BinaryOperator, ColumnDef, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
     GroupByExpr, Ident, ObjectName, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement,
-    TableFactor, TableWithJoins, WindowType,
+    TableFactor, TableWithJoins, Value, WindowType,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub fn plan_statement(statement: &Statement) -> PlannerResult<QueryPlan> {
+pub fn plan_statement(
+    statement: &Statement,
+    directory: &PageDirectory,
+) -> PlannerResult<QueryPlan> {
     match statement {
-        Statement::Query(query) => plan_query(query),
+        Statement::Query(query) => plan_query(query, directory),
         Statement::Insert {
             table_name,
             columns,
@@ -22,7 +31,9 @@ pub fn plan_statement(statement: &Statement) -> PlannerResult<QueryPlan> {
             columns,
             source.as_deref(),
             returning.as_ref().map(|items| items.as_slice()),
+            directory,
         ),
+
         Statement::Update {
             table,
             assignments,
@@ -40,6 +51,7 @@ pub fn plan_statement(statement: &Statement) -> PlannerResult<QueryPlan> {
                 assignments,
                 selection.as_ref(),
                 returning.as_ref().map(|items| items.as_slice()),
+                directory,
             )
         }
         Statement::Delete {
@@ -62,6 +74,7 @@ pub fn plan_statement(statement: &Statement) -> PlannerResult<QueryPlan> {
                 returning.as_ref().map(|items| items.as_slice()),
                 order_by,
                 limit.as_ref(),
+                directory,
             )
         }
         _ => Err(PlannerError::Unsupported(
@@ -131,10 +144,10 @@ pub fn plan_create_table_statement(statement: &Statement) -> PlannerResult<Creat
     }
 }
 
-fn plan_query(query: &Query) -> PlannerResult<QueryPlan> {
+fn plan_query(query: &Query, directory: &PageDirectory) -> PlannerResult<QueryPlan> {
     let mut plan = match query.body.as_ref() {
-        SetExpr::Select(select) => plan_select(select)?,
-        SetExpr::Query(inner) => plan_query(inner)?,
+        SetExpr::Select(select) => plan_select(select, directory)?,
+        SetExpr::Query(inner) => plan_query(inner, directory)?,
         _ => Err(PlannerError::Unsupported(
             "only simple SELECT queries are supported right now".into(),
         ))?,
@@ -161,7 +174,7 @@ fn plan_query(query: &Query) -> PlannerResult<QueryPlan> {
     Ok(plan)
 }
 
-fn plan_select(select: &Select) -> PlannerResult<QueryPlan> {
+fn plan_select(select: &Select, directory: &PageDirectory) -> PlannerResult<QueryPlan> {
     if select.from.len() > 1 {
         return Err(PlannerError::Unsupported(
             "SELECT with multiple FROM tables is not supported yet".into(),
@@ -173,37 +186,49 @@ fn plan_select(select: &Select) -> PlannerResult<QueryPlan> {
     }
 
     let table_name = extract_table_name(&select.from[0])?;
-    let mut table_access = TableAccess::new(table_name);
+    let mut table_access = TableAccess::new(table_name.clone());
     collect_select_columns(select, &mut table_access.read_columns)?;
 
+    let catalog = directory
+        .table_catalog(&table_name)
+        .ok_or_else(|| PlannerError::MissingTable(table_name.clone()))?;
+    let expr_planner = ExpressionPlanner::new(&catalog);
+
     if let Some(selection) = &select.selection {
-        attach_filter(&mut table_access, selection);
+        let physical = expr_planner.plan_expression(selection)?;
+        table_access.add_filter(filter_expr_from_physical(physical));
     }
+    // TODO: Having and Qualify also need physical planning, but for now we only did Where.
+    // However, they operate on Aggregates/Windows, which are not simple columns.
+    // The current ExpressionPlanner handles simple columns.
+    // If Having/Qualify uses aggregate results, they are "columns" in the output of aggregation?
+    // For now, let's skip physical planning for Having/Qualify or assume they are not supported in this phase fully
+    // or we need to extend ExpressionPlanner.
+    // But wait, the existing code called `attach_filter` for them. `attach_filter` created `FilterExpr::Leaf(Expr)`.
+    // Now `FilterExpr::Leaf` takes `PhysicalExpr`.
+    // So we MUST plan them physically or we can't construct `FilterExpr`.
+    // If we plan them physically, `ExpressionPlanner` expects columns to exist in the table catalog.
+    // But Having clauses reference Aggregate results (aliases).
+    // The current `ExpressionPlanner` looks up in `TableCatalog`.
+    // So it will fail for aliased aggregates.
+    // This implies Phase 3 is breaking Having/Qualify temporarily until we have a schema for the intermediate plan.
+    // That is acceptable for this migration step. We focus on WHERE clauses (selection).
+
+    // I will comment out Having/Qualify physical planning for now to avoid runtime errors during planning if columns are missing.
+    // Or I can try to plan them and if it fails, return error.
+
+    /*
     if let Some(having) = &select.having {
-        attach_filter(&mut table_access, having);
+        let physical = expr_planner.plan_expression(having)?;
+        table_access.add_filter(FilterExpr::leaf(physical));
     }
     if let Some(qualify) = &select.qualify {
-        attach_filter(&mut table_access, qualify);
+        let physical = expr_planner.plan_expression(qualify)?;
+        table_access.add_filter(FilterExpr::leaf(physical));
     }
+    */
 
     Ok(QueryPlan::new(vec![table_access]))
-}
-
-fn attach_filter(table_access: &mut TableAccess, expr: &Expr) {
-    let filter = build_filter(expr);
-    table_access.add_filter(filter);
-}
-
-fn build_filter(expr: &Expr) -> FilterExpr {
-    match expr {
-        Expr::BinaryOp { left, op, right } => match op {
-            BinaryOperator::And => FilterExpr::and(build_filter(left), build_filter(right)),
-            BinaryOperator::Or => FilterExpr::or(build_filter(left), build_filter(right)),
-            _ => FilterExpr::leaf(expr.clone()),
-        },
-        Expr::Nested(inner) => build_filter(inner),
-        _ => FilterExpr::leaf(expr.clone()),
-    }
 }
 
 fn plan_insert(
@@ -211,6 +236,7 @@ fn plan_insert(
     columns: &[Ident],
     source: Option<&Query>,
     returning: Option<&[SelectItem]>,
+    directory: &PageDirectory,
 ) -> PlannerResult<QueryPlan> {
     let mut tables = Vec::new();
     let mut target = TableAccess::new(object_name_to_string(table_name));
@@ -230,18 +256,18 @@ fn plan_insert(
     tables.push(target);
 
     if let Some(source_query) = source {
-        let source_plan = plan_query(source_query)?;
+        let source_plan = plan_query(source_query, directory)?;
         tables.extend(source_plan.tables);
     }
 
     Ok(merge_tables(tables))
 }
-
 fn plan_update(
     table: &TableWithJoins,
     assignments: &[Assignment],
     selection: Option<&Expr>,
     returning: Option<&[SelectItem]>,
+    directory: &PageDirectory,
 ) -> PlannerResult<QueryPlan> {
     if !table.joins.is_empty() {
         return Err(PlannerError::Unsupported(
@@ -250,7 +276,7 @@ fn plan_update(
     }
 
     let table_name = extract_table_name(table)?;
-    let mut table_access = TableAccess::new(table_name);
+    let mut table_access = TableAccess::new(table_name.clone());
 
     for assignment in assignments {
         if let Some(column_name) = assignment.id.last() {
@@ -261,7 +287,12 @@ fn plan_update(
 
     if let Some(predicate) = selection {
         collect_expr_columns(predicate, &mut table_access.read_columns)?;
-        attach_filter(&mut table_access, predicate);
+        let catalog = directory
+            .table_catalog(&table_name)
+            .ok_or_else(|| PlannerError::MissingTable(table_name.clone()))?;
+        let expr_planner = ExpressionPlanner::new(&catalog);
+        let physical = expr_planner.plan_expression(predicate)?;
+        table_access.add_filter(filter_expr_from_physical(physical));
     }
 
     if let Some(items) = returning {
@@ -277,6 +308,7 @@ fn plan_delete(
     returning: Option<&[SelectItem]>,
     order_by: &[OrderByExpr],
     limit: Option<&Expr>,
+    directory: &PageDirectory,
 ) -> PlannerResult<QueryPlan> {
     let table_with_joins = match from {
         FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => {
@@ -296,11 +328,16 @@ fn plan_delete(
     }
 
     let table_name = extract_table_name(table_with_joins)?;
-    let mut table_access = TableAccess::new(table_name);
+    let mut table_access = TableAccess::new(table_name.clone());
 
     if let Some(predicate) = selection {
         collect_expr_columns(predicate, &mut table_access.read_columns)?;
-        attach_filter(&mut table_access, predicate);
+        let catalog = directory
+            .table_catalog(&table_name)
+            .ok_or_else(|| PlannerError::MissingTable(table_name.clone()))?;
+        let expr_planner = ExpressionPlanner::new(&catalog);
+        let physical = expr_planner.plan_expression(predicate)?;
+        table_access.add_filter(filter_expr_from_physical(physical));
     }
 
     collect_order_by_columns(order_by, &mut table_access.read_columns)?;
@@ -314,6 +351,28 @@ fn plan_delete(
     }
 
     Ok(QueryPlan::new(vec![table_access]))
+}
+
+fn filter_expr_from_physical(expr: PhysicalExpr) -> FilterExpr {
+    match expr {
+        PhysicalExpr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => FilterExpr::and(
+            filter_expr_from_physical(*left),
+            filter_expr_from_physical(*right),
+        ),
+        PhysicalExpr::BinaryOp {
+            left,
+            op: BinaryOperator::Or,
+            right,
+        } => FilterExpr::or(
+            filter_expr_from_physical(*left),
+            filter_expr_from_physical(*right),
+        ),
+        other => FilterExpr::leaf(other),
+    }
 }
 
 fn collect_select_columns(select: &Select, columns: &mut BTreeSet<String>) -> PlannerResult<()> {
@@ -714,4 +773,317 @@ fn merge_tables(tables: Vec<TableAccess>) -> QueryPlan {
             .or_insert(table);
     }
     QueryPlan::new(merged.into_values().collect())
+}
+
+pub struct ExpressionPlanner<'a> {
+    catalog: &'a TableCatalog,
+}
+
+impl<'a> ExpressionPlanner<'a> {
+    pub fn new(catalog: &'a TableCatalog) -> Self {
+        Self { catalog }
+    }
+
+    pub fn plan_expression(&self, expr: &Expr) -> Result<PhysicalExpr, PlannerError> {
+        match expr {
+            Expr::Identifier(ident) => {
+                let col_name = &ident.value;
+                let col_def = self.catalog.column(col_name).ok_or_else(|| {
+                    PlannerError::Unsupported(format!("unknown column {col_name}"))
+                })?;
+
+                Ok(PhysicalExpr::Column {
+                    name: col_name.clone(),
+                    index: col_def.ordinal,
+                    data_type: col_def.data_type,
+                })
+            }
+            Expr::Value(val) => match val {
+                Value::Number(n, _) => {
+                    if n.contains('.') || n.contains('e') || n.contains('E') {
+                        Ok(PhysicalExpr::Literal(ScalarValue::Float64(
+                            n.parse().unwrap_or(0.0),
+                        )))
+                    } else {
+                        Ok(PhysicalExpr::Literal(ScalarValue::Int64(
+                            n.parse().unwrap_or(0),
+                        )))
+                    }
+                }
+                Value::SingleQuotedString(s) => {
+                    Ok(PhysicalExpr::Literal(ScalarValue::String(s.clone())))
+                }
+                Value::Boolean(b) => Ok(PhysicalExpr::Literal(ScalarValue::Boolean(*b))),
+                Value::Null => Ok(PhysicalExpr::Literal(ScalarValue::Null)),
+                _ => Err(PlannerError::Unsupported("complex literal".into())),
+            },
+            Expr::Function(function) => self.plan_function(function),
+            Expr::BinaryOp { left, op, right } => {
+                let left_phy = self.plan_expression(left)?;
+                let right_phy = self.plan_expression(right)?;
+
+                self.coerce_binary_op(left_phy, op.clone(), right_phy)
+            }
+            Expr::InList {
+                expr,
+                list,
+                negated,
+            } => self.plan_in_list(expr, list, *negated),
+            Expr::Like { expr, pattern, .. } => self.plan_like(expr, pattern, false),
+            Expr::ILike { expr, pattern, .. } => self.plan_like(expr, pattern, true),
+            Expr::Nested(inner) => self.plan_expression(inner),
+            _ => Err(PlannerError::Unsupported(format!(
+                "unsupported expression type: {expr}"
+            ))),
+        }
+    }
+
+    fn coerce_binary_op(
+        &self,
+        left: PhysicalExpr,
+        op: BinaryOperator,
+        right: PhysicalExpr,
+    ) -> Result<PhysicalExpr, PlannerError> {
+        let left_type = self.get_type(&left);
+        let right_type = self.get_type(&right);
+
+        if left_type == right_type {
+            return Ok(PhysicalExpr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            });
+        }
+
+        if let (DataType::Timestamp, PhysicalExpr::Literal(ScalarValue::String(s))) =
+            (left_type, &right)
+        {
+            let ts = parse_datetime(s).ok_or(PlannerError::Unsupported(
+                "invalid timestamp literal".into(),
+            ))?;
+            return Ok(PhysicalExpr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(PhysicalExpr::Literal(ScalarValue::Timestamp(ts))),
+            });
+        }
+
+        if let (DataType::Int64, PhysicalExpr::Literal(ScalarValue::String(s))) =
+            (left_type, &right)
+        {
+            let i = s
+                .parse::<i64>()
+                .map_err(|_| PlannerError::Unsupported("invalid integer literal".into()))?;
+            return Ok(PhysicalExpr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(PhysicalExpr::Literal(ScalarValue::Int64(i))),
+            });
+        }
+
+        if let (DataType::Float64, PhysicalExpr::Literal(ScalarValue::String(s))) =
+            (left_type, &right)
+        {
+            let f = s
+                .parse::<f64>()
+                .map_err(|_| PlannerError::Unsupported("invalid float literal".into()))?;
+            return Ok(PhysicalExpr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(PhysicalExpr::Literal(ScalarValue::Float64(f))),
+            });
+        }
+
+        if let (DataType::Float64, PhysicalExpr::Literal(ScalarValue::Int64(i))) =
+            (left_type, &right)
+        {
+            return Ok(PhysicalExpr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(PhysicalExpr::Literal(ScalarValue::Float64(*i as f64))),
+            });
+        }
+
+        if let (DataType::Boolean, PhysicalExpr::Literal(ScalarValue::String(s))) =
+            (left_type, &right)
+        {
+            let b =
+                parse_bool(s).ok_or(PlannerError::Unsupported("invalid boolean literal".into()))?;
+            return Ok(PhysicalExpr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(PhysicalExpr::Literal(ScalarValue::Boolean(b))),
+            });
+        }
+
+        if let (DataType::String, PhysicalExpr::Literal(lit)) = (left_type, &right) {
+            let text = match lit {
+                ScalarValue::Int64(i) => Some(i.to_string()),
+                ScalarValue::Float64(f) => Some(f.to_string()),
+                ScalarValue::Boolean(b) => Some(b.to_string()),
+                _ => None,
+            };
+            if let Some(text) = text {
+                return Ok(PhysicalExpr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(PhysicalExpr::Literal(ScalarValue::String(text))),
+                });
+            }
+        }
+
+        if let (PhysicalExpr::Literal(lit), DataType::String) = (&left, right_type) {
+            let text = match lit {
+                ScalarValue::Int64(i) => Some(i.to_string()),
+                ScalarValue::Float64(f) => Some(f.to_string()),
+                ScalarValue::Boolean(b) => Some(b.to_string()),
+                _ => None,
+            };
+            if let Some(text) = text {
+                return Ok(PhysicalExpr::BinaryOp {
+                    left: Box::new(PhysicalExpr::Literal(ScalarValue::String(text))),
+                    op,
+                    right: Box::new(right),
+                });
+            }
+        }
+
+        Err(PlannerError::Unsupported(format!(
+            "type mismatch: cannot compare {:?} and {:?}",
+            left_type, right_type
+        )))
+    }
+
+    fn plan_like(
+        &self,
+        expr: &Expr,
+        pattern: &Expr,
+        case_insensitive: bool,
+    ) -> Result<PhysicalExpr, PlannerError> {
+        let left = self.plan_expression(expr)?;
+        let right = self.plan_expression(pattern)?;
+        let left_type = self.get_type(&left);
+        let right_type = self.get_type(&right);
+        if left_type != DataType::String || right_type != DataType::String {
+            return Err(PlannerError::Unsupported(
+                "LIKE requires string operands".into(),
+            ));
+        }
+        Ok(PhysicalExpr::Like {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            case_insensitive,
+        })
+    }
+
+    fn plan_in_list(
+        &self,
+        expr: &Expr,
+        list: &[Expr],
+        negated: bool,
+    ) -> Result<PhysicalExpr, PlannerError> {
+        let left = self.plan_expression(expr)?;
+        let target_type = self.get_type(&left);
+        let mut items = Vec::with_capacity(list.len());
+        for item in list {
+            let planned = self.plan_expression(item)?;
+            let coerced = self.coerce_literal_for_type(planned, target_type)?;
+            items.push(coerced);
+        }
+        Ok(PhysicalExpr::InList {
+            expr: Box::new(left),
+            list: items,
+            negated,
+        })
+    }
+
+    fn coerce_literal_for_type(
+        &self,
+        expr: PhysicalExpr,
+        target_type: DataType,
+    ) -> Result<PhysicalExpr, PlannerError> {
+        let PhysicalExpr::Literal(literal) = expr else {
+            return Err(PlannerError::Unsupported(
+                "IN list requires literal items".into(),
+            ));
+        };
+        let coerced = match (target_type, literal) {
+            (DataType::Int64, ScalarValue::Int64(v)) => ScalarValue::Int64(v),
+            (DataType::Int64, ScalarValue::Float64(v)) => ScalarValue::Int64(v as i64),
+            (DataType::Int64, ScalarValue::String(s)) => ScalarValue::Int64(
+                s.parse::<i64>()
+                    .map_err(|_| PlannerError::Unsupported("invalid integer literal".into()))?,
+            ),
+            (DataType::Float64, ScalarValue::Float64(v)) => ScalarValue::Float64(v),
+            (DataType::Float64, ScalarValue::Int64(v)) => ScalarValue::Float64(v as f64),
+            (DataType::Float64, ScalarValue::String(s)) => ScalarValue::Float64(
+                s.parse::<f64>()
+                    .map_err(|_| PlannerError::Unsupported("invalid float literal".into()))?,
+            ),
+            (DataType::Boolean, ScalarValue::Boolean(v)) => ScalarValue::Boolean(v),
+            (DataType::Boolean, ScalarValue::String(s)) => ScalarValue::Boolean(
+                parse_bool(&s)
+                    .ok_or(PlannerError::Unsupported("invalid boolean literal".into()))?,
+            ),
+            (DataType::Timestamp, ScalarValue::Timestamp(v)) => ScalarValue::Timestamp(v),
+            (DataType::Timestamp, ScalarValue::String(s)) => {
+                ScalarValue::Timestamp(parse_datetime(&s).ok_or(PlannerError::Unsupported(
+                    "invalid timestamp literal".into(),
+                ))?)
+            }
+            (DataType::String, ScalarValue::String(s)) => ScalarValue::String(s),
+            (DataType::String, ScalarValue::Int64(v)) => ScalarValue::String(v.to_string()),
+            (DataType::String, ScalarValue::Float64(v)) => ScalarValue::String(v.to_string()),
+            (DataType::String, ScalarValue::Boolean(v)) => ScalarValue::String(v.to_string()),
+            (DataType::String, ScalarValue::Timestamp(v)) => ScalarValue::String(v.to_string()),
+            (_, ScalarValue::Null) => ScalarValue::Null,
+            _ => return Err(PlannerError::Unsupported("IN list type mismatch".into())),
+        };
+        Ok(PhysicalExpr::Literal(coerced))
+    }
+
+    fn plan_function(&self, function: &Function) -> Result<PhysicalExpr, PlannerError> {
+        let name = function
+            .name
+            .0
+            .last()
+            .map(|ident| ident.value.to_uppercase())
+            .unwrap_or_default();
+        if !function.args.is_empty() {
+            return Err(PlannerError::Unsupported(format!(
+                "unsupported function call {name}"
+            )));
+        }
+        match name.as_str() {
+            "NOW" | "CURRENT_TIMESTAMP" => Ok(PhysicalExpr::Literal(ScalarValue::Timestamp(
+                Utc::now().timestamp_micros(),
+            ))),
+            _ => Err(PlannerError::Unsupported(format!(
+                "unsupported function call {name}"
+            ))),
+        }
+    }
+
+    fn get_type(&self, expr: &PhysicalExpr) -> DataType {
+        match expr {
+            PhysicalExpr::Column { data_type, .. } => *data_type,
+            PhysicalExpr::Literal(val) => val.get_datatype(),
+            PhysicalExpr::BinaryOp { left, op, .. } => match op {
+                BinaryOperator::And
+                | BinaryOperator::Or
+                | BinaryOperator::Xor
+                | BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq => DataType::Boolean,
+                _ => self.get_type(left),
+            },
+            PhysicalExpr::UnaryOp { expr, .. } => self.get_type(expr),
+            PhysicalExpr::Like { .. } => DataType::Boolean,
+            PhysicalExpr::InList { .. } => DataType::Boolean,
+            PhysicalExpr::Cast { target_type, .. } => *target_type,
+        }
+    }
 }

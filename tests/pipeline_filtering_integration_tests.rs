@@ -3,17 +3,56 @@ use idk_uwu_ig::cache::page_cache::{
     PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
 };
 use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
+use idk_uwu_ig::metadata_store::{
+    ColumnDefinition, PageDirectory, TableDefinition, TableMetaStore,
+};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use idk_uwu_ig::pipeline::{PipelineBatch, build_pipeline};
 use idk_uwu_ig::sql::plan_sql;
+use idk_uwu_ig::sql::types::DataType;
 use std::sync::{Arc, RwLock};
 
 /// Helper function to create a PageHandler with test data
-fn create_page_handler_with_data() -> Arc<PageHandler> {
+fn create_page_handler_with_data() -> (Arc<PageHandler>, Arc<PageDirectory>) {
     let meta_store = Arc::new(RwLock::new(TableMetaStore::new()));
     let directory = Arc::new(PageDirectory::new(meta_store));
+
+    directory
+        .register_table(TableDefinition::new(
+            "users",
+            vec![
+                ColumnDefinition::from_type("id", DataType::String),
+                ColumnDefinition::from_type("age", DataType::Int64),
+                ColumnDefinition::from_type("name", DataType::String),
+                ColumnDefinition::from_type("status", DataType::String),
+            ],
+            vec![],
+        ))
+        .unwrap();
+    directory
+        .register_table(TableDefinition::new(
+            "accounts",
+            vec![
+                ColumnDefinition::from_type("status", DataType::String),
+                ColumnDefinition::from_type("region", DataType::String),
+                ColumnDefinition::from_type("balance", DataType::Int64),
+                ColumnDefinition::from_type("id", DataType::String),
+            ],
+            vec![],
+        ))
+        .unwrap();
+    directory
+        .register_table(TableDefinition::new(
+            "sessions",
+            vec![ColumnDefinition::from_type(
+                "expires_at",
+                DataType::Timestamp,
+            )],
+            vec![],
+        ))
+        .unwrap();
+
     let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
 
     let compressed_cache = Arc::new(RwLock::new(PageCache::<PageCacheEntryCompressed>::new()));
@@ -24,13 +63,16 @@ fn create_page_handler_with_data() -> Arc<PageHandler> {
     let compressor = Arc::new(Compressor::new());
     let materializer = Arc::new(PageMaterializer::new(uncompressed_cache, compressor));
 
-    Arc::new(PageHandler::new(locator, fetcher, materializer))
+    (
+        Arc::new(PageHandler::new(locator, fetcher, materializer)),
+        directory,
+    )
 }
 
 #[test]
 fn test_pipeline_with_page_handler() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("SELECT id FROM users WHERE age > '18'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql("SELECT id FROM users WHERE age > '18'", &directory).unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
@@ -40,8 +82,12 @@ fn test_pipeline_with_page_handler() {
 
 #[test]
 fn test_pipeline_multi_step_with_page_handler() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("SELECT id FROM users WHERE age > '18' AND name = 'John'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql(
+        "SELECT id FROM users WHERE age > '18' AND name = 'John'",
+        &directory,
+    )
+    .unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
@@ -56,8 +102,8 @@ fn test_pipeline_multi_step_with_page_handler() {
 
 #[test]
 fn test_pipeline_step_execution_flow() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("SELECT id FROM users WHERE age > '18'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql("SELECT id FROM users WHERE age > '18'", &directory).unwrap();
     let jobs = build_pipeline(&plan, Arc::clone(&page_handler));
 
     assert_eq!(jobs.len(), 1);
@@ -78,8 +124,8 @@ fn test_pipeline_step_execution_flow() {
 
 #[test]
 fn test_pipeline_step_execute_flow() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("SELECT id FROM users WHERE status = 'active'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql("SELECT id FROM users WHERE status = 'active'", &directory).unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
@@ -104,8 +150,12 @@ fn test_pipeline_step_execute_flow() {
 
 #[test]
 fn test_multiple_filters_on_same_column() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("SELECT id FROM users WHERE age > '18' AND age < '65'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql(
+        "SELECT id FROM users WHERE age > '18' AND age < '65'",
+        &directory,
+    )
+    .unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
@@ -121,9 +171,10 @@ fn test_multiple_filters_on_same_column() {
 
 #[test]
 fn test_pipeline_with_complex_filters() {
-    let page_handler = create_page_handler_with_data();
+    let (page_handler, directory) = create_page_handler_with_data();
     let plan = plan_sql(
         "SELECT id FROM accounts WHERE status = 'active' AND region = 'US' AND balance > '1000'",
+        &directory,
     )
     .unwrap();
     let jobs = build_pipeline(&plan, page_handler);
@@ -144,8 +195,8 @@ fn test_pipeline_with_complex_filters() {
 
 #[test]
 fn test_pipeline_no_filters() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("SELECT id FROM users").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql("SELECT id FROM users", &directory).unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
@@ -155,8 +206,12 @@ fn test_pipeline_no_filters() {
 
 #[test]
 fn test_pipeline_execute_sequence() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("SELECT id FROM users WHERE age > '18' AND name = 'John'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql(
+        "SELECT id FROM users WHERE age > '18' AND name = 'John'",
+        &directory,
+    )
+    .unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     let job = &jobs[0];
@@ -188,8 +243,12 @@ fn test_pipeline_execute_sequence() {
 
 #[test]
 fn test_pipeline_root_step_behavior() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("SELECT id FROM users WHERE age > '18' AND name = 'John'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql(
+        "SELECT id FROM users WHERE age > '18' AND name = 'John'",
+        &directory,
+    )
+    .unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     let job = &jobs[0];
@@ -206,8 +265,8 @@ fn test_pipeline_root_step_behavior() {
 
 #[test]
 fn test_pipeline_with_delete_statement() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("DELETE FROM sessions WHERE expires_at < 'now'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql("DELETE FROM sessions WHERE expires_at < 'now'", &directory).unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
@@ -218,9 +277,12 @@ fn test_pipeline_with_delete_statement() {
 
 #[test]
 fn test_pipeline_with_update_statement() {
-    let page_handler = create_page_handler_with_data();
-    let plan =
-        plan_sql("UPDATE accounts SET balance = 0 WHERE id = '42' AND status = 'closed'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql(
+        "UPDATE accounts SET balance = 0 WHERE id = '42' AND status = 'closed'",
+        &directory,
+    )
+    .unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     assert_eq!(jobs.len(), 1);
@@ -234,8 +296,12 @@ fn test_pipeline_with_update_statement() {
 
 #[test]
 fn test_pipeline_channel_wiring() {
-    let page_handler = create_page_handler_with_data();
-    let plan = plan_sql("SELECT id FROM users WHERE age > '18' AND name = 'John'").unwrap();
+    let (page_handler, directory) = create_page_handler_with_data();
+    let plan = plan_sql(
+        "SELECT id FROM users WHERE age > '18' AND name = 'John'",
+        &directory,
+    )
+    .unwrap();
     let jobs = build_pipeline(&plan, page_handler);
 
     let job = &jobs[0];
@@ -266,32 +332,38 @@ fn test_pipeline_channel_wiring() {
 
 #[test]
 fn test_job_cost_calculation() {
-    let page_handler = create_page_handler_with_data();
+    let (page_handler, directory) = create_page_handler_with_data();
 
-    let plan1 = plan_sql("SELECT id FROM users WHERE age > '18'").unwrap();
+    let plan1 = plan_sql("SELECT id FROM users WHERE age > '18'", &directory).unwrap();
     let jobs1 = build_pipeline(&plan1, Arc::clone(&page_handler));
     assert_eq!(jobs1[0].cost, 1);
 
-    let plan2 = plan_sql("SELECT id FROM users WHERE age > '18' AND name = 'John'").unwrap();
+    let plan2 = plan_sql(
+        "SELECT id FROM users WHERE age > '18' AND name = 'John'",
+        &directory,
+    )
+    .unwrap();
     let jobs2 = build_pipeline(&plan2, Arc::clone(&page_handler));
     assert_eq!(jobs2[0].cost, 2);
 
-    let plan3 = plan_sql("SELECT id FROM users").unwrap();
+    let plan3 = plan_sql("SELECT id FROM users", &directory).unwrap();
     let jobs3 = build_pipeline(&plan3, page_handler);
     assert_eq!(jobs3[0].cost, 0);
 }
 
 #[test]
 fn test_job_comparison_by_cost() {
-    let page_handler = create_page_handler_with_data();
+    let (page_handler, directory) = create_page_handler_with_data();
 
-    let plan_small = plan_sql("SELECT id FROM users WHERE age > '18'").unwrap();
+    let plan_small = plan_sql("SELECT id FROM users WHERE age > '18'", &directory).unwrap();
     let mut jobs_small = build_pipeline(&plan_small, Arc::clone(&page_handler));
     let job_small = jobs_small.remove(0);
 
-    let plan_large =
-        plan_sql("SELECT id FROM users WHERE age > '18' AND name = 'John' AND status = 'active'")
-            .unwrap();
+    let plan_large = plan_sql(
+        "SELECT id FROM users WHERE age > '18' AND name = 'John' AND status = 'active'",
+        &directory,
+    )
+    .unwrap();
     let mut jobs_large = build_pipeline(&plan_large, page_handler);
     let job_large = jobs_large.remove(0);
 

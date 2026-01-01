@@ -98,6 +98,45 @@ fn test_e2e_create_insert_update_delete_full_lifecycle() {
 }
 
 #[test]
+fn test_e2e_index_refine_with_non_sort_predicate() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute("CREATE TABLE tasks (id TEXT, status TEXT, payload TEXT) ORDER BY id")
+        .expect("create table");
+
+    executor
+        .execute("INSERT INTO tasks (id, status, payload) VALUES ('1', 'keep', 'alpha')")
+        .expect("insert keep");
+    executor
+        .execute("INSERT INTO tasks (id, status, payload) VALUES ('1', 'drop', 'beta')")
+        .expect("insert drop");
+
+    let result = executor
+        .query("SELECT payload FROM tasks WHERE id = '1' AND status = 'keep'")
+        .expect("select with refine");
+    assert_eq!(result.row_count(), 1);
+    assert_eq!(result.rows()[0], vec![Some("alpha".to_string())]);
+
+    executor
+        .execute("UPDATE tasks SET payload = 'updated' WHERE id = '1' AND status = 'keep'")
+        .expect("update with refine");
+    let result = executor
+        .query("SELECT payload FROM tasks WHERE id = '1' AND status = 'keep'")
+        .expect("select after update");
+    assert_eq!(result.rows()[0], vec![Some("updated".to_string())]);
+
+    executor
+        .execute("DELETE FROM tasks WHERE id = '1' AND status = 'drop'")
+        .expect("delete with refine");
+    let result = executor
+        .query("SELECT status FROM tasks WHERE id = '1'")
+        .expect("select after delete");
+    assert_eq!(result.row_count(), 1);
+    assert_eq!(result.rows()[0], vec![Some("keep".to_string())]);
+}
+
+#[test]
 fn test_e2e_math_functions_comprehensive() {
     let (executor, _, _) = setup_executor();
 

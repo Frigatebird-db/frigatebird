@@ -7,6 +7,7 @@ use idk_uwu_ig::metadata_store::PageDirectory;
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -161,7 +162,10 @@ fn page_materializer_get_cached_hit() {
         let mut cache = uncompressed_cache.write().unwrap();
         cache.add(
             "page1",
-            PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
+            PageCacheEntryUncompressed::from_disk_page(
+                create_test_page(5),
+                idk_uwu_ig::sql::DataType::String,
+            ),
         );
     }
 
@@ -180,7 +184,10 @@ fn page_materializer_write_back() {
     let materializer = PageMaterializer::new(Arc::clone(&uncompressed_cache), compressor);
 
     let page = create_test_page(3);
-    materializer.write_back("page1", PageCacheEntryUncompressed::from_disk_page(page));
+    materializer.write_back(
+        "page1",
+        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String),
+    );
 
     let cache = uncompressed_cache.read().unwrap();
     assert!(cache.has("page1"));
@@ -195,10 +202,14 @@ fn page_materializer_materialize_one() {
         PageMaterializer::new(Arc::clone(&uncompressed_cache), Arc::clone(&compressor));
 
     let page = create_test_page(5);
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = Arc::new(compressor.compress(uncompressed));
 
-    let result = materializer.materialize_one("page1", compressed);
+    let result =
+        materializer.materialize_one("page1", compressed, idk_uwu_ig::sql::DataType::String);
 
     assert!(result.is_some());
 
@@ -217,12 +228,19 @@ fn page_materializer_materialize_many() {
     let mut items = vec![];
     for i in 0..5 {
         let page = create_test_page(i + 1);
-        let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+        let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+            page,
+            idk_uwu_ig::sql::DataType::String,
+        ));
         let compressed = Arc::new(compressor.compress(uncompressed));
         items.push((format!("page{}", i), compressed));
     }
 
-    let results = materializer.materialize_many(items);
+    let mut dtypes = HashMap::new();
+    for i in 0..5 {
+        dtypes.insert(format!("page{}", i), idk_uwu_ig::sql::DataType::String);
+    }
+    let results = materializer.materialize_many(items, &dtypes);
     assert_eq!(results.len(), 5);
 
     let cache = uncompressed_cache.read().unwrap();
@@ -240,7 +258,10 @@ fn page_materializer_collect_cached() {
         for i in 0..3 {
             cache.add(
                 &format!("page{}", i),
-                PageCacheEntryUncompressed::from_disk_page(create_test_page(i + 1)),
+                PageCacheEntryUncompressed::from_disk_page(
+                    create_test_page(i + 1),
+                    idk_uwu_ig::sql::DataType::String,
+                ),
             );
         }
     }
@@ -353,7 +374,10 @@ fn page_handler_ensure_pages_cached_already_in_cache() {
         let mut cache = uncompressed_cache.write().unwrap();
         cache.add(
             &id,
-            PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
+            PageCacheEntryUncompressed::from_disk_page(
+                create_test_page(5),
+                idk_uwu_ig::sql::DataType::String,
+            ),
         );
     }
 
@@ -458,7 +482,10 @@ fn page_handler_write_back_uncompressed() {
     let handler = PageHandler::new(locator, fetcher, materializer);
 
     let page = create_test_page(10);
-    handler.write_back_uncompressed("page1", PageCacheEntryUncompressed::from_disk_page(page));
+    handler.write_back_uncompressed(
+        "page1",
+        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String),
+    );
 
     let cache = uncompressed_cache.read().unwrap();
     assert!(cache.has("page1"));

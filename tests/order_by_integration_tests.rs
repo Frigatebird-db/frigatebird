@@ -9,8 +9,10 @@ use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutionError, SqlExecutor};
+use idk_uwu_ig::sql::types::DataType;
 use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 trait ResultRowsExt {
@@ -59,15 +61,22 @@ fn build_table_with_rows(
     ));
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
 
+    let mut column_types: HashMap<&str, DataType> = HashMap::new();
     let column_specs: Vec<ColumnSpec> = columns_with_data
         .iter()
-        .map(|(name, _)| ColumnSpec::new(*name, "String"))
+        .map(|(name, values)| {
+            let type_name = infer_column_type(values);
+            let dtype = DataType::from_sql(type_name).unwrap_or(DataType::String);
+            column_types.insert(*name, dtype);
+            ColumnSpec::new(*name, type_name)
+        })
         .collect();
 
     let plan = CreateTablePlan::new(table.to_string(), column_specs, order_by, false);
     create_table_from_plan(&directory, &plan).expect("create table with order by");
 
     for (name, values) in columns_with_data {
+        let dtype = column_types.get(name).copied().unwrap_or(DataType::String);
         let descriptor = directory
             .register_page_in_table_with_sizes(
                 table,
@@ -87,7 +96,7 @@ fn build_table_with_rows(
         }
         handler.write_back_uncompressed(
             &descriptor.id,
-            PageCacheEntryUncompressed::from_disk_page(page),
+            PageCacheEntryUncompressed::from_disk_page(page, dtype),
         );
         handler
             .update_entry_count_in_table(table, name, values.len() as u64)
@@ -145,6 +154,46 @@ fn collect_column_values(
                 .unwrap_or_default()
         })
         .collect()
+}
+
+fn infer_column_type(values: &[&str]) -> &'static str {
+    let null_marker = "\u{0001}";
+    let mut saw_non_empty = false;
+    let mut all_bool = true;
+    let mut all_i64 = true;
+    let mut all_f64 = true;
+
+    for value in values {
+        if value.is_empty() || *value == null_marker {
+            continue;
+        }
+        saw_non_empty = true;
+
+        let lower = value.to_ascii_lowercase();
+        if lower != "true" && lower != "false" {
+            all_bool = false;
+        }
+        if value.parse::<i64>().is_err() {
+            all_i64 = false;
+        }
+        if value.parse::<f64>().is_err() {
+            all_f64 = false;
+        }
+    }
+
+    if !saw_non_empty {
+        return "STRING";
+    }
+    if all_bool {
+        return "BOOLEAN";
+    }
+    if all_i64 {
+        return "BIGINT";
+    }
+    if all_f64 {
+        return "DOUBLE";
+    }
+    "STRING"
 }
 
 fn collect_table_rows(

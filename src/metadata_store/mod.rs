@@ -1,3 +1,4 @@
+use crate::sql::types::DataType;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -42,14 +43,23 @@ impl TableColumnKey {
 #[derive(Clone, Debug)]
 pub struct ColumnDefinition {
     pub name: String,
-    pub data_type: String,
+    pub data_type: DataType,
 }
 
 impl ColumnDefinition {
-    pub fn new(name: impl Into<String>, data_type: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, sql_type: impl Into<String>) -> Self {
+        let type_str = sql_type.into();
+        let data_type = DataType::from_sql(&type_str).unwrap_or(DataType::String);
         ColumnDefinition {
             name: name.into(),
-            data_type: data_type.into(),
+            data_type,
+        }
+    }
+
+    pub fn from_type(name: impl Into<String>, data_type: DataType) -> Self {
+        ColumnDefinition {
+            name: name.into(),
+            data_type,
         }
     }
 }
@@ -81,7 +91,7 @@ impl TableDefinition {
 #[derive(Clone, Debug)]
 pub struct ColumnCatalog {
     pub name: String,
-    pub data_type: String,
+    pub data_type: DataType,
     pub ordinal: usize,
 }
 
@@ -165,7 +175,7 @@ impl TableCatalog {
             .collect()
     }
 
-    fn insert_column(&mut self, name: String, data_type: String) -> bool {
+    fn insert_column(&mut self, name: String, data_type: DataType) -> bool {
         if self.column_index.contains_key(&name) {
             return false;
         }
@@ -222,6 +232,7 @@ pub struct PageDescriptor {
     pub alloc_len: u64,
     pub actual_len: u64,
     pub entry_count: u64,
+    pub data_type: DataType,
     pub stats: Option<ColumnStats>,
 }
 
@@ -233,6 +244,7 @@ impl PageDescriptor {
         alloc_len: u64,
         actual_len: u64,
         entry_count: u64,
+        data_type: DataType,
     ) -> Self {
         PageDescriptor {
             id,
@@ -241,6 +253,7 @@ impl PageDescriptor {
             alloc_len,
             actual_len,
             entry_count,
+            data_type,
             stats: None,
         }
     }
@@ -375,7 +388,7 @@ impl TableMetaStore {
                 DEFAULT_TABLE.to_string(),
                 vec![ColumnCatalog {
                     name: column.to_string(),
-                    data_type: "String".to_string(),
+                    data_type: DataType::String,
                     ordinal: 0,
                 }],
                 column_index,
@@ -392,7 +405,7 @@ impl TableMetaStore {
 
         if let Some(catalog) = self.tables.get_mut(DEFAULT_TABLE) {
             if catalog.column(column).is_none() {
-                if catalog.insert_column(column.to_string(), "String".to_string()) {
+                if catalog.insert_column(column.to_string(), DataType::String) {
                     self.column_chains.insert(
                         TableColumnKey::new(DEFAULT_TABLE, column),
                         ColumnChain::new(),
@@ -414,7 +427,7 @@ impl TableMetaStore {
         }
 
         if let Some(catalog) = self.tables.get_mut(table) {
-            if catalog.insert_column(column.to_string(), "String".to_string()) {
+            if catalog.insert_column(column.to_string(), DataType::String) {
                 self.column_chains.insert(key, ColumnChain::new());
             }
             return;
@@ -424,7 +437,7 @@ impl TableMetaStore {
         column_index.insert(column.to_string(), 0);
         let catalog_columns = vec![ColumnCatalog {
             name: column.to_string(),
-            data_type: "String".to_string(),
+            data_type: DataType::String,
             ordinal: 0,
         }];
         let catalog = TableCatalog::new(
@@ -610,6 +623,7 @@ impl TableMetaStore {
         alloc_len: u64,
         actual_len: u64,
         entry_count: u64,
+        data_type: DataType,
         stats: Option<ColumnStats>,
     ) -> PageDescriptor {
         let id = if let Some(id) = descriptor_id {
@@ -618,8 +632,15 @@ impl TableMetaStore {
         } else {
             self.reserve_descriptor_id()
         };
-        let mut descriptor =
-            PageDescriptor::new(id, disk_path, offset, alloc_len, actual_len, entry_count);
+        let mut descriptor = PageDescriptor::new(
+            id,
+            disk_path,
+            offset,
+            alloc_len,
+            actual_len,
+            entry_count,
+            data_type,
+        );
         descriptor.stats = stats;
         descriptor
     }
@@ -741,6 +762,14 @@ impl TableMetaStore {
         if !self.column_chains.contains_key(&key) {
             return None;
         }
+
+        let data_type = self
+            .tables
+            .get(table)
+            .and_then(|t| t.column(column))
+            .map(|c| c.data_type)
+            .unwrap_or(DataType::String);
+
         let descriptor = self.allocate_descriptor(
             None,
             disk_path,
@@ -748,6 +777,7 @@ impl TableMetaStore {
             alloc_len,
             actual_len,
             entry_count,
+            data_type,
             None,
         );
         {
@@ -772,6 +802,14 @@ impl TableMetaStore {
                     continue;
                 }
             }
+
+            let data_type = self
+                .tables
+                .get(&page.table)
+                .and_then(|t| t.column(&page.column))
+                .map(|c| c.data_type)
+                .unwrap_or(DataType::String);
+
             let descriptor = self.allocate_descriptor(
                 page.descriptor_id.clone(),
                 page.disk_path.clone(),
@@ -779,6 +817,7 @@ impl TableMetaStore {
                 page.alloc_len,
                 page.actual_len,
                 page.entry_count,
+                data_type,
                 page.stats.clone(),
             );
             let mut old_id: Option<String> = None;
@@ -787,17 +826,31 @@ impl TableMetaStore {
                 if page.replace_last {
                     old_id = chain.last().map(|p| p.id.clone());
                     if old_id.is_some() {
-                        eprintln!("[register_batch] replacing last page for {}.{}, old_id={:?}, new entry_count={}", page.table, page.column, old_id, page.entry_count);
+                        eprintln!(
+                            "[register_batch] replacing last page for {}.{}, old_id={:?}, new entry_count={}",
+                            page.table, page.column, old_id, page.entry_count
+                        );
                         chain.replace_last(descriptor.clone());
                     } else {
-                        eprintln!("[register_batch] replace_last=true but chain is empty, pushing for {}.{}", page.table, page.column);
+                        eprintln!(
+                            "[register_batch] replace_last=true but chain is empty, pushing for {}.{}",
+                            page.table, page.column
+                        );
                         chain.push(descriptor.clone());
                     }
                 } else {
-                    eprintln!("[register_batch] pushing new page for {}.{}, entry_count={}", page.table, page.column, page.entry_count);
+                    eprintln!(
+                        "[register_batch] pushing new page for {}.{}, entry_count={}",
+                        page.table, page.column, page.entry_count
+                    );
                     chain.push(descriptor.clone());
                 }
-                eprintln!("[register_batch] chain for {}.{} now has {} pages", page.table, page.column, chain.pages.len());
+                eprintln!(
+                    "[register_batch] chain for {}.{} now has {} pages",
+                    page.table,
+                    page.column,
+                    chain.pages.len()
+                );
             } else {
                 continue;
             }

@@ -154,10 +154,10 @@ impl AggregateFunctionPlan {
             (
                 AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr,
                 AggregateState::Count(count),
-            ) => Some(ScalarValue::Int(*count as i128)),
+            ) => Some(ScalarValue::Int64(*count as i64)),
             (AggregateFunctionKind::Sum, AggregateState::Sum { total, seen }) => {
                 if *seen {
-                    Some(ScalarValue::Float(*total))
+                    Some(ScalarValue::Float64(*total))
                 } else {
                     None
                 }
@@ -166,7 +166,7 @@ impl AggregateFunctionPlan {
                 if *count == 0 {
                     None
                 } else {
-                    Some(ScalarValue::Float(*sum / *count as f64))
+                    Some(ScalarValue::Float64(*sum / *count as f64))
                 }
             }
             _ => None,
@@ -280,15 +280,9 @@ pub(super) fn vectorized_average_update(
 
 fn numeric_value(page: &ColumnarPage, idx: usize) -> Option<f64> {
     match &page.data {
-        ColumnData::Int64(values) => values.get(idx).copied().map(|v| v as f64),
+        ColumnData::Int64(values) => values.get(idx).copied().map(|value| value as f64),
         ColumnData::Float64(values) => values.get(idx).copied(),
-        ColumnData::Text(values) => values.get(idx).and_then(|value| {
-            if value.is_empty() {
-                None
-            } else {
-                value.parse::<f64>().ok()
-            }
-        }),
+        _ => None,
     }
 }
 
@@ -622,7 +616,7 @@ fn evaluate_count(
                 count += 1;
             }
         }
-        return Ok(ScalarValue::Int(count));
+        return Ok(ScalarValue::Int64(count as i64));
     }
 
     let expr = extract_single_argument(function)?;
@@ -637,7 +631,7 @@ fn evaluate_count(
                 set.insert(text);
             }
         }
-        Ok(ScalarValue::Int(set.len() as i128))
+        Ok(ScalarValue::Int64(set.len() as i64))
     } else {
         let mut count: i128 = 0;
         for &row in dataset.rows {
@@ -649,7 +643,7 @@ fn evaluate_count(
                 count += 1;
             }
         }
-        Ok(ScalarValue::Int(count))
+        Ok(ScalarValue::Int64(count as i64))
     }
 }
 
@@ -1045,7 +1039,7 @@ fn evaluate_count_if(
         }
     }
 
-    Ok(ScalarValue::Int(count))
+    Ok(ScalarValue::Int64(count as i64))
 }
 
 fn row_passes_filter(

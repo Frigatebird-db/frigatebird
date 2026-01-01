@@ -901,7 +901,7 @@ where
             match &plan.kind {
                 WindowFunctionKind::RowNumber => {
                     for (idx, position) in sorted_positions.iter().enumerate() {
-                        values[*position] = ScalarValue::Int((idx + 1) as i128);
+                        values[*position] = ScalarValue::Int64((idx + 1) as i64);
                     }
                     let column = scalars_to_column(values, WindowResultType::Int)?;
                     batch.columns.insert(plan.result_ordinal, column);
@@ -919,7 +919,7 @@ where
                         {
                             current_rank = (idx + 1) as i64;
                         }
-                        values[*position] = ScalarValue::Int(current_rank as i128);
+                        values[*position] = ScalarValue::Int64(current_rank as i64);
                     }
                     let column = scalars_to_column(values, WindowResultType::Int)?;
                     batch.columns.insert(plan.result_ordinal, column);
@@ -937,7 +937,7 @@ where
                         {
                             current_rank += 1;
                         }
-                        values[*position] = ScalarValue::Int(current_rank as i128);
+                        values[*position] = ScalarValue::Int64(current_rank as i64);
                     }
                     let column = scalars_to_column(values, WindowResultType::Int)?;
                     batch.columns.insert(plan.result_ordinal, column);
@@ -1170,9 +1170,11 @@ fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
         return ScalarValue::Null;
     }
     match &page.data {
-        ColumnData::Int64(values) => ScalarValue::Int(values[idx] as i128),
-        ColumnData::Float64(values) => ScalarValue::Float(values[idx]),
-        ColumnData::Text(values) => ScalarValue::Text(values[idx].clone()),
+        ColumnData::Int64(values) => ScalarValue::Int64(values[idx]),
+        ColumnData::Float64(values) => ScalarValue::Float64(values[idx]),
+        ColumnData::Text(values) => ScalarValue::String(values[idx].clone()),
+        ColumnData::Boolean(values) => ScalarValue::Boolean(values[idx]),
+        ColumnData::Timestamp(values) => ScalarValue::Timestamp(values[idx]),
     }
 }
 
@@ -1194,6 +1196,20 @@ fn scalar_column_to_numeric(page: &ColumnarPage) -> Result<Vec<Option<f64>>, Sql
                     values.push(None);
                 } else {
                     values.push(Some(*value));
+                }
+            }
+        }
+        ColumnData::Text(texts) => {
+            for (idx, value) in texts.iter().enumerate() {
+                if page.null_bitmap.is_set(idx) {
+                    values.push(None);
+                } else {
+                    let parsed = value.parse::<f64>().map_err(|_| {
+                        SqlExecutionError::Unsupported(
+                            "SUM window requires numeric argument".into(),
+                        )
+                    })?;
+                    values.push(Some(parsed));
                 }
             }
         }
@@ -1229,7 +1245,7 @@ fn scalars_to_column(
                         null_bitmap.set(idx);
                         data.push(0);
                     }
-                    ScalarValue::Int(int_value) => data.push(*int_value as i64),
+                    ScalarValue::Int64(int_value) => data.push(*int_value as i64),
                     _ => {
                         return Err(SqlExecutionError::Unsupported(
                             "expected integer window result".into(),
@@ -1252,8 +1268,8 @@ fn scalars_to_column(
                         null_bitmap.set(idx);
                         data.push(0.0);
                     }
-                    ScalarValue::Float(float_value) => data.push(*float_value),
-                    ScalarValue::Int(int_value) => data.push(*int_value as f64),
+                    ScalarValue::Float64(float_value) => data.push(*float_value),
+                    ScalarValue::Int64(int_value) => data.push(*int_value as f64),
                     _ => {
                         return Err(SqlExecutionError::Unsupported(
                             "expected numeric window result".into(),
@@ -1269,7 +1285,11 @@ fn scalars_to_column(
             })
         }
         WindowResultType::Template(template) => match &template.data {
-            ColumnData::Int64(_) | ColumnData::Float64(_) | ColumnData::Text(_) => {
+            ColumnData::Int64(_)
+            | ColumnData::Float64(_)
+            | ColumnData::Text(_)
+            | ColumnData::Boolean(_)
+            | ColumnData::Timestamp(_) => {
                 let target_kind = determine_template_kind(template, &values);
                 match target_kind {
                     TemplateOutputKind::Int => {
@@ -1280,7 +1300,7 @@ fn scalars_to_column(
                                     null_bitmap.set(idx);
                                     data.push(0);
                                 }
-                                ScalarValue::Int(int_value) => data.push(*int_value as i64),
+                                ScalarValue::Int64(int_value) => data.push(*int_value as i64),
                                 _ => {
                                     return Err(SqlExecutionError::Unsupported(
                                         "window result type mismatch".into(),
@@ -1303,8 +1323,8 @@ fn scalars_to_column(
                                     null_bitmap.set(idx);
                                     data.push(0.0);
                                 }
-                                ScalarValue::Float(float_value) => data.push(*float_value),
-                                ScalarValue::Int(int_value) => data.push(*int_value as f64),
+                                ScalarValue::Float64(float_value) => data.push(*float_value),
+                                ScalarValue::Int64(int_value) => data.push(*int_value as f64),
                                 _ => {
                                     return Err(SqlExecutionError::Unsupported(
                                         "window result type mismatch".into(),
@@ -1327,7 +1347,7 @@ fn scalars_to_column(
                                     null_bitmap.set(idx);
                                     data.push(String::new());
                                 }
-                                ScalarValue::Text(text) => data.push(text.clone()),
+                                ScalarValue::String(text) => data.push(text.clone()),
                                 _ => data.push(scalar_to_string(value)),
                             }
                         }
@@ -1345,17 +1365,17 @@ fn scalars_to_column(
 }
 
 fn determine_template_kind(template: &ColumnarPage, values: &[ScalarValue]) -> TemplateOutputKind {
-    if matches!(template.data, ColumnData::Text(_))
+    if matches!(template.data, ColumnData::Text(_) | ColumnData::Boolean(_))
         || values
             .iter()
-            .any(|value| matches!(value, ScalarValue::Text(_)))
+            .any(|value| matches!(value, ScalarValue::String(_) | ScalarValue::Boolean(_)))
     {
         return TemplateOutputKind::Text;
     }
     if matches!(template.data, ColumnData::Float64(_))
         || values
             .iter()
-            .any(|value| matches!(value, ScalarValue::Float(_)))
+            .any(|value| matches!(value, ScalarValue::Float64(_)))
     {
         return TemplateOutputKind::Float;
     }
@@ -1364,16 +1384,17 @@ fn determine_template_kind(template: &ColumnarPage, values: &[ScalarValue]) -> T
 
 fn scalar_to_string(value: &ScalarValue) -> String {
     match value {
-        ScalarValue::Null => String::new(),
-        ScalarValue::Int(value) => value.to_string(),
-        ScalarValue::Float(value) => value.to_string(),
-        ScalarValue::Text(text) => text.clone(),
-        ScalarValue::Bool(flag) => {
+        ScalarValue::Int64(value) => value.to_string(),
+        ScalarValue::Float64(value) => value.to_string(),
+        ScalarValue::String(text) => text.clone(),
+        ScalarValue::Boolean(flag) => {
             if *flag {
-                "true".into()
+                "true".to_string()
             } else {
-                "false".into()
+                "false".to_string()
             }
         }
+        ScalarValue::Timestamp(ts) => ts.to_string(),
+        ScalarValue::Null => "NULL".to_string(),
     }
 }

@@ -1,3 +1,5 @@
+/mem:
+/wal_files
 /target
 /storage/*
 !/storage/.gitkeep

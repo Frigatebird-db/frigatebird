@@ -395,7 +395,7 @@ fn sorted_upsert_inserts_in_order() {
     page.add_entry(Entry::new("30"));
     page_handler.write_back_uncompressed(
         &descriptor.id,
-        PageCacheEntryUncompressed::from_disk_page(page),
+        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String),
     );
 
     let inserted = upsert_data_into_table_column(&page_handler, "users", "score", "20")

@@ -1,5 +1,7 @@
 use crate::entry::Entry;
 use crate::page::Page;
+use crate::sql::types::DataType;
+use crate::sql::utils::{parse_bool, parse_datetime};
 
 use super::values::{encode_null, format_float, is_encoded_null};
 use std::collections::HashMap;
@@ -190,17 +192,31 @@ impl<'a> Iterator for BitmapOnesIter<'a> {
 
 #[derive(Clone, Debug)]
 pub enum ColumnData {
+    Boolean(Vec<bool>),
     Int64(Vec<i64>),
     Float64(Vec<f64>),
+    Timestamp(Vec<i64>),
     Text(Vec<String>),
 }
 
 impl ColumnData {
     fn len(&self) -> usize {
         match self {
+            ColumnData::Boolean(v) => v.len(),
             ColumnData::Int64(values) => values.len(),
             ColumnData::Float64(values) => values.len(),
+            ColumnData::Timestamp(values) => values.len(),
             ColumnData::Text(values) => values.len(),
+        }
+    }
+
+    pub fn get_as_string(&self, idx: usize) -> String {
+        match self {
+            ColumnData::Boolean(v) => v[idx].to_string(),
+            ColumnData::Int64(v) => v[idx].to_string(),
+            ColumnData::Float64(v) => format_float(v[idx]),
+            ColumnData::Timestamp(v) => v[idx].to_string(),
+            ColumnData::Text(v) => v[idx].clone(),
         }
     }
 }
@@ -320,22 +336,81 @@ impl ColumnarPage {
         self.num_rows
     }
 
-    pub fn from_disk_page(page: Page) -> Self {
+    pub fn load(page: Page, dtype: DataType) -> Self {
         let num_rows = page.entries.len();
         let mut null_bitmap = Bitmap::new(num_rows);
-        let mut raw_values: Vec<Option<String>> = Vec::with_capacity(num_rows);
 
-        for (idx, entry) in page.entries.into_iter().enumerate() {
-            let data = entry.get_data().to_string();
-            if data.eq_ignore_ascii_case("null") || is_encoded_null(&data) {
-                null_bitmap.set(idx);
-                raw_values.push(None);
-            } else {
-                raw_values.push(Some(data));
+        let data = match dtype {
+            DataType::Boolean => {
+                let mut vals = Vec::with_capacity(num_rows);
+                for (i, e) in page.entries.iter().enumerate() {
+                    let s = e.get_data();
+                    if is_null_string_for_type(s, DataType::Boolean) {
+                        null_bitmap.set(i);
+                        vals.push(false);
+                    } else {
+                        vals.push(parse_bool(s).unwrap_or(false));
+                    }
+                }
+                ColumnData::Boolean(vals)
             }
-        }
-
-        let data = infer_column_data(&raw_values);
+            DataType::Int64 => {
+                let mut vals = Vec::with_capacity(num_rows);
+                for (i, e) in page.entries.iter().enumerate() {
+                    let s = e.get_data();
+                    if is_null_string_for_type(s, DataType::Int64) {
+                        null_bitmap.set(i);
+                        vals.push(0);
+                    } else {
+                        vals.push(s.parse::<i64>().unwrap_or(0));
+                    }
+                }
+                ColumnData::Int64(vals)
+            }
+            DataType::Float64 => {
+                let mut vals = Vec::with_capacity(num_rows);
+                for (i, e) in page.entries.iter().enumerate() {
+                    let s = e.get_data();
+                    if is_null_string_for_type(s, DataType::Float64) {
+                        null_bitmap.set(i);
+                        vals.push(0.0);
+                    } else {
+                        vals.push(s.parse::<f64>().unwrap_or(0.0));
+                    }
+                }
+                ColumnData::Float64(vals)
+            }
+            DataType::Timestamp => {
+                let mut vals = Vec::with_capacity(num_rows);
+                for (i, e) in page.entries.iter().enumerate() {
+                    let s = e.get_data();
+                    if is_null_string_for_type(s, DataType::Timestamp) {
+                        null_bitmap.set(i);
+                        vals.push(0);
+                    } else {
+                        vals.push(parse_datetime(s).unwrap_or(0));
+                    }
+                }
+                ColumnData::Timestamp(vals)
+            }
+            DataType::String | DataType::Uuid | DataType::IpAddr => {
+                let mut vals = Vec::with_capacity(num_rows);
+                for (i, e) in page.entries.iter().enumerate() {
+                    let s = e.get_data();
+                    if is_null_string_for_type(s, DataType::String) {
+                        null_bitmap.set(i);
+                        vals.push(String::new());
+                    } else {
+                        vals.push(s.to_string());
+                    }
+                }
+                ColumnData::Text(vals)
+            }
+            DataType::Null => {
+                null_bitmap.fill(true);
+                ColumnData::Text(vec![String::new(); num_rows])
+            }
+        };
 
         Self {
             page_metadata: page.page_metadata,
@@ -357,8 +432,10 @@ impl ColumnarPage {
                 encode_null()
             } else {
                 match &self.data {
+                    ColumnData::Boolean(v) => v[idx].to_string(),
                     ColumnData::Int64(values) => values[idx].to_string(),
                     ColumnData::Float64(values) => format_float(values[idx]),
+                    ColumnData::Timestamp(v) => v[idx].to_string(),
                     ColumnData::Text(values) => values[idx].clone(),
                 }
             };
@@ -371,15 +448,11 @@ impl ColumnarPage {
         if idx >= self.num_rows || self.null_bitmap.is_set(idx) {
             return None;
         }
-        Some(match &self.data {
-            ColumnData::Int64(values) => values[idx].to_string(),
-            ColumnData::Float64(values) => format_float(values[idx]),
-            ColumnData::Text(values) => values[idx].clone(),
-        })
+        Some(self.data.get_as_string(idx))
     }
 
-    pub fn replace_with_disk_page(&mut self, page: Page) {
-        *self = ColumnarPage::from_disk_page(page);
+    pub fn replace_with_disk_page(&mut self, page: Page, dtype: DataType) {
+        *self = ColumnarPage::load(page, dtype);
     }
 
     pub fn entry_at(&self, idx: usize) -> Option<Entry> {
@@ -396,8 +469,10 @@ impl ColumnarPage {
 
     pub fn empty_like(&self) -> Self {
         let data = match &self.data {
+            ColumnData::Boolean(_) => ColumnData::Boolean(Vec::new()),
             ColumnData::Int64(_) => ColumnData::Int64(Vec::new()),
             ColumnData::Float64(_) => ColumnData::Float64(Vec::new()),
+            ColumnData::Timestamp(_) => ColumnData::Timestamp(Vec::new()),
             ColumnData::Text(_) => ColumnData::Text(Vec::new()),
         };
         ColumnarPage {
@@ -423,6 +498,20 @@ impl ColumnarPage {
 
         let mut new_null_bitmap = Bitmap::new(selected_len);
         let data = match &self.data {
+            ColumnData::Boolean(values) => {
+                let mut filtered = Vec::with_capacity(selected_len);
+                for (out_idx, row_idx) in bitmap
+                    .iter_ones()
+                    .take_while(|&idx| idx < self.num_rows)
+                    .enumerate()
+                {
+                    filtered.push(values[row_idx]);
+                    if self.null_bitmap.is_set(row_idx) {
+                        new_null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Boolean(filtered)
+            }
             ColumnData::Int64(values) => {
                 let mut filtered = Vec::with_capacity(selected_len);
                 for (out_idx, row_idx) in bitmap
@@ -450,6 +539,20 @@ impl ColumnarPage {
                     }
                 }
                 ColumnData::Float64(filtered)
+            }
+            ColumnData::Timestamp(values) => {
+                let mut filtered = Vec::with_capacity(selected_len);
+                for (out_idx, row_idx) in bitmap
+                    .iter_ones()
+                    .take_while(|&idx| idx < self.num_rows)
+                    .enumerate()
+                {
+                    filtered.push(values[row_idx]);
+                    if self.null_bitmap.is_set(row_idx) {
+                        new_null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Timestamp(filtered)
             }
             ColumnData::Text(values) => {
                 let mut filtered = Vec::with_capacity(selected_len);
@@ -480,8 +583,12 @@ impl ColumnarPage {
             return;
         }
         match (&mut self.data, &other.data) {
+            (ColumnData::Boolean(lhs), ColumnData::Boolean(rhs)) => lhs.extend(rhs.iter().copied()),
             (ColumnData::Int64(lhs), ColumnData::Int64(rhs)) => lhs.extend(rhs.iter().copied()),
             (ColumnData::Float64(lhs), ColumnData::Float64(rhs)) => lhs.extend(rhs.iter().copied()),
+            (ColumnData::Timestamp(lhs), ColumnData::Timestamp(rhs)) => {
+                lhs.extend(rhs.iter().copied())
+            }
             (ColumnData::Text(lhs), ColumnData::Text(rhs)) => lhs.extend(rhs.iter().cloned()),
             _ => panic!("attempted to append mismatched column types"),
         }
@@ -495,6 +602,16 @@ impl ColumnarPage {
         }
         let mut null_bitmap = Bitmap::new(indices.len());
         let data = match &self.data {
+            ColumnData::Boolean(values) => {
+                let mut collected = Vec::with_capacity(indices.len());
+                for (out_idx, &idx) in indices.iter().enumerate() {
+                    collected.push(values[idx]);
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Boolean(collected)
+            }
             ColumnData::Int64(values) => {
                 let mut collected = Vec::with_capacity(indices.len());
                 for (out_idx, &idx) in indices.iter().enumerate() {
@@ -514,6 +631,16 @@ impl ColumnarPage {
                     }
                 }
                 ColumnData::Float64(collected)
+            }
+            ColumnData::Timestamp(values) => {
+                let mut collected = Vec::with_capacity(indices.len());
+                for (out_idx, &idx) in indices.iter().enumerate() {
+                    collected.push(values[idx]);
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Timestamp(collected)
             }
             ColumnData::Text(values) => {
                 let mut collected = Vec::with_capacity(indices.len());
@@ -543,6 +670,16 @@ impl ColumnarPage {
         let len = end - start;
         let mut null_bitmap = Bitmap::new(len);
         let data = match &self.data {
+            ColumnData::Boolean(values) => {
+                let mut sliced = Vec::with_capacity(len);
+                for (out_idx, idx) in (start..end).enumerate() {
+                    sliced.push(values[idx]);
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Boolean(sliced)
+            }
             ColumnData::Int64(values) => {
                 let mut sliced = Vec::with_capacity(len);
                 for (out_idx, idx) in (start..end).enumerate() {
@@ -562,6 +699,16 @@ impl ColumnarPage {
                     }
                 }
                 ColumnData::Float64(sliced)
+            }
+            ColumnData::Timestamp(values) => {
+                let mut sliced = Vec::with_capacity(len);
+                for (out_idx, idx) in (start..end).enumerate() {
+                    sliced.push(values[idx]);
+                    if self.null_bitmap.is_set(idx) {
+                        null_bitmap.set(out_idx);
+                    }
+                }
+                ColumnData::Timestamp(sliced)
             }
             ColumnData::Text(values) => {
                 let mut sliced = Vec::with_capacity(len);
@@ -610,8 +757,12 @@ impl ColumnarPage {
     }
 
     pub fn from_literal_bool(value: bool, num_rows: usize) -> Self {
-        let literal = if value { "true" } else { "false" };
-        Self::from_literal_text(literal, num_rows)
+        ColumnarPage {
+            page_metadata: String::new(),
+            data: ColumnData::Boolean(vec![value; num_rows]),
+            null_bitmap: Bitmap::new(num_rows),
+            num_rows,
+        }
     }
 
     pub fn from_nulls(num_rows: usize) -> Self {
@@ -628,45 +779,9 @@ impl ColumnarPage {
     }
 }
 
-fn infer_column_data(values: &[Option<String>]) -> ColumnData {
-    if values.iter().all(|opt| {
-        opt.as_ref()
-            .map(|s| s.parse::<i64>().is_ok())
-            .unwrap_or(true)
-    }) {
-        return ColumnData::Int64(
-            values
-                .iter()
-                .map(|opt| {
-                    opt.as_ref()
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .unwrap_or_default()
-                })
-                .collect(),
-        );
+fn is_null_string_for_type(s: &str, dtype: DataType) -> bool {
+    match dtype {
+        DataType::String => s.eq_ignore_ascii_case("null") || is_encoded_null(s),
+        _ => s.is_empty() || s.eq_ignore_ascii_case("null") || is_encoded_null(s),
     }
-
-    if values.iter().all(|opt| {
-        opt.as_ref()
-            .map(|s| s.parse::<f64>().is_ok())
-            .unwrap_or(true)
-    }) {
-        return ColumnData::Float64(
-            values
-                .iter()
-                .map(|opt| {
-                    opt.as_ref()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or_default()
-                })
-                .collect(),
-        );
-    }
-
-    ColumnData::Text(
-        values
-            .iter()
-            .map(|opt| opt.clone().unwrap_or_default())
-            .collect(),
-    )
 }

@@ -1,4 +1,7 @@
-use crate::metadata_store::{ColumnDefinition, ColumnStats, PageDirectory, PendingPage, TableDefinition};
+use crate::metadata_store::{
+    ColumnDefinition, ColumnStats, PageDirectory, PendingPage, TableDefinition,
+};
+use crate::sql::types::DataType;
 use crate::wal::Walrus;
 use rkyv::{
     AlignedVec, Archive, Deserialize as RkyvDeserialize, Infallible, Serialize as RkyvSerialize,
@@ -25,7 +28,7 @@ pub struct MetaJournalEntry {
 #[archive(check_bytes)]
 pub struct JournalColumnDef {
     pub name: String,
-    pub data_type: String,
+    pub data_type: DataType,
 }
 
 #[derive(Clone, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -97,8 +100,15 @@ impl MetaJournal {
         match record {
             MetaRecord::PublishPages { table, entries } => {
                 for entry in &entries {
-                    eprintln!("[journal_replay] PublishPages: table={}, column={}, path={}, offset={}, entry_count={}, replace_last={}",
-                        table, entry.column, entry.disk_path, entry.offset, entry.entry_count, entry.replace_last);
+                    eprintln!(
+                        "[journal_replay] PublishPages: table={}, column={}, path={}, offset={}, entry_count={}, replace_last={}",
+                        table,
+                        entry.column,
+                        entry.disk_path,
+                        entry.offset,
+                        entry.entry_count,
+                        entry.replace_last
+                    );
                 }
                 let pending: Vec<PendingPage> = entries
                     .into_iter()
@@ -129,7 +139,7 @@ impl MetaJournal {
                 );
                 let column_defs: Vec<ColumnDefinition> = columns
                     .into_iter()
-                    .map(|col| ColumnDefinition::new(col.name, col.data_type))
+                    .map(|col| ColumnDefinition::from_type(col.name, col.data_type))
                     .collect();
                 let table_def = TableDefinition {
                     name,

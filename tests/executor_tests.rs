@@ -46,6 +46,7 @@ fn create_dummy_job(step_count: usize) -> Job {
         steps.push(PipelineStep::new(
             "test_table".to_string(),
             format!("col{}", idx),
+            idx,
             Vec::new(),
             idx == 0,
             Arc::clone(&page_handler),
@@ -97,6 +98,7 @@ fn executor_job_get_next_executes_steps() {
     let step = PipelineStep::new(
         "table".to_string(),
         "col1".to_string(),
+        0,
         Vec::new(),
         true,
         page_handler,
@@ -258,6 +260,7 @@ fn executor_step_execution_sequence() {
     let step1 = PipelineStep::new(
         "table".to_string(),
         "col1".into(),
+        0,
         vec![],
         true,
         Arc::clone(&page_handler),
@@ -267,6 +270,7 @@ fn executor_step_execution_sequence() {
     let step2 = PipelineStep::new(
         "table".to_string(),
         "col2".into(),
+        1,
         vec![],
         false,
         page_handler,

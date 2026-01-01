@@ -65,7 +65,7 @@ pub(super) fn evaluate_scalar_function(
             })?;
             let digits = args
                 .get(1)
-                .and_then(|v| v.as_i128())
+                .and_then(|v| v.as_i64())
                 .unwrap_or(0)
                 .clamp(-18, 18) as i32;
             let factor = 10_f64.powi(digits);
@@ -138,7 +138,15 @@ pub(super) fn evaluate_scalar_function(
             let high = args[2].as_f64().ok_or_else(|| {
                 SqlExecutionError::Unsupported("WIDTH_BUCKET requires numeric high".into())
             })?;
-            let buckets = args[3].as_i128().ok_or_else(|| {
+            let buckets = match &args[3] {
+                ScalarValue::Int64(i) => Some(*i),
+                ScalarValue::Float64(f) if f.is_finite() && f.fract().abs() < f64::EPSILON => {
+                    Some(*f as i64)
+                }
+                ScalarValue::String(s) => s.parse::<i64>().ok(),
+                _ => None,
+            }
+            .ok_or_else(|| {
                 SqlExecutionError::Unsupported("WIDTH_BUCKET requires integer bucket count".into())
             })?;
 
@@ -156,9 +164,9 @@ pub(super) fn evaluate_scalar_function(
                 buckets
             } else {
                 let step = (high - low) / buckets as f64;
-                ((value - low) / step).floor() as i128 + 1
+                (((value - low) / step).floor() as i64) + 1
             };
-            Ok(ScalarValue::Int(bucket))
+            Ok(ScalarValue::Int64(bucket))
         }
         _ => Err(SqlExecutionError::Unsupported(format!(
             "unsupported scalar function {name}"

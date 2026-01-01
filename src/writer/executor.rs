@@ -8,6 +8,7 @@ use crate::metadata_store::{
 use crate::page::Page;
 use crate::page_handler::{PageHandler, page_io::PageIO};
 use crate::sql::executor::batch::{ColumnData, ColumnarPage};
+use crate::sql::types::DataType;
 use crate::wal::Walrus;
 use crate::writer::GLOBAL_WRITER_SHARD_COUNT;
 use crate::writer::allocator::PageAllocator;
@@ -71,6 +72,7 @@ impl MetadataClient for NoopMetadataClient {
                 alloc_len: update.alloc_len,
                 actual_len: update.actual_len,
                 entry_count: update.entry_count,
+                data_type: DataType::String,
                 stats: update.stats,
             })
             .collect()
@@ -247,11 +249,16 @@ impl WorkerContext {
             .as_ref()
             .and_then(|descriptor| self.page_handler.get_page(descriptor.clone()));
 
+        let dtype = latest
+            .as_ref()
+            .map(|d| d.data_type)
+            .unwrap_or(crate::sql::types::DataType::String);
+
         let mut prepared = base_page
             .map(|page| (*page).clone())
-            .unwrap_or_else(|| PageCacheEntryUncompressed::from_disk_page(Page::new()));
+            .unwrap_or_else(|| PageCacheEntryUncompressed::from_disk_page(Page::new(), dtype));
 
-        apply_operations(&mut prepared, &update.operations);
+        apply_operations(&mut prepared, &update.operations, dtype);
 
         let entry_count = prepared.page.len() as u64;
         let disk_page = prepared.page.as_disk_page();
@@ -337,7 +344,9 @@ impl WorkerContext {
                 Ok(None) => {
                     eprintln!(
                         "writer: wal ack shortfall for table {} (wanted {}, handled {})",
-                        table, count + handled, handled
+                        table,
+                        count + handled,
+                        handled
                     );
                     break;
                 }
@@ -374,7 +383,10 @@ impl WorkerContext {
             return;
         }
         let total_rows = rows.len();
-        eprintln!("[flush_page_group] table={}, initial rows={}", table, total_rows);
+        eprintln!(
+            "[flush_page_group] table={}, initial rows={}",
+            table, total_rows
+        );
 
         let catalog = match self.page_handler.table_catalog(table) {
             Some(catalog) => catalog,
@@ -420,7 +432,10 @@ impl WorkerContext {
         rows.sort_unstable_by(|left, right| compare_rows(left, right, &sort_key_ordinals));
 
         self.extend_partial_tail(table, &columns, catalog.rows_per_page_group, &mut rows);
-        eprintln!("[flush_page_group] after extend_partial_tail, rows remaining={}", rows.len());
+        eprintln!(
+            "[flush_page_group] after extend_partial_tail, rows remaining={}",
+            rows.len()
+        );
 
         let full_group_size = catalog.rows_per_page_group as usize;
         while rows.len() >= full_group_size {
@@ -496,9 +511,12 @@ impl WorkerContext {
             let mut updated = (*page_arc).clone();
             for row in rows.iter().take(take) {
                 let value = row.get(idx).map(|v| v.as_str()).unwrap_or_default();
-                updated.mutate_disk_page(|disk_page| {
-                    disk_page.add_entry(Entry::new(value));
-                });
+                updated.mutate_disk_page(
+                    |disk_page| {
+                        disk_page.add_entry(Entry::new(value));
+                    },
+                    column.data_type,
+                );
             }
             let disk_page = updated.page.as_disk_page();
             let serialized = match bincode::serialize(&disk_page) {
@@ -539,7 +557,11 @@ impl WorkerContext {
         }
 
         if !staged.is_empty() {
-            eprintln!("[extend_partial_tail] publishing {} staged columns, extending with {} rows", staged.len(), take);
+            eprintln!(
+                "[extend_partial_tail] publishing {} staged columns, extending with {} rows",
+                staged.len(),
+                take
+            );
             self.publish_staged_columns(table, staged);
             rows.drain(0..take);
         }
@@ -555,8 +577,9 @@ impl WorkerContext {
             return;
         }
 
-        let mut column_pages: Vec<PageCacheEntryUncompressed> = (0..columns.len())
-            .map(|_| PageCacheEntryUncompressed::from_disk_page(Page::new()))
+        let mut column_pages: Vec<PageCacheEntryUncompressed> = columns
+            .iter()
+            .map(|col| PageCacheEntryUncompressed::from_disk_page(Page::new(), col.data_type))
             .collect();
 
         for row in rows.iter() {
@@ -569,9 +592,12 @@ impl WorkerContext {
             }
             for (idx, value) in row.iter().enumerate() {
                 if let Some(page) = column_pages.get_mut(idx) {
-                    page.mutate_disk_page(|disk_page| {
-                        disk_page.add_entry(Entry::new(value));
-                    });
+                    page.mutate_disk_page(
+                        |disk_page| {
+                            disk_page.add_entry(Entry::new(value));
+                        },
+                        columns[idx].data_type,
+                    );
                 }
             }
         }
@@ -929,6 +955,42 @@ fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
             stats.min_value = min_val;
             stats.max_value = max_val;
         }
+        ColumnData::Boolean(values) => {
+            // ...
+            stats.kind = ColumnStatsKind::Int64; // Use Int64 for bool (0/1) or Text?
+            // Existing stats kinds: Int64, Float64, Text.
+            // Map Boolean to Text ("true"/"false") or Int64 (0/1)?
+            // Phase 1 defined `ColumnStatsKind` enum in `metadata_store/mod.rs`.
+            // It has `Int64`, `Float64`, `Text`.
+            // I should use `Text` for Boolean for now or add `Boolean`.
+            // Let's use `Text` "true"/"false".
+            stats.kind = ColumnStatsKind::Text;
+            let mut min_val: Option<bool> = None;
+            let mut max_val: Option<bool> = None;
+            for (idx, value) in values.iter().enumerate().take(page.num_rows) {
+                if page.null_bitmap.is_set(idx) {
+                    continue;
+                }
+                min_val = Some(min_val.map(|c| c && *value).unwrap_or(*value)); // False < True
+                max_val = Some(max_val.map(|c| c || *value).unwrap_or(*value));
+            }
+            stats.min_value = min_val.map(|b| b.to_string());
+            stats.max_value = max_val.map(|b| b.to_string());
+        }
+        ColumnData::Timestamp(values) => {
+            stats.kind = ColumnStatsKind::Int64;
+            let mut min_val: Option<i64> = None;
+            let mut max_val: Option<i64> = None;
+            for (idx, value) in values.iter().enumerate().take(page.num_rows) {
+                if page.null_bitmap.is_set(idx) {
+                    continue;
+                }
+                min_val = Some(min_val.map(|c| c.min(*value)).unwrap_or(*value));
+                max_val = Some(max_val.map(|c| c.max(*value)).unwrap_or(*value));
+            }
+            stats.min_value = min_val.map(|v| v.to_string());
+            stats.max_value = max_val.map(|v| v.to_string());
+        }
     }
 
     if stats.min_value.is_none() && stats.max_value.is_none() && stats.null_count == 0 {
@@ -1022,30 +1084,37 @@ fn persist_allocation(prepared: &StagedColumn, descriptor: &PageDescriptor) -> i
     )
 }
 
-fn apply_operations(page: &mut PageCacheEntryUncompressed, operations: &[UpdateOp]) {
-    page.mutate_disk_page(|disk_page| {
-        for op in operations {
-            match op {
-                UpdateOp::Overwrite { row, entry } => {
-                    let row_idx = *row as usize;
-                    ensure_capacity(disk_page, row_idx);
-                    disk_page.entries[row_idx] = entry.clone();
-                }
-                UpdateOp::Append { entry } => {
-                    disk_page.entries.push(entry.clone());
-                }
-                UpdateOp::InsertAt { row, entry } => {
-                    let len = disk_page.entries.len() as u64;
-                    let target = (*row).min(len);
-                    let row_idx = target as usize;
-                    disk_page.entries.insert(row_idx, entry.clone());
-                }
-                UpdateOp::BufferRow { .. } => {
-                    // BufferRow ops should be intercepted before staging.
+fn apply_operations(
+    page: &mut PageCacheEntryUncompressed,
+    operations: &[UpdateOp],
+    dtype: crate::sql::types::DataType,
+) {
+    page.mutate_disk_page(
+        |disk_page| {
+            for op in operations {
+                match op {
+                    UpdateOp::Overwrite { row, entry } => {
+                        let row_idx = *row as usize;
+                        ensure_capacity(disk_page, row_idx);
+                        disk_page.entries[row_idx] = entry.clone();
+                    }
+                    UpdateOp::Append { entry } => {
+                        disk_page.entries.push(entry.clone());
+                    }
+                    UpdateOp::InsertAt { row, entry } => {
+                        let len = disk_page.entries.len() as u64;
+                        let target = (*row).min(len);
+                        let row_idx = target as usize;
+                        disk_page.entries.insert(row_idx, entry.clone());
+                    }
+                    UpdateOp::BufferRow { .. } => {
+                        // BufferRow ops should be intercepted before staging.
+                    }
                 }
             }
-        }
-    });
+        },
+        dtype,
+    );
 }
 
 fn ensure_capacity(page: &mut Page, row_idx: usize) {

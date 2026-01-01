@@ -149,7 +149,8 @@ fn sql_crash_simple_select_persists_rows() {
     } // drop without cleanup to simulate crash
 
     {
-        let (executor, _, _directory) = new_executor(guard.namespace(), guard.storage_dir(), false, true);
+        let (executor, _, _directory) =
+            new_executor(guard.namespace(), guard.storage_dir(), false, true);
         // Schema is now persisted to WAL, no need to reapply manually
         let result = executor
             .query("SELECT message FROM logs ORDER BY id")
@@ -194,7 +195,8 @@ fn sql_crash_multi_table_state_is_preserved() {
     }
 
     {
-        let (executor, _, _directory) = new_executor(guard.namespace(), guard.storage_dir(), false, true);
+        let (executor, _, _directory) =
+            new_executor(guard.namespace(), guard.storage_dir(), false, true);
         // Schema is now persisted to WAL, no need to reapply manually
         let accounts = executor
             .query("SELECT id, balance FROM accounts ORDER BY id")
@@ -228,7 +230,8 @@ fn sql_crash_multiple_rounds_accumulate_rows() {
     }
 
     {
-        let (executor, _, _directory) = new_executor(guard.namespace(), guard.storage_dir(), false, false);
+        let (executor, _, _directory) =
+            new_executor(guard.namespace(), guard.storage_dir(), false, false);
         // Schema is now persisted to WAL, no need to reapply manually
         executor
             .execute("INSERT INTO kv (k, v) VALUES ('k3', 'v3')")
@@ -244,7 +247,8 @@ fn sql_crash_multiple_rounds_accumulate_rows() {
     }
 
     {
-        let (executor, _, _directory) = new_executor(guard.namespace(), guard.storage_dir(), false, true);
+        let (executor, _, _directory) =
+            new_executor(guard.namespace(), guard.storage_dir(), false, true);
         // Schema is now persisted to WAL, no need to reapply manually
         let result = executor
             .query("SELECT k, v FROM kv ORDER BY k")

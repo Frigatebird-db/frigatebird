@@ -36,19 +36,24 @@ pub fn overwrite_row(
         let mut updated = (*page_arc).clone();
         let idx = row_idx as usize;
         let mut in_bounds = true;
-        updated.mutate_disk_page(|disk_page| {
-            if idx >= disk_page.entries.len() {
-                in_bounds = false;
-                return;
-            }
-            disk_page.entries[idx] = Entry::new(&new_values[column.ordinal]);
-        });
+        updated.mutate_disk_page(
+            |disk_page| {
+                if idx >= disk_page.entries.len() {
+                    in_bounds = false;
+                    return;
+                }
+                disk_page.entries[idx] = Entry::new(&new_values[column.ordinal]);
+            },
+            crate::sql::types::DataType::String,
+        );
         if !in_bounds {
             return Err(other_error(format!("row {row_idx} out of bounds")));
         }
         handler
             .persist_descriptor_page(&descriptor, &updated)
-            .map_err(|err| other_error(format!("failed to persist {table}.{}: {err}", column.name)))?;
+            .map_err(|err| {
+                other_error(format!("failed to persist {table}.{}: {err}", column.name))
+            })?;
         handler.write_back_uncompressed(&descriptor.id, updated);
     }
 
@@ -81,14 +86,17 @@ pub fn update_column_entry_in_table(
 
     let mut updated = (*page_arc).clone();
     let mut in_bounds = true;
-    updated.mutate_disk_page(|disk_page| {
-        let idx = row as usize;
-        if idx >= disk_page.entries.len() {
-            in_bounds = false;
-            return;
-        }
-        disk_page.entries[idx] = Entry::new(data);
-    });
+    updated.mutate_disk_page(
+        |disk_page| {
+            let idx = row as usize;
+            if idx >= disk_page.entries.len() {
+                in_bounds = false;
+                return;
+            }
+            disk_page.entries[idx] = Entry::new(data);
+        },
+        crate::sql::types::DataType::String,
+    );
     if !in_bounds {
         return Ok(false);
     }

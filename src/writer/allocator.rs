@@ -62,7 +62,9 @@ impl FileState {
         self.ensure_capacity(alloc_len)?;
         let allocation = PageAllocation {
             file_id: self.file_id,
-            path: data_file_path(self.file_id, &self.data_dir).to_string_lossy().to_string(),
+            path: data_file_path(self.file_id, &self.data_dir)
+                .to_string_lossy()
+                .to_string(),
             offset: self.offset,
             actual_len,
             alloc_len,

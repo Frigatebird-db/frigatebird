@@ -7,6 +7,7 @@ use crate::metadata_store::{
     CatalogError, PageDescriptor, PageDirectory, PageSlice, RowLocation, TableCatalog,
 };
 use crate::page_handler::page_io::PageIO;
+use crate::sql::types::DataType;
 use bincode;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
@@ -274,10 +275,10 @@ impl PageMaterializer {
         &self,
         id: &str,
         compressed: Arc<PageCacheEntryCompressed>,
+        dtype: DataType,
     ) -> Option<Arc<PageCacheEntryUncompressed>> {
-        let page = PageCacheEntryUncompressed {
-            page: self.compressor.decompress(compressed),
-        };
+        let disk_page = self.compressor.decompress(compressed);
+        let page = PageCacheEntryUncompressed::from_disk_page(disk_page, dtype);
         {
             let mut cache = self.uncompressed_page_cache.write().unwrap();
             cache.add(id, page);
@@ -288,6 +289,7 @@ impl PageMaterializer {
     pub fn materialize_many(
         &self,
         items: Vec<(String, Arc<PageCacheEntryCompressed>)>,
+        dtypes: &HashMap<String, DataType>,
     ) -> Vec<(String, Arc<PageCacheEntryUncompressed>)> {
         if items.is_empty() {
             return Vec::new();
@@ -295,9 +297,9 @@ impl PageMaterializer {
 
         let mut materialized: Vec<(String, PageCacheEntryUncompressed)> = Vec::new();
         for (id, comp) in items.into_iter() {
-            let page = PageCacheEntryUncompressed {
-                page: self.compressor.decompress(comp),
-            };
+            let dtype = *dtypes.get(&id).unwrap_or(&DataType::String);
+            let disk_page = self.compressor.decompress(comp);
+            let page = PageCacheEntryUncompressed::from_disk_page(disk_page, dtype);
             materialized.push((id, page));
         }
 
@@ -409,17 +411,18 @@ impl PageHandler {
 
     pub fn get_page(&self, page_meta: PageDescriptor) -> Option<Arc<PageCacheEntryUncompressed>> {
         let id = page_meta.id.clone();
+        let dtype = page_meta.data_type;
 
         if let Some(hit) = self.materializer.get_cached(&id) {
             return Some(hit);
         }
 
         if let Some(comp_hit) = self.fetcher.get_cached(&id) {
-            return self.materializer.materialize_one(&id, comp_hit);
+            return self.materializer.materialize_one(&id, comp_hit, dtype);
         }
 
         let comp = self.fetcher.fetch_and_insert(&page_meta);
-        self.materializer.materialize_one(&id, comp)
+        self.materializer.materialize_one(&id, comp, dtype)
     }
 
     pub fn get_pages(
@@ -431,6 +434,11 @@ impl PageHandler {
         }
 
         let order: Vec<String> = page_metas.iter().map(|m| m.id.clone()).collect();
+        let mut dtypes: HashMap<String, DataType> = HashMap::with_capacity(page_metas.len());
+        for meta in &page_metas {
+            dtypes.insert(meta.id.clone(), meta.data_type);
+        }
+
         let mut meta_map: HashMap<String, PageDescriptor> =
             page_metas.into_iter().map(|m| (m.id.clone(), m)).collect();
 
@@ -455,12 +463,12 @@ impl PageHandler {
             to_materialize.push((id.clone(), comp));
             meta_map.remove(&id);
         }
-        self.materializer.materialize_many(to_materialize);
+        self.materializer.materialize_many(to_materialize, &dtypes);
 
         if !meta_map.is_empty() {
             let metas: Vec<PageDescriptor> = meta_map.values().cloned().collect();
             let fetched = self.fetcher.fetch_and_insert_batch(&metas);
-            self.materializer.materialize_many(fetched);
+            self.materializer.materialize_many(fetched, &dtypes);
         }
 
         for (id, entry) in self.materializer.collect_cached(&order) {
@@ -482,8 +490,12 @@ impl PageHandler {
         page: &PageCacheEntryUncompressed,
     ) -> io::Result<()> {
         let disk_page = page.as_disk_page();
-        let serialized = bincode::serialize(&disk_page)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("serialize page failed: {err}")))?;
+        let serialized = bincode::serialize(&disk_page).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("serialize page failed: {err}"),
+            )
+        })?;
         self.fetcher
             .page_io
             .write_to_path(&descriptor.disk_path, descriptor.offset, serialized)?;
@@ -634,11 +646,16 @@ fn process_prefetch_batch(
         return;
     }
 
+    let mut dtypes = HashMap::new();
+    for desc in &descriptors {
+        dtypes.insert(desc.id.clone(), desc.data_type);
+    }
+
     // Batch fetch compressed pages
     let compressed = fetcher.fetch_and_insert_batch(&descriptors);
 
     // Batch decompress into UPC
     if !compressed.is_empty() {
-        materializer.materialize_many(compressed);
+        materializer.materialize_many(compressed, &dtypes);
     }
 }

@@ -23,12 +23,15 @@ fn compressor_new_creates_instance() {
 fn compress_then_decompress_empty_page() {
     let compressor = Compressor::new();
     let page = Page::new();
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
 
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(uncompressed.page.len(), decompressed.len());
+    assert_eq!(uncompressed.page.len(), decompressed.entries.len());
 }
 
 #[test]
@@ -37,11 +40,14 @@ fn compress_then_decompress_single_entry() {
     let mut page = Page::new();
     page.add_entry(Entry::new("test_data"));
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(1, decompressed.len());
+    assert_eq!(1, decompressed.entries.len());
 }
 
 #[test]
@@ -50,11 +56,14 @@ fn compress_then_decompress_multiple_entries() {
     let page = create_page_with_entries(50, 100);
     let original_count = page.entries.len();
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(original_count, decompressed.len());
+    assert_eq!(original_count, decompressed.entries.len());
 }
 
 #[test]
@@ -63,7 +72,10 @@ fn compress_actually_compresses() {
 
     // Highly compressible data
     let page = create_page_with_entries(100, 1000);
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
 
     let uncompressed_size = bincode::serialize(&uncompressed.page.as_disk_page())
         .unwrap()
@@ -80,11 +92,14 @@ fn compress_large_page() {
     let compressor = Compressor::new();
     let page = create_page_with_entries(1000, 500);
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(uncompressed.page.len(), decompressed.len());
+    assert_eq!(uncompressed.page.len(), decompressed.entries.len());
 }
 
 #[test]
@@ -100,11 +115,14 @@ fn compress_incompressible_data() {
         page.add_entry(Entry::new(&data));
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(uncompressed.page.len(), decompressed.len());
+    assert_eq!(uncompressed.page.len(), decompressed.entries.len());
 }
 
 #[test]
@@ -115,11 +133,14 @@ fn compress_with_special_characters() {
     page.add_entry(Entry::new("🚀🌟💻"));
     page.add_entry(Entry::new("mixed ascii 123 and unicode ∑∫√"));
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(3, decompressed.len());
+    assert_eq!(3, decompressed.entries.len());
 }
 
 #[test]
@@ -130,11 +151,14 @@ fn compress_empty_entries() {
     page.add_entry(Entry::new(""));
     page.add_entry(Entry::new(""));
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(3, decompressed.len());
+    assert_eq!(3, decompressed.entries.len());
 }
 
 #[test]
@@ -142,15 +166,21 @@ fn compress_decompress_multiple_times() {
     let compressor = Compressor::new();
     let page = create_page_with_entries(20, 50);
 
-    let mut current = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let mut current = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
 
     for _ in 0..5 {
         let compressed = compressor.compress(Arc::clone(&current));
-        let columnar = compressor.decompress(Arc::new(compressed));
-        current = Arc::new(PageCacheEntryUncompressed { page: columnar });
+        let disk_page = compressor.decompress(Arc::new(compressed));
+        current = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+            disk_page,
+            idk_uwu_ig::sql::DataType::String,
+        ));
     }
 
-    assert_eq!(20, current.page.len());
+    assert_eq!(20, current.page.num_rows);
 }
 
 #[test]
@@ -162,12 +192,15 @@ fn compress_very_large_entry() {
     let large_data = "x".repeat(1_000_000);
     page.add_entry(Entry::new(&large_data));
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let compressed_size = compressed.page.len();
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(1, decompressed.len());
+    assert_eq!(1, decompressed.entries.len());
 
     // Highly compressible data should compress significantly
     let original_size = bincode::serialize(&uncompressed.page.as_disk_page())
@@ -180,7 +213,10 @@ fn compress_very_large_entry() {
 fn compress_arc_sharing() {
     let compressor = Compressor::new();
     let page = create_page_with_entries(10, 100);
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
 
     let arc1 = Arc::clone(&uncompressed);
     let arc2 = Arc::clone(&uncompressed);

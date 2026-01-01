@@ -3,20 +3,16 @@ use super::aggregates::{
     AggregateDataset, MaterializedColumns, evaluate_aggregate_function, is_aggregate_function,
 };
 use super::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
-use super::helpers::{
-    column_name_from_expr, expr_to_string, is_null_value, like_match, regex_match,
-};
+use super::helpers::{like_match, regex_match};
 use super::row_functions::evaluate_row_function;
 use super::scalar_functions::evaluate_scalar_function;
 use super::values::{
-    CachedValue, ScalarValue, cached_to_scalar, combine_numeric, compare_scalar_values,
-    compare_strs, is_encoded_null, scalar_from_f64,
+    ScalarValue, cached_to_scalar, combine_numeric, compare_scalar_values, scalar_from_f64,
 };
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, UnaryOperator, Value,
 };
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -50,12 +46,21 @@ pub(super) fn evaluate_scalar_expression(
                 ))
             }
         }
-        Expr::Value(Value::SingleQuotedString(s)) => Ok(ScalarValue::Text(s.clone())),
-        Expr::Value(Value::Number(n, _)) => Ok(match n.parse::<f64>() {
-            Ok(num) => ScalarValue::Float(num),
-            Err(_) => ScalarValue::Text(n.clone()),
-        }),
-        Expr::Value(Value::Boolean(b)) => Ok(ScalarValue::Bool(*b)),
+        Expr::Value(Value::SingleQuotedString(s)) => Ok(ScalarValue::String(s.clone())),
+        Expr::Value(Value::Number(n, _)) => {
+            if n.contains('.') || n.contains('e') || n.contains('E') {
+                Ok(match n.parse::<f64>() {
+                    Ok(num) => ScalarValue::Float64(num),
+                    Err(_) => ScalarValue::String(n.clone()),
+                })
+            } else {
+                Ok(match n.parse::<i64>() {
+                    Ok(num) => ScalarValue::Int64(num),
+                    Err(_) => ScalarValue::String(n.clone()),
+                })
+            }
+        }
+        Expr::Value(Value::Boolean(b)) => Ok(ScalarValue::Boolean(*b)),
         Expr::Value(Value::Null) => Ok(ScalarValue::Null),
         Expr::Function(function) => {
             if is_aggregate_function(function) {
@@ -87,24 +92,24 @@ pub(super) fn evaluate_scalar_expression(
                 BinaryOperator::And => {
                     let a = lhs.as_bool().unwrap_or(false);
                     let b = rhs.as_bool().unwrap_or(false);
-                    Ok(ScalarValue::Bool(a && b))
+                    Ok(ScalarValue::Boolean(a && b))
                 }
                 BinaryOperator::Or => {
                     let a = lhs.as_bool().unwrap_or(false);
                     let b = rhs.as_bool().unwrap_or(false);
-                    Ok(ScalarValue::Bool(a || b))
+                    Ok(ScalarValue::Boolean(a || b))
                 }
                 BinaryOperator::Xor => {
                     let a = lhs.as_bool().unwrap_or(false);
                     let b = rhs.as_bool().unwrap_or(false);
-                    Ok(ScalarValue::Bool(a ^ b))
+                    Ok(ScalarValue::Boolean(a ^ b))
                 }
-                BinaryOperator::Eq => Ok(ScalarValue::Bool(
+                BinaryOperator::Eq => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Equal)
                         .unwrap_or(false),
                 )),
-                BinaryOperator::NotEq => Ok(ScalarValue::Bool(
+                BinaryOperator::NotEq => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord != Ordering::Equal)
                         .unwrap_or(false),
@@ -114,19 +119,19 @@ pub(super) fn evaluate_scalar_expression(
                         Some(ord) => ord == Ordering::Greater,
                         None => false,
                     };
-                    Ok(ScalarValue::Bool(result))
+                    Ok(ScalarValue::Boolean(result))
                 }
-                BinaryOperator::GtEq => Ok(ScalarValue::Bool(
+                BinaryOperator::GtEq => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Greater || ord == Ordering::Equal)
                         .unwrap_or(false),
                 )),
-                BinaryOperator::Lt => Ok(ScalarValue::Bool(
+                BinaryOperator::Lt => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Less)
                         .unwrap_or(false),
                 )),
-                BinaryOperator::LtEq => Ok(ScalarValue::Bool(
+                BinaryOperator::LtEq => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Less || ord == Ordering::Equal)
                         .unwrap_or(false),
@@ -148,7 +153,7 @@ pub(super) fn evaluate_scalar_expression(
                     })?;
                     Ok(scalar_from_f64(-num))
                 }
-                UnaryOperator::Not => Ok(ScalarValue::Bool(!value.as_bool().unwrap_or(false))),
+                UnaryOperator::Not => Ok(ScalarValue::Boolean(!value.as_bool().unwrap_or(false))),
                 _ => Err(SqlExecutionError::Unsupported(format!(
                     "unsupported unary operator {op:?}"
                 ))),
@@ -182,7 +187,7 @@ pub(super) fn evaluate_scalar_expression(
                 (Some(value), Some(pattern)) => like_match(&value, &pattern, true),
                 _ => false,
             };
-            Ok(ScalarValue::Bool(matches))
+            Ok(ScalarValue::Boolean(matches))
         }
         Expr::ILike {
             expr,
@@ -199,7 +204,7 @@ pub(super) fn evaluate_scalar_expression(
                 (Some(value), Some(pattern)) => like_match(&value, &pattern, false),
                 _ => false,
             };
-            Ok(ScalarValue::Bool(matches))
+            Ok(ScalarValue::Boolean(matches))
         }
         Expr::RLike {
             expr,
@@ -216,7 +221,11 @@ pub(super) fn evaluate_scalar_expression(
                 (Some(value), Some(pattern)) => regex_match(&value, &pattern),
                 _ => false,
             };
-            Ok(ScalarValue::Bool(if *negated { !matches } else { matches }))
+            Ok(ScalarValue::Boolean(if *negated {
+                !matches
+            } else {
+                matches
+            }))
         }
         Expr::Between {
             expr,
@@ -231,7 +240,11 @@ pub(super) fn evaluate_scalar_expression(
             let cmp_high = compare_scalar_values(&target, &high_value).unwrap_or(Ordering::Greater);
             let between = (cmp_low == Ordering::Greater || cmp_low == Ordering::Equal)
                 && (cmp_high == Ordering::Less || cmp_high == Ordering::Equal);
-            Ok(ScalarValue::Bool(if *negated { !between } else { between }))
+            Ok(ScalarValue::Boolean(if *negated {
+                !between
+            } else {
+                between
+            }))
         }
         Expr::InList {
             expr,
@@ -250,7 +263,11 @@ pub(super) fn evaluate_scalar_expression(
                     break;
                 }
             }
-            Ok(ScalarValue::Bool(if *negated { !matches } else { matches }))
+            Ok(ScalarValue::Boolean(if *negated {
+                !matches
+            } else {
+                matches
+            }))
         }
         _ => Err(SqlExecutionError::Unsupported(format!(
             "unsupported expression in aggregate projection: {expr:?}"
@@ -326,12 +343,12 @@ pub(super) fn evaluate_row_expr(
                 ))
             }
         }
-        Expr::Value(Value::SingleQuotedString(s)) => Ok(ScalarValue::Text(s.clone())),
+        Expr::Value(Value::SingleQuotedString(s)) => Ok(ScalarValue::String(s.clone())),
         Expr::Value(Value::Number(n, _)) => Ok(match n.parse::<f64>() {
-            Ok(num) => ScalarValue::Float(num),
-            Err(_) => ScalarValue::Text(n.clone()),
+            Ok(num) => ScalarValue::Float64(num),
+            Err(_) => ScalarValue::String(n.clone()),
         }),
-        Expr::Value(Value::Boolean(b)) => Ok(ScalarValue::Bool(*b)),
+        Expr::Value(Value::Boolean(b)) => Ok(ScalarValue::Boolean(*b)),
         Expr::Value(Value::Null) => Ok(ScalarValue::Null),
         Expr::UnaryOp { op, expr } => {
             let value = evaluate_row_expr(expr, row_idx, dataset)?;
@@ -345,7 +362,7 @@ pub(super) fn evaluate_row_expr(
                     })?;
                     Ok(scalar_from_f64(-num))
                 }
-                UnaryOperator::Not => Ok(ScalarValue::Bool(!value.as_bool().unwrap_or(false))),
+                UnaryOperator::Not => Ok(ScalarValue::Boolean(!value.as_bool().unwrap_or(false))),
                 _ => Err(SqlExecutionError::Unsupported(format!(
                     "unsupported unary operator {op:?}"
                 ))),
@@ -371,21 +388,21 @@ pub(super) fn evaluate_row_expr(
                     .ok_or_else(|| SqlExecutionError::Unsupported("non-numeric division".into())),
                 BinaryOperator::Modulo => combine_numeric(&lhs, &rhs, |a, b| a % b)
                     .ok_or_else(|| SqlExecutionError::Unsupported("non-numeric modulo".into())),
-                BinaryOperator::And => Ok(ScalarValue::Bool(
+                BinaryOperator::And => Ok(ScalarValue::Boolean(
                     lhs.as_bool().unwrap_or(false) && rhs.as_bool().unwrap_or(false),
                 )),
-                BinaryOperator::Or => Ok(ScalarValue::Bool(
+                BinaryOperator::Or => Ok(ScalarValue::Boolean(
                     lhs.as_bool().unwrap_or(false) || rhs.as_bool().unwrap_or(false),
                 )),
-                BinaryOperator::Xor => Ok(ScalarValue::Bool(
+                BinaryOperator::Xor => Ok(ScalarValue::Boolean(
                     lhs.as_bool().unwrap_or(false) ^ rhs.as_bool().unwrap_or(false),
                 )),
-                BinaryOperator::Eq => Ok(ScalarValue::Bool(
+                BinaryOperator::Eq => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Equal)
                         .unwrap_or(false),
                 )),
-                BinaryOperator::NotEq => Ok(ScalarValue::Bool(
+                BinaryOperator::NotEq => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord != Ordering::Equal)
                         .unwrap_or(false),
@@ -394,19 +411,19 @@ pub(super) fn evaluate_row_expr(
                     let result = compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Greater)
                         .unwrap_or(false);
-                    Ok(ScalarValue::Bool(result))
+                    Ok(ScalarValue::Boolean(result))
                 }
-                BinaryOperator::GtEq => Ok(ScalarValue::Bool(
+                BinaryOperator::GtEq => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Greater || ord == Ordering::Equal)
                         .unwrap_or(false),
                 )),
-                BinaryOperator::Lt => Ok(ScalarValue::Bool(
+                BinaryOperator::Lt => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Less)
                         .unwrap_or(false),
                 )),
-                BinaryOperator::LtEq => Ok(ScalarValue::Bool(
+                BinaryOperator::LtEq => Ok(ScalarValue::Boolean(
                     compare_scalar_values(&lhs, &rhs)
                         .map(|ord| ord == Ordering::Less || ord == Ordering::Equal)
                         .unwrap_or(false),
@@ -431,7 +448,7 @@ pub(super) fn evaluate_row_expr(
                 (Some(value), Some(pattern)) => like_match(&value, &pattern, true),
                 _ => false,
             };
-            Ok(ScalarValue::Bool(matches))
+            Ok(ScalarValue::Boolean(matches))
         }
         Expr::ILike {
             expr,
@@ -448,7 +465,7 @@ pub(super) fn evaluate_row_expr(
                 (Some(value), Some(pattern)) => like_match(&value, &pattern, false),
                 _ => false,
             };
-            Ok(ScalarValue::Bool(matches))
+            Ok(ScalarValue::Boolean(matches))
         }
         Expr::RLike {
             expr,
@@ -465,7 +482,11 @@ pub(super) fn evaluate_row_expr(
                 (Some(value), Some(pattern)) => regex_match(&value, &pattern),
                 _ => false,
             };
-            Ok(ScalarValue::Bool(if *negated { !matches } else { matches }))
+            Ok(ScalarValue::Boolean(if *negated {
+                !matches
+            } else {
+                matches
+            }))
         }
         Expr::Between {
             expr,
@@ -480,7 +501,11 @@ pub(super) fn evaluate_row_expr(
             let cmp_high = compare_scalar_values(&target, &high_value).unwrap_or(Ordering::Greater);
             let between = (cmp_low == Ordering::Greater || cmp_low == Ordering::Equal)
                 && (cmp_high == Ordering::Less || cmp_high == Ordering::Equal);
-            Ok(ScalarValue::Bool(if *negated { !between } else { between }))
+            Ok(ScalarValue::Boolean(if *negated {
+                !between
+            } else {
+                between
+            }))
         }
         Expr::InList {
             expr,
@@ -499,15 +524,19 @@ pub(super) fn evaluate_row_expr(
                     break;
                 }
             }
-            Ok(ScalarValue::Bool(if *negated { !matches } else { matches }))
+            Ok(ScalarValue::Boolean(if *negated {
+                !matches
+            } else {
+                matches
+            }))
         }
         Expr::IsNull(inner) => {
             let value = evaluate_row_expr(inner, row_idx, dataset)?;
-            Ok(ScalarValue::Bool(value.is_null()))
+            Ok(ScalarValue::Boolean(value.is_null()))
         }
         Expr::IsNotNull(inner) => {
             let value = evaluate_row_expr(inner, row_idx, dataset)?;
-            Ok(ScalarValue::Bool(!value.is_null()))
+            Ok(ScalarValue::Boolean(!value.is_null()))
         }
         Expr::Case {
             operand,
@@ -810,6 +839,8 @@ fn page_value_truthy(page: &ColumnarPage, row_idx: usize) -> bool {
                 "true" | "t" | "1" | "yes" | "y"
             )
         }
+        ColumnData::Boolean(values) => values[row_idx],
+        ColumnData::Timestamp(values) => values[row_idx] != 0,
     }
 }
 
@@ -875,535 +906,6 @@ fn evaluate_row_case_expr(
     } else {
         Ok(ScalarValue::Null)
     }
-}
-
-pub(super) fn evaluate_selection_expr(
-    expr: &Expr,
-    row_idx: u64,
-    column_ordinals: &HashMap<String, usize>,
-    materialized: &MaterializedColumns,
-) -> Result<bool, SqlExecutionError> {
-    match expr {
-        Expr::BinaryOp { left, op, right } => match op {
-            BinaryOperator::And => {
-                Ok(
-                    evaluate_selection_expr(left, row_idx, column_ordinals, materialized)?
-                        && evaluate_selection_expr(right, row_idx, column_ordinals, materialized)?,
-                )
-            }
-            BinaryOperator::Or => {
-                Ok(
-                    evaluate_selection_expr(left, row_idx, column_ordinals, materialized)?
-                        || evaluate_selection_expr(right, row_idx, column_ordinals, materialized)?,
-                )
-            }
-            BinaryOperator::Eq => {
-                compare_operands(left, right, row_idx, column_ordinals, materialized, |ord| {
-                    ord == Ordering::Equal
-                })
-            }
-            BinaryOperator::NotEq => {
-                compare_operands(left, right, row_idx, column_ordinals, materialized, |ord| {
-                    ord != Ordering::Equal
-                })
-            }
-            BinaryOperator::Gt => {
-                compare_operands(left, right, row_idx, column_ordinals, materialized, |ord| {
-                    ord == Ordering::Greater
-                })
-            }
-            BinaryOperator::GtEq => {
-                compare_operands(left, right, row_idx, column_ordinals, materialized, |ord| {
-                    ord != Ordering::Less
-                })
-            }
-            BinaryOperator::Lt => {
-                compare_operands(left, right, row_idx, column_ordinals, materialized, |ord| {
-                    ord == Ordering::Less
-                })
-            }
-            BinaryOperator::LtEq => {
-                compare_operands(left, right, row_idx, column_ordinals, materialized, |ord| {
-                    ord != Ordering::Greater
-                })
-            }
-            _ => Err(SqlExecutionError::Unsupported(format!(
-                "unsupported binary operator in WHERE clause: {op:?}"
-            ))),
-        },
-        Expr::UnaryOp { op, expr } => match op {
-            UnaryOperator::Not => Ok(!evaluate_selection_expr(
-                expr,
-                row_idx,
-                column_ordinals,
-                materialized,
-            )?),
-            _ => Err(SqlExecutionError::Unsupported(format!(
-                "unsupported unary operator {op:?}"
-            ))),
-        },
-        Expr::Nested(inner) => {
-            evaluate_selection_expr(inner, row_idx, column_ordinals, materialized)
-        }
-        Expr::Identifier(ident) => {
-            evaluate_column_truthy(&ident.value, row_idx, column_ordinals, materialized)
-        }
-        Expr::CompoundIdentifier(idents) => {
-            if let Some(last) = idents.last() {
-                evaluate_column_truthy(&last.value, row_idx, column_ordinals, materialized)
-            } else {
-                Err(SqlExecutionError::Unsupported(
-                    "empty compound identifier".into(),
-                ))
-            }
-        }
-        Expr::IsNull(inner) => {
-            let operand = resolve_operand(inner, row_idx, column_ordinals, materialized)?;
-            Ok(matches!(operand, OperandValue::Null))
-        }
-        Expr::IsNotNull(inner) => {
-            let operand = resolve_operand(inner, row_idx, column_ordinals, materialized)?;
-            Ok(!matches!(operand, OperandValue::Null))
-        }
-        Expr::Between {
-            expr,
-            low,
-            high,
-            negated,
-        } => {
-            let target = resolve_operand(expr, row_idx, column_ordinals, materialized)?;
-            let low_value = resolve_operand(low, row_idx, column_ordinals, materialized)?;
-            let high_value = resolve_operand(high, row_idx, column_ordinals, materialized)?;
-            let result = match (&target, &low_value, &high_value) {
-                (OperandValue::Text(target), OperandValue::Text(low), OperandValue::Text(high)) => {
-                    let lower = compare_strs(target.as_ref(), low.as_ref());
-                    let upper = compare_strs(target.as_ref(), high.as_ref());
-                    (lower == Ordering::Greater || lower == Ordering::Equal)
-                        && (upper == Ordering::Less || upper == Ordering::Equal)
-                }
-                _ => false,
-            };
-            Ok(if *negated { !result } else { result })
-        }
-        Expr::Like {
-            expr,
-            pattern,
-            negated,
-            escape_char: _,
-        } => {
-            let target = resolve_operand(expr, row_idx, column_ordinals, materialized)?;
-            let pattern_value = resolve_operand(pattern, row_idx, column_ordinals, materialized)?;
-            let matches = match (target, pattern_value) {
-                (OperandValue::Text(value), OperandValue::Text(pattern)) => {
-                    like_match(value.as_ref(), pattern.as_ref(), true)
-                }
-                _ => false,
-            };
-            Ok(if *negated { !matches } else { matches })
-        }
-        Expr::ILike {
-            expr,
-            pattern,
-            negated,
-            escape_char: _,
-        } => {
-            let target = resolve_operand(expr, row_idx, column_ordinals, materialized)?;
-            let pattern_value = resolve_operand(pattern, row_idx, column_ordinals, materialized)?;
-            let matches = match (target, pattern_value) {
-                (OperandValue::Text(value), OperandValue::Text(pattern)) => {
-                    like_match(value.as_ref(), pattern.as_ref(), false)
-                }
-                _ => false,
-            };
-            Ok(if *negated { !matches } else { matches })
-        }
-        Expr::RLike {
-            expr,
-            pattern,
-            negated,
-            ..
-        } => {
-            let target = resolve_operand(expr, row_idx, column_ordinals, materialized)?;
-            let pattern_value = resolve_operand(pattern, row_idx, column_ordinals, materialized)?;
-            let matches = match (target, pattern_value) {
-                (OperandValue::Text(value), OperandValue::Text(pattern)) => {
-                    regex_match(value.as_ref(), pattern.as_ref())
-                }
-                _ => false,
-            };
-            Ok(if *negated { !matches } else { matches })
-        }
-        Expr::InList {
-            expr,
-            list,
-            negated,
-        } => {
-            let target = resolve_operand(expr, row_idx, column_ordinals, materialized)?;
-            let matches = match target {
-                OperandValue::Text(value) => list.iter().any(|item| {
-                    match resolve_operand(item, row_idx, column_ordinals, materialized) {
-                        Ok(OperandValue::Text(candidate)) => {
-                            compare_strs(value.as_ref(), candidate.as_ref()) == Ordering::Equal
-                        }
-                        _ => false,
-                    }
-                }),
-                OperandValue::Null => false,
-            };
-            Ok(if *negated { !matches } else { matches })
-        }
-        Expr::Value(sqlparser::ast::Value::Boolean(b)) => Ok(*b),
-        Expr::Value(sqlparser::ast::Value::Number(n, _)) => Ok(n != "0"),
-        Expr::Value(sqlparser::ast::Value::SingleQuotedString(s)) => Ok(!s.is_empty()),
-        Expr::Value(sqlparser::ast::Value::Null) => Ok(false),
-        _ => Err(SqlExecutionError::Unsupported(format!(
-            "unsupported expression in WHERE clause: {expr:?}"
-        ))),
-    }
-}
-
-fn compare_operands(
-    left: &Expr,
-    right: &Expr,
-    row_idx: u64,
-    column_ordinals: &HashMap<String, usize>,
-    materialized: &MaterializedColumns,
-    predicate: impl Fn(Ordering) -> bool,
-) -> Result<bool, SqlExecutionError> {
-    let left_value = resolve_operand(left, row_idx, column_ordinals, materialized)?;
-    let right_value = resolve_operand(right, row_idx, column_ordinals, materialized)?;
-
-    match (left_value, right_value) {
-        (OperandValue::Text(lhs), OperandValue::Text(rhs)) => {
-            Ok(predicate(compare_strs(lhs.as_ref(), rhs.as_ref())))
-        }
-        _ => Ok(false),
-    }
-}
-
-enum OperandValue<'a> {
-    Text(Cow<'a, str>),
-    Null,
-}
-
-fn resolve_operand<'a>(
-    expr: &'a Expr,
-    row_idx: u64,
-    column_ordinals: &HashMap<String, usize>,
-    materialized: &'a MaterializedColumns,
-) -> Result<OperandValue<'a>, SqlExecutionError> {
-    match expr {
-        Expr::Identifier(ident) => {
-            column_operand(&ident.value, row_idx, column_ordinals, materialized)
-        }
-        Expr::CompoundIdentifier(idents) => {
-            if let Some(last) = idents.last() {
-                column_operand(&last.value, row_idx, column_ordinals, materialized)
-            } else {
-                Err(SqlExecutionError::Unsupported(
-                    "empty compound identifier".into(),
-                ))
-            }
-        }
-        Expr::Value(sqlparser::ast::Value::SingleQuotedString(s)) => {
-            Ok(OperandValue::Text(Cow::Borrowed(s.as_str())))
-        }
-        Expr::Value(sqlparser::ast::Value::Number(n, _)) => {
-            Ok(OperandValue::Text(Cow::Borrowed(n.as_str())))
-        }
-        Expr::Value(sqlparser::ast::Value::Boolean(b)) => {
-            Ok(OperandValue::Text(Cow::Owned(if *b {
-                "true".into()
-            } else {
-                "false".into()
-            })))
-        }
-        Expr::Value(sqlparser::ast::Value::Null) => Ok(OperandValue::Null),
-        Expr::Nested(inner) => resolve_operand(inner, row_idx, column_ordinals, materialized),
-        Expr::UnaryOp {
-            op: UnaryOperator::Minus,
-            expr,
-        } => {
-            if let OperandValue::Text(value) =
-                resolve_operand(expr, row_idx, column_ordinals, materialized)?
-            {
-                Ok(OperandValue::Text(Cow::Owned(format!("-{}", value))))
-            } else {
-                Ok(OperandValue::Null)
-            }
-        }
-        _ => Err(SqlExecutionError::Unsupported(format!(
-            "unsupported operand expression: {expr:?}"
-        ))),
-    }
-}
-
-fn evaluate_column_truthy(
-    column_name: &str,
-    row_idx: u64,
-    column_ordinals: &HashMap<String, usize>,
-    materialized: &MaterializedColumns,
-) -> Result<bool, SqlExecutionError> {
-    let value = column_operand(column_name, row_idx, column_ordinals, materialized)?;
-    Ok(match value {
-        OperandValue::Null => false,
-        OperandValue::Text(text) => literal_is_truthy(text.as_ref()),
-    })
-}
-
-fn literal_is_truthy(value: &str) -> bool {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if is_null_value(trimmed) {
-        return false;
-    }
-
-    let lowered = trimmed.to_ascii_lowercase();
-    !matches!(lowered.as_str(), "false" | "0" | "no" | "off" | "f" | "n")
-}
-
-fn column_operand<'a>(
-    column_name: &str,
-    row_idx: u64,
-    column_ordinals: &HashMap<String, usize>,
-    materialized: &'a MaterializedColumns,
-) -> Result<OperandValue<'a>, SqlExecutionError> {
-    let ordinal = column_ordinals.get(column_name).copied().ok_or_else(|| {
-        SqlExecutionError::Unsupported(format!("unknown column referenced: {column_name}"))
-    })?;
-    let value = materialized
-        .get(&ordinal)
-        .and_then(|column_map| column_map.get(&row_idx));
-    match value {
-        Some(CachedValue::Null) => Ok(OperandValue::Null),
-        Some(CachedValue::Text(text)) => Ok(OperandValue::Text(Cow::Borrowed(text.as_str()))),
-        None => Ok(OperandValue::Null),
-    }
-}
-
-pub(super) fn evaluate_selection_on_page(
-    expr: &Expr,
-    pages: &HashMap<String, &ColumnarPage>,
-) -> Result<Bitmap, SqlExecutionError> {
-    let num_rows = pages.values().next().map(|page| page.len()).unwrap_or(0);
-
-    if num_rows == 0 {
-        return Ok(Bitmap::new(0));
-    }
-
-    match expr {
-        Expr::BinaryOp { left, op, right } => match op {
-            BinaryOperator::And => {
-                let mut left_bitmap = evaluate_selection_on_page(left, pages)?;
-                let right_bitmap = evaluate_selection_on_page(right, pages)?;
-                left_bitmap.and(&right_bitmap);
-                Ok(left_bitmap)
-            }
-            BinaryOperator::Or => {
-                let mut left_bitmap = evaluate_selection_on_page(left, pages)?;
-                let right_bitmap = evaluate_selection_on_page(right, pages)?;
-                left_bitmap.or(&right_bitmap);
-                Ok(left_bitmap)
-            }
-            BinaryOperator::Eq
-            | BinaryOperator::NotEq
-            | BinaryOperator::Gt
-            | BinaryOperator::GtEq
-            | BinaryOperator::Lt
-            | BinaryOperator::LtEq => {
-                let (column, literal, normalized_op) = resolve_column_literal(left, right, op)
-                    .ok_or_else(|| {
-                        SqlExecutionError::Unsupported(
-                            "vectorized WHERE only supports column-to-literal predicates".into(),
-                        )
-                    })?;
-                let page = pages.get(&column).ok_or_else(|| {
-                    SqlExecutionError::Unsupported(format!(
-                        "column {column} not available for vectorized evaluation"
-                    ))
-                })?;
-                evaluate_column_comparison(&normalized_op, &literal, page)
-            }
-            _ => Err(SqlExecutionError::Unsupported(format!(
-                "vectorized WHERE does not support operator {op:?}"
-            ))),
-        },
-        Expr::UnaryOp { op, expr } => match op {
-            UnaryOperator::Not => {
-                let mut bitmap = evaluate_selection_on_page(expr, pages)?;
-                bitmap.invert();
-                Ok(bitmap)
-            }
-            _ => Err(SqlExecutionError::Unsupported(format!(
-                "vectorized WHERE does not support unary operator {op:?}"
-            ))),
-        },
-        Expr::Nested(inner) => evaluate_selection_on_page(inner, pages),
-        Expr::IsNull(inner) => evaluate_null_predicate(inner, pages, true),
-        Expr::IsNotNull(inner) => evaluate_null_predicate(inner, pages, false),
-        _ => Err(SqlExecutionError::Unsupported(
-            "predicate not supported by vectorized WHERE".into(),
-        )),
-    }
-}
-
-fn resolve_column_literal<'a>(
-    left: &'a Expr,
-    right: &'a Expr,
-    op: &BinaryOperator,
-) -> Option<(String, String, BinaryOperator)> {
-    if let Some(column) = column_name_from_expr(left) {
-        if let Ok(literal) = expr_to_string(right) {
-            return Some((column, literal, op.clone()));
-        }
-    }
-
-    if let Some(column) = column_name_from_expr(right) {
-        if let Ok(literal) = expr_to_string(left) {
-            let swapped = reverse_operator(op)?;
-            return Some((column, literal, swapped));
-        }
-    }
-
-    None
-}
-
-fn reverse_operator(op: &BinaryOperator) -> Option<BinaryOperator> {
-    use BinaryOperator::*;
-    match op {
-        Gt => Some(Lt),
-        GtEq => Some(LtEq),
-        Lt => Some(Gt),
-        LtEq => Some(GtEq),
-        Eq => Some(Eq),
-        NotEq => Some(NotEq),
-        _ => None,
-    }
-}
-
-fn evaluate_null_predicate(
-    expr: &Expr,
-    pages: &HashMap<String, &ColumnarPage>,
-    expect_null: bool,
-) -> Result<Bitmap, SqlExecutionError> {
-    let column = column_name_from_expr(expr).ok_or_else(|| {
-        SqlExecutionError::Unsupported("IS [NOT] NULL requires a column reference".into())
-    })?;
-    let page = pages.get(&column).ok_or_else(|| {
-        SqlExecutionError::Unsupported(format!(
-            "column {column} not available for vectorized NULL check"
-        ))
-    })?;
-    let mut bitmap = Bitmap::new(page.len());
-    for idx in 0..page.len() {
-        if page.null_bitmap.is_set(idx) == expect_null {
-            bitmap.set(idx);
-        }
-    }
-    Ok(bitmap)
-}
-
-fn evaluate_column_comparison(
-    op: &BinaryOperator,
-    literal: &str,
-    page: &ColumnarPage,
-) -> Result<Bitmap, SqlExecutionError> {
-    use BinaryOperator::*;
-    if literal_is_null(literal) {
-        return match op {
-            Eq => {
-                let mut bitmap = Bitmap::new(page.len());
-                for idx in 0..page.len() {
-                    if page.null_bitmap.is_set(idx) {
-                        bitmap.set(idx);
-                    }
-                }
-                Ok(bitmap)
-            }
-            NotEq => {
-                let mut bitmap = Bitmap::new(page.len());
-                for idx in 0..page.len() {
-                    if !page.null_bitmap.is_set(idx) {
-                        bitmap.set(idx);
-                    }
-                }
-                Ok(bitmap)
-            }
-            _ => Err(SqlExecutionError::Unsupported(
-                "comparisons between NULL and literals are not supported in vectorized mode".into(),
-            )),
-        };
-    }
-
-    match (&page.data, op) {
-        (ColumnData::Int64(values), Eq)
-        | (ColumnData::Int64(values), NotEq)
-        | (ColumnData::Int64(values), Gt)
-        | (ColumnData::Int64(values), GtEq)
-        | (ColumnData::Int64(values), Lt)
-        | (ColumnData::Int64(values), LtEq) => {
-            let target = literal.parse::<i64>().map_err(|_| {
-                SqlExecutionError::Unsupported(
-                    "unable to parse literal as INTEGER for vectorized comparison".into(),
-                )
-            })?;
-            Ok(build_numeric_bitmap(
-                values,
-                &page.null_bitmap,
-                op,
-                target as f64,
-            ))
-        }
-        (ColumnData::Float64(values), Eq)
-        | (ColumnData::Float64(values), NotEq)
-        | (ColumnData::Float64(values), Gt)
-        | (ColumnData::Float64(values), GtEq)
-        | (ColumnData::Float64(values), Lt)
-        | (ColumnData::Float64(values), LtEq) => {
-            let target = literal.parse::<f64>().map_err(|_| {
-                SqlExecutionError::Unsupported(
-                    "unable to parse literal as FLOAT for vectorized comparison".into(),
-                )
-            })?;
-            Ok(build_float_bitmap(values, &page.null_bitmap, op, target))
-        }
-        (ColumnData::Text(values), Eq)
-        | (ColumnData::Text(values), NotEq)
-        | (ColumnData::Text(values), Gt)
-        | (ColumnData::Text(values), GtEq)
-        | (ColumnData::Text(values), Lt)
-        | (ColumnData::Text(values), LtEq) => {
-            Ok(build_text_bitmap(values, &page.null_bitmap, op, literal))
-        }
-        _ => Err(SqlExecutionError::Unsupported(format!(
-            "vectorized operator {op:?} not supported for column type"
-        ))),
-    }
-}
-
-fn literal_is_null(value: &str) -> bool {
-    is_encoded_null(value) || value.eq_ignore_ascii_case("null")
-}
-
-fn build_numeric_bitmap(
-    values: &[i64],
-    nulls: &Bitmap,
-    op: &BinaryOperator,
-    target: f64,
-) -> Bitmap {
-    let mut bitmap = Bitmap::new(values.len());
-    for (idx, value) in values.iter().enumerate() {
-        if nulls.is_set(idx) {
-            continue;
-        }
-        let lhs = *value as f64;
-        if compare_floats(lhs, target, &op) {
-            bitmap.set(idx);
-        }
-    }
-    bitmap
 }
 
 fn resolve_batch_column(
@@ -1473,7 +975,7 @@ where
 {
     let len = page.len();
     let mut values = Vec::with_capacity(len);
-    let mut null_bitmap = page.null_bitmap.clone();
+    let null_bitmap = page.null_bitmap.clone();
     for idx in 0..len {
         if page.null_bitmap.is_set(idx) {
             values.push(0.0);
@@ -1552,58 +1054,4 @@ fn numeric_value_at(page: &ColumnarPage, idx: usize) -> Result<f64, SqlExecution
 
 fn bool_to_text(value: bool) -> String {
     if value { "true".into() } else { "false".into() }
-}
-
-fn build_float_bitmap(values: &[f64], nulls: &Bitmap, op: &BinaryOperator, target: f64) -> Bitmap {
-    let mut bitmap = Bitmap::new(values.len());
-    for (idx, value) in values.iter().enumerate() {
-        if nulls.is_set(idx) {
-            continue;
-        }
-        if compare_floats(*value, target, &op) {
-            bitmap.set(idx);
-        }
-    }
-    bitmap
-}
-
-fn build_text_bitmap(
-    values: &[String],
-    nulls: &Bitmap,
-    op: &BinaryOperator,
-    target: &str,
-) -> Bitmap {
-    let mut bitmap = Bitmap::new(values.len());
-    for (idx, value) in values.iter().enumerate() {
-        if nulls.is_set(idx) {
-            continue;
-        }
-        let ordering = compare_strs(value, target);
-        let matches = match *op {
-            BinaryOperator::Eq => ordering == Ordering::Equal,
-            BinaryOperator::NotEq => ordering != Ordering::Equal,
-            BinaryOperator::Gt => ordering == Ordering::Greater,
-            BinaryOperator::GtEq => ordering == Ordering::Greater || ordering == Ordering::Equal,
-            BinaryOperator::Lt => ordering == Ordering::Less,
-            BinaryOperator::LtEq => ordering == Ordering::Less || ordering == Ordering::Equal,
-            _ => false,
-        };
-        if matches {
-            bitmap.set(idx);
-        }
-    }
-    bitmap
-}
-
-fn compare_floats(lhs: f64, rhs: f64, op: &BinaryOperator) -> bool {
-    use BinaryOperator::*;
-    match *op {
-        Eq => (lhs - rhs).abs() < f64::EPSILON,
-        NotEq => (lhs - rhs).abs() >= f64::EPSILON,
-        Gt => lhs > rhs,
-        GtEq => lhs >= rhs,
-        Lt => lhs < rhs,
-        LtEq => lhs <= rhs,
-        _ => false,
-    }
 }

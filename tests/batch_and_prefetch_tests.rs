@@ -114,7 +114,10 @@ fn ensure_pages_cached_already_cached() {
         .register_page("col1", "test.db".to_string(), 0)
         .unwrap();
     let page = create_test_page(5);
-    handler.write_back_uncompressed(&desc.id, PageCacheEntryUncompressed::from_disk_page(page));
+    handler.write_back_uncompressed(
+        &desc.id,
+        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String),
+    );
 
     // Call again - should be no-op
     handler.ensure_pages_cached(&[desc.id.clone()]);
@@ -153,11 +156,14 @@ fn compress_alternating_pattern() {
         }
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(decompressed.len(), 100);
+    assert_eq!(decompressed.entries.len(), 100);
 }
 
 #[test]
@@ -171,11 +177,14 @@ fn compress_random_binary_data() {
         page.add_entry(Entry::new(&random_like));
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(decompressed.len(), 50);
+    assert_eq!(decompressed.entries.len(), 50);
 }
 
 #[test]
@@ -189,7 +198,10 @@ fn compress_degenerate_case_all_same_char() {
     }
 
     let original_size = bincode::serialize(&page).unwrap().len();
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
 
     // Should compress extremely well

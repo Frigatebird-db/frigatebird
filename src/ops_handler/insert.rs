@@ -36,9 +36,12 @@ pub fn upsert_data_into_table_column(
         .ok_or_else(|| "unable to load page")?;
 
     let mut updated = (*page_arc).clone();
-    updated.mutate_disk_page(|disk_page| {
-        disk_page.add_entry(Entry::new(data));
-    });
+    updated.mutate_disk_page(
+        |disk_page| {
+            disk_page.add_entry(Entry::new(data));
+        },
+        crate::sql::types::DataType::String,
+    );
 
     handler
         .persist_descriptor_page(&page_meta, &updated)
@@ -64,11 +67,14 @@ pub fn sorted_insert_single_column(
 
     let mut updated = (*page_arc).clone();
     let mut new_entry_count = page_meta.entry_count;
-    updated.mutate_disk_page(|disk_page| {
-        let insert_idx = binary_search_insert_index(&disk_page.entries, data);
-        disk_page.entries.insert(insert_idx, Entry::new(data));
-        new_entry_count = disk_page.entries.len() as u64;
-    });
+    updated.mutate_disk_page(
+        |disk_page| {
+            let insert_idx = binary_search_insert_index(&disk_page.entries, data);
+            disk_page.entries.insert(insert_idx, Entry::new(data));
+            new_entry_count = disk_page.entries.len() as u64;
+        },
+        crate::sql::types::DataType::String,
+    );
 
     handler
         .persist_descriptor_page(&page_meta, &updated)
@@ -167,16 +173,21 @@ pub fn sorted_insert_row(
             .ok_or_else(|| other_error("unable to load page data"))?;
 
         let mut updated = (*page_arc).clone();
-        updated.mutate_disk_page(|disk_page| {
-            let insert_pos = insert_idx.min(disk_page.entries.len());
-            disk_page
-                .entries
-                .insert(insert_pos, Entry::new(&final_row[ordinal]));
-        });
+        updated.mutate_disk_page(
+            |disk_page| {
+                let insert_pos = insert_idx.min(disk_page.entries.len());
+                disk_page
+                    .entries
+                    .insert(insert_pos, Entry::new(&final_row[ordinal]));
+            },
+            crate::sql::types::DataType::String,
+        );
 
         handler
             .persist_descriptor_page(&descriptor, &updated)
-            .map_err(|err| other_error(format!("failed to persist {table}.{}: {err}", column.name)))?;
+            .map_err(|err| {
+                other_error(format!("failed to persist {table}.{}: {err}", column.name))
+            })?;
         handler.write_back_uncompressed(&descriptor.id, updated);
         handler
             .update_entry_count_in_table(table, &column.name, new_count as u64)

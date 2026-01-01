@@ -381,7 +381,7 @@ pub(super) fn is_null_value(value: &str) -> bool {
         || is_encoded_null(value)
 }
 
-pub(super) fn like_match(value: &str, pattern: &str, case_sensitive: bool) -> bool {
+pub(crate) fn like_match(value: &str, pattern: &str, case_sensitive: bool) -> bool {
     let val = if case_sensitive {
         value.to_string()
     } else {

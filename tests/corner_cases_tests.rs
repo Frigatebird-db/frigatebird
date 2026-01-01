@@ -105,10 +105,13 @@ fn page_many_entries() {
 fn compress_empty_page() {
     let compressor = Compressor::new();
     let page = Page::new();
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
-    assert_eq!(decompressed.len(), 0);
+    assert_eq!(decompressed.entries.len(), 0);
 }
 
 #[test]
@@ -116,11 +119,14 @@ fn compress_single_entry_page() {
     let compressor = Compressor::new();
     let mut page = Page::new();
     page.add_entry(Entry::new("test"));
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page,
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
-    assert_eq!(decompressed.len(), 1);
-    assert_eq!(decompressed.entry_at(0).unwrap().get_data(), "test");
+    assert_eq!(decompressed.entries.len(), 1);
+    assert_eq!(decompressed.entries[0].get_data(), "test");
 }
 
 #[test]
@@ -133,11 +139,14 @@ fn compress_already_compressed_data() {
         page.add_entry(Entry::new(&random_like));
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page.clone()));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page.clone(),
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
-    assert_eq!(decompressed.len(), page.entries.len());
+    assert_eq!(decompressed.entries.len(), page.entries.len());
 }
 
 #[test]
@@ -148,13 +157,16 @@ fn compress_decompress_preserves_order() {
         page.add_entry(Entry::new(&format!("entry_{}", i)));
     }
 
-    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(page.clone()));
+    let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
+        page.clone(),
+        idk_uwu_ig::sql::DataType::String,
+    ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
 
     for i in 0..100 {
         assert_eq!(
-            decompressed.entry_at(i).unwrap().get_data(),
+            decompressed.entries[i].get_data(),
             page.entries[i].get_data()
         );
     }
@@ -349,7 +361,10 @@ fn page_handler_get_pages_duplicate_descriptors() {
         .unwrap();
     handler.write_back_uncompressed(
         &desc.id,
-        PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
+        PageCacheEntryUncompressed::from_disk_page(
+            create_test_page(5),
+            idk_uwu_ig::sql::DataType::String,
+        ),
     );
 
     // Request same descriptor multiple times
@@ -371,7 +386,7 @@ fn page_handler_write_back_then_read() {
 
     handler.write_back_uncompressed(
         &desc.id,
-        PageCacheEntryUncompressed::from_disk_page(page.clone()),
+        PageCacheEntryUncompressed::from_disk_page(page.clone(), idk_uwu_ig::sql::DataType::String),
     );
 
     let results = handler.get_page(desc);
@@ -394,7 +409,10 @@ fn page_handler_concurrent_write_back_same_id() {
         let handle = thread::spawn(move || {
             handler_clone.write_back_uncompressed(
                 &id,
-                PageCacheEntryUncompressed::from_disk_page(create_test_page(i)),
+                PageCacheEntryUncompressed::from_disk_page(
+                    create_test_page(i),
+                    idk_uwu_ig::sql::DataType::String,
+                ),
             );
         });
         handles.push(handle);
@@ -422,11 +440,17 @@ fn prefetch_all_pages_k_equals_total() {
 
     handler.write_back_uncompressed(
         &desc1.id,
-        PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
+        PageCacheEntryUncompressed::from_disk_page(
+            create_test_page(5),
+            idk_uwu_ig::sql::DataType::String,
+        ),
     );
     handler.write_back_uncompressed(
         &desc2.id,
-        PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
+        PageCacheEntryUncompressed::from_disk_page(
+            create_test_page(5),
+            idk_uwu_ig::sql::DataType::String,
+        ),
     );
 
     let page_ids = vec![desc1.id, desc2.id];
@@ -445,7 +469,10 @@ fn prefetch_k_greater_than_total() {
         .unwrap();
     handler.write_back_uncompressed(
         &desc.id,
-        PageCacheEntryUncompressed::from_disk_page(create_test_page(5)),
+        PageCacheEntryUncompressed::from_disk_page(
+            create_test_page(5),
+            idk_uwu_ig::sql::DataType::String,
+        ),
     );
 
     let page_ids = vec![desc.id];
@@ -487,6 +514,7 @@ fn job_single_step() {
         current_producer: tx2,
         previous_receiver: rx,
         column: "col1".to_string(),
+        column_ordinal: 0,
         filters: vec![],
         is_root: true,
         table: "test".to_string(),

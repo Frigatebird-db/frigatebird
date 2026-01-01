@@ -1,4 +1,4 @@
-use sqlparser::ast::Expr;
+use crate::sql::physical_plan::PhysicalExpr;
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -41,7 +41,7 @@ impl CreateTablePlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableAccess {
     pub table_name: String,
     pub read_columns: BTreeSet<String>,
@@ -76,7 +76,7 @@ impl TableAccess {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueryPlan {
     pub tables: Vec<TableAccess>,
 }
@@ -110,15 +110,15 @@ impl std::error::Error for PlannerError {}
 
 pub type PlannerResult<T> = Result<T, PlannerError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FilterExpr {
-    Leaf(Expr),
+    Leaf(PhysicalExpr),
     And(Vec<FilterExpr>),
     Or(Vec<FilterExpr>),
 }
 
 impl FilterExpr {
-    pub fn leaf(expr: Expr) -> Self {
+    pub fn leaf(expr: PhysicalExpr) -> Self {
         FilterExpr::Leaf(expr)
     }
 
@@ -164,7 +164,7 @@ impl FilterExpr {
 impl fmt::Display for FilterExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FilterExpr::Leaf(expr) => write!(f, "{expr}"),
+            FilterExpr::Leaf(expr) => write!(f, "{:?}", expr),
             FilterExpr::And(parts) => display_joined("AND", parts, f),
             FilterExpr::Or(parts) => display_joined("OR", parts, f),
         }
