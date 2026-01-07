@@ -4,11 +4,11 @@ use std::cmp::Ordering;
 
 const NULL_SENTINEL: &str = "\u{0001}";
 
-pub(super) fn encode_null() -> String {
+pub fn encode_null() -> String {
     NULL_SENTINEL.to_string()
 }
 
-pub(super) fn is_encoded_null(value: &str) -> bool {
+pub fn is_encoded_null(value: &str) -> bool {
     value == NULL_SENTINEL
 }
 

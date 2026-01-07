@@ -831,6 +831,40 @@ impl<'a> ExpressionPlanner<'a> {
             } => self.plan_in_list(expr, list, *negated),
             Expr::Like { expr, pattern, .. } => self.plan_like(expr, pattern, false),
             Expr::ILike { expr, pattern, .. } => self.plan_like(expr, pattern, true),
+            Expr::IsNull(expr) => Ok(PhysicalExpr::IsNull(Box::new(self.plan_expression(expr)?))),
+            Expr::IsNotNull(expr) => Ok(PhysicalExpr::IsNotNull(Box::new(
+                self.plan_expression(expr)?,
+            ))),
+            Expr::Between {
+                expr: inner,
+                negated,
+                low,
+                high,
+            } => {
+                let inner_phy = self.plan_expression(inner)?;
+                let low_phy = self.plan_expression(low)?;
+                let high_phy = self.plan_expression(high)?;
+
+                let lower_bound =
+                    self.coerce_binary_op(inner_phy.clone(), BinaryOperator::GtEq, low_phy)?;
+                let upper_bound =
+                    self.coerce_binary_op(inner_phy, BinaryOperator::LtEq, high_phy)?;
+
+                let combined = PhysicalExpr::BinaryOp {
+                    left: Box::new(lower_bound),
+                    op: BinaryOperator::And,
+                    right: Box::new(upper_bound),
+                };
+
+                if *negated {
+                    Ok(PhysicalExpr::UnaryOp {
+                        op: sqlparser::ast::UnaryOperator::Not,
+                        expr: Box::new(combined),
+                    })
+                } else {
+                    Ok(combined)
+                }
+            }
             Expr::Nested(inner) => self.plan_expression(inner),
             _ => Err(PlannerError::Unsupported(format!(
                 "unsupported expression type: {expr}"
@@ -852,6 +886,28 @@ impl<'a> ExpressionPlanner<'a> {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
+            });
+        }
+
+        // Implicit cast: Int64 <-> Float64
+        if left_type == DataType::Int64 && right_type == DataType::Float64 {
+            return Ok(PhysicalExpr::BinaryOp {
+                left: Box::new(PhysicalExpr::Cast {
+                    expr: Box::new(left),
+                    target_type: DataType::Float64,
+                }),
+                op,
+                right: Box::new(right),
+            });
+        }
+        if left_type == DataType::Float64 && right_type == DataType::Int64 {
+            return Ok(PhysicalExpr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(PhysicalExpr::Cast {
+                    expr: Box::new(right),
+                    target_type: DataType::Float64,
+                }),
             });
         }
 
@@ -1083,6 +1139,7 @@ impl<'a> ExpressionPlanner<'a> {
             PhysicalExpr::UnaryOp { expr, .. } => self.get_type(expr),
             PhysicalExpr::Like { .. } => DataType::Boolean,
             PhysicalExpr::InList { .. } => DataType::Boolean,
+            PhysicalExpr::IsNull(_) | PhysicalExpr::IsNotNull(_) => DataType::Boolean,
             PhysicalExpr::Cast { target_type, .. } => *target_type,
         }
     }

@@ -556,9 +556,8 @@ impl DictionaryColumn {
             } else {
                 // Add to our dictionary
                 let new_key = self.values.len() as u16;
-                self.values.push(unsafe {
-                    std::str::from_utf8_unchecked(other_bytes)
-                });
+                self.values
+                    .push(unsafe { std::str::from_utf8_unchecked(other_bytes) });
                 key_map.push(new_key);
             }
         }
@@ -608,6 +607,10 @@ pub const DICTIONARY_CARDINALITY_LIMIT: usize = 65535;
 /// Cardinality ratio threshold: if unique values exceed this fraction of rows,
 /// dictionary encoding is not beneficial.
 pub const DICTIONARY_RATIO_THRESHOLD: f64 = 0.5;
+
+/// Global flag to enable/disable dictionary encoding.
+/// Currently disabled due to edge cases in null handling and empty strings.
+pub const ENABLE_DICTIONARY_ENCODING: bool = false;
 
 #[derive(Clone, Debug)]
 pub enum ColumnData {
@@ -827,7 +830,7 @@ impl ColumnarPage {
                 let mut unique_map: HashMap<&str, u16> = HashMap::new();
                 let mut dict_values = BytesColumn::new();
                 let mut keys = Vec::with_capacity(num_rows);
-                let mut use_dictionary = true;
+                let mut use_dictionary = ENABLE_DICTIONARY_ENCODING;
                 let cardinality_threshold = (num_rows as f64 * DICTIONARY_RATIO_THRESHOLD) as usize;
 
                 // First pass: try to build dictionary

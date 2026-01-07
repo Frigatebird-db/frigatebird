@@ -1,6 +1,7 @@
 use crate::entry::Entry;
 use crate::metadata_store::DEFAULT_TABLE;
 use crate::page_handler::PageHandler;
+use crate::sql::executor::values::encode_null;
 use std::collections::HashMap;
 
 use super::helpers::{binary_search_insert_index, find_insert_position, other_error};
@@ -138,7 +139,7 @@ pub fn sorted_insert_row(
 
     let final_row: Vec<String> = row_values
         .into_iter()
-        .map(|opt| opt.unwrap_or_else(|| "".to_string()))
+        .map(|opt| opt.unwrap_or_else(encode_null))
         .collect();
 
     let leading_column_name = &columns[sort_ordinals[0]].name;

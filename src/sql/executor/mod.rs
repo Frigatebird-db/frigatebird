@@ -10,7 +10,7 @@ mod row_functions;
 mod scalar_functions;
 mod scan_helpers;
 mod spill;
-pub(crate) mod values;
+pub mod values;
 mod window_helpers;
 
 use self::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
@@ -3262,6 +3262,9 @@ fn collect_physical_ordinals(expr: &PhysicalExpr, ordinals: &mut BTreeSet<usize>
             }
         }
         PhysicalExpr::Cast { expr, .. } => {
+            collect_physical_ordinals(expr, ordinals);
+        }
+        PhysicalExpr::IsNull(expr) | PhysicalExpr::IsNotNull(expr) => {
             collect_physical_ordinals(expr, ordinals);
         }
         PhysicalExpr::Literal(_) => {}

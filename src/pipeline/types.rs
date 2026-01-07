@@ -125,13 +125,19 @@ fn evaluate_binary_op(
 ) -> Bitmap {
     if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(val)) = (left, right) {
         if *index == column_index {
-            return evaluate_col_lit(&page.data, op, val, page.num_rows);
+            return evaluate_col_lit(&page.data, &page.null_bitmap, op, val, page.num_rows);
         }
     }
     if let (PhysicalExpr::Literal(val), PhysicalExpr::Column { index, .. }) = (left, right) {
         if *index == column_index {
             if let Some(rev_op) = reverse_operator(op) {
-                return evaluate_col_lit(&page.data, &rev_op, val, page.num_rows);
+                return evaluate_col_lit(
+                    &page.data,
+                    &page.null_bitmap,
+                    &rev_op,
+                    val,
+                    page.num_rows,
+                );
             }
         }
     }

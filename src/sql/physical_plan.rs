@@ -50,7 +50,12 @@ pub enum PhysicalExpr {
         expr: Box<PhysicalExpr>,
         target_type: DataType,
     },
-    // Future: Functions, IS NULL, etc.
+
+    /// IS NULL check
+    IsNull(Box<PhysicalExpr>),
+
+    /// IS NOT NULL check
+    IsNotNull(Box<PhysicalExpr>),
 }
 
 impl fmt::Display for PhysicalExpr {
@@ -96,6 +101,8 @@ impl fmt::Display for PhysicalExpr {
             PhysicalExpr::Cast { expr, target_type } => {
                 write!(f, "CAST({} AS {})", expr, target_type)
             }
+            PhysicalExpr::IsNull(expr) => write!(f, "{} IS NULL", expr),
+            PhysicalExpr::IsNotNull(expr) => write!(f, "{} IS NOT NULL", expr),
         }
     }
 }

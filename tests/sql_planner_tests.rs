@@ -1,8 +1,10 @@
 use idk_uwu_ig::metadata_store::{
     ColumnDefinition, PageDirectory, TableDefinition, TableMetaStore,
 };
+use idk_uwu_ig::sql::physical_plan::PhysicalExpr;
 use idk_uwu_ig::sql::types::DataType;
 use idk_uwu_ig::sql::{FilterExpr, QueryPlan, TableAccess, plan_create_table_sql, plan_sql};
+use sqlparser::ast::BinaryOperator;
 use std::sync::{Arc, RwLock};
 
 fn empty_directory() -> Arc<PageDirectory> {
@@ -140,7 +142,31 @@ fn plans_delete_filters() {
     assert!(sessions.write_columns.is_empty());
     assert!(sessions.read_columns.contains("expires_at"));
     let filter = sessions.filters.as_ref().expect("missing filter");
-    assert_eq!(filter.to_string(), "expires_at < NOW()");
+
+    // Check structure: expires_at < [Literal Timestamp]
+    if let FilterExpr::Leaf(PhysicalExpr::BinaryOp { left, op, right }) = filter {
+        match &**left {
+            PhysicalExpr::Column { name, .. } => assert_eq!(name, "expires_at"),
+            _ => panic!("left side is not a column"),
+        }
+
+        assert_eq!(*op, BinaryOperator::Lt);
+
+        match &**right {
+            PhysicalExpr::Literal(val) => {
+                // ScalarValue is private, so we check the Debug string
+                let s = format!("{:?}", val);
+                assert!(
+                    s.contains("Timestamp("),
+                    "expected Timestamp literal, got {}",
+                    s
+                );
+            }
+            _ => panic!("right side is not a timestamp literal"),
+        }
+    } else {
+        panic!("expected BinaryOp leaf filter");
+    }
 }
 
 #[test]

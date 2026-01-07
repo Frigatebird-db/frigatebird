@@ -5,6 +5,7 @@ use io_uring::{IoUring, opcode, types};
 use libc;
 use rkyv::ser::{Serializer, serializers::AllocSerializer};
 use rkyv::{Archive, Deserialize, Serialize};
+use std::alloc::{Layout, alloc, dealloc};
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
@@ -17,15 +18,59 @@ use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::ptr;
 
 pub struct IOHandler {}
 
 const PREFIX_META_SIZE: usize = 64;
+const ALIGNMENT: usize = 4096;
 
 #[derive(Archive, Deserialize, Serialize, Debug)]
 #[archive(check_bytes)]
 struct Metadata {
     read_size: usize,
+}
+
+struct AlignedBuffer {
+    ptr: *mut u8,
+    layout: Layout,
+    capacity: usize,
+}
+
+impl AlignedBuffer {
+    fn new(capacity: usize) -> Self {
+        let capacity = if capacity == 0 { ALIGNMENT } else { capacity };
+        // Ensure capacity is a multiple of alignment for O_DIRECT length requirements
+        let aligned_capacity = (capacity + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
+
+        let layout = Layout::from_size_align(aligned_capacity, ALIGNMENT).unwrap();
+        let ptr = unsafe { alloc(layout) };
+        if ptr.is_null() {
+            panic!("Memory allocation failed");
+        }
+        // Zero initialize to avoid leaking data in padding
+        unsafe { ptr::write_bytes(ptr, 0, aligned_capacity) };
+
+        Self {
+            ptr,
+            layout,
+            capacity: aligned_capacity,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.capacity) }
+    }
+
+    fn as_slice_mut(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.capacity) }
+    }
+}
+
+impl Drop for AlignedBuffer {
+    fn drop(&mut self) {
+        unsafe { dealloc(self.ptr, self.layout) };
+    }
 }
 
 pub struct PageIO {}
@@ -53,60 +98,91 @@ impl PageIO {
         let queue_entries = (offsets.len() * 2).max(1) as u32;
         let mut ring = IoUring::new(queue_entries)?;
 
-        let mut meta_buffers = Vec::with_capacity(offsets.len());
-        let mut lengths = vec![0usize; offsets.len()];
+        // Phase 1: Read first block (contains metadata + start of data)
+        let mut first_blocks = Vec::with_capacity(offsets.len());
 
         for (idx, offset) in offsets.iter().enumerate() {
-            let mut buffer = vec![0u8; PREFIX_META_SIZE];
-            let entry = opcode::Read::new(fd, buffer.as_mut_ptr(), PREFIX_META_SIZE as u32)
+            let mut buffer = AlignedBuffer::new(ALIGNMENT);
+            let entry = opcode::Read::new(fd, buffer.ptr, ALIGNMENT as u32)
                 .offset(*offset)
                 .build()
                 .user_data(idx as u64);
             submit_entry(&mut ring, entry)?;
-            meta_buffers.push(buffer);
+            first_blocks.push(buffer);
         }
+
+        let mut read_sizes = vec![0usize; offsets.len()];
 
         wait_for(&mut ring, offsets.len(), |idx, res| {
             ensure_result(res)?;
-            lengths[idx] = read_size_from_meta(&meta_buffers[idx]);
+            read_sizes[idx] = read_size_from_meta(first_blocks[idx].as_slice());
             Ok(())
         })?;
 
-        let mut results: Vec<Option<PageCacheEntryCompressed>> = vec![None; offsets.len()];
-        let mut data_buffers = Vec::with_capacity(offsets.len());
-        let mut submitted = 0usize;
+        // Phase 2: Read remaining data if any
+        let mut extra_buffers: Vec<Option<AlignedBuffer>> = Vec::with_capacity(offsets.len());
+        for _ in 0..offsets.len() {
+            extra_buffers.push(None);
+        }
 
-        for (idx, len) in lengths.iter().enumerate() {
-            if *len == 0 {
-                results[idx] = Some(PageCacheEntryCompressed { page: Vec::new() });
-                data_buffers.push(Vec::new());
+        let mut submitted_extra = 0usize;
+
+        for (idx, &data_len) in read_sizes.iter().enumerate() {
+            if data_len == 0 {
                 continue;
             }
 
-            let mut buffer = vec![0u8; *len];
-            let data_offset = offsets[idx] + PREFIX_META_SIZE as u64;
-            let entry = opcode::Read::new(fd, buffer.as_mut_ptr(), *len as u32)
-                .offset(data_offset)
-                .build()
-                .user_data(idx as u64);
-            submit_entry(&mut ring, entry)?;
-            data_buffers.push(buffer);
-            submitted += 1;
+            let total_len = PREFIX_META_SIZE + data_len;
+            if total_len > ALIGNMENT {
+                // Need to read more
+                let remaining_len = total_len - ALIGNMENT;
+                let mut buffer = AlignedBuffer::new(remaining_len);
+                let read_offset = offsets[idx] + ALIGNMENT as u64;
+
+                let entry = opcode::Read::new(fd, buffer.ptr, buffer.capacity as u32)
+                    .offset(read_offset)
+                    .build()
+                    .user_data(idx as u64);
+                submit_entry(&mut ring, entry)?;
+                extra_buffers[idx] = Some(buffer);
+                submitted_extra += 1;
+            }
         }
 
-        if submitted > 0 {
-            wait_for(&mut ring, submitted, |idx, res| {
+        if submitted_extra > 0 {
+            wait_for(&mut ring, submitted_extra, |_idx, res| {
                 ensure_result(res)?;
-                let page = std::mem::take(&mut data_buffers[idx]);
-                results[idx] = Some(PageCacheEntryCompressed { page });
                 Ok(())
             })?;
         }
 
-        Ok(results
-            .into_iter()
-            .map(|entry| entry.unwrap_or(PageCacheEntryCompressed { page: Vec::new() }))
-            .collect())
+        // Assemble results
+        let mut results = Vec::with_capacity(offsets.len());
+        for (idx, &data_len) in read_sizes.iter().enumerate() {
+            if data_len == 0 {
+                results.push(PageCacheEntryCompressed { page: Vec::new() });
+                continue;
+            }
+
+            let mut page_data = Vec::with_capacity(data_len);
+
+            // Copy data from first block (skipping metadata)
+            let first_block_slice = first_blocks[idx].as_slice();
+            let available_in_first = (ALIGNMENT - PREFIX_META_SIZE).min(data_len);
+            page_data.extend_from_slice(
+                &first_block_slice[PREFIX_META_SIZE..PREFIX_META_SIZE + available_in_first],
+            );
+
+            // Copy from extra buffer if needed
+            if let Some(extra_buf) = &extra_buffers[idx] {
+                let remaining = data_len - available_in_first;
+                page_data.extend_from_slice(&extra_buf.as_slice()[..remaining]);
+            }
+
+            results.push(PageCacheEntryCompressed { page: page_data });
+        }
+
+        Ok(results)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -133,21 +209,23 @@ impl PageIO {
             read_size: data.len(),
         };
 
-        // Serialize metadata with rkyv - MUCH faster than JSON
+        // Serialize metadata with rkyv
         let mut serializer = AllocSerializer::<256>::default();
         serializer.serialize_value(&new_meta).unwrap();
         let meta_bytes = serializer.into_serializer().into_inner();
 
-        // Pad to exact size
-        let mut meta_buffer = vec![0u8; PREFIX_META_SIZE];
-        meta_buffer[..meta_bytes.len()].copy_from_slice(&meta_bytes);
+        let total_size = PREFIX_META_SIZE + data.len();
+        let mut buffer = AlignedBuffer::new(total_size);
+        let slice = buffer.as_slice_mut();
 
-        // Combine and write in one syscall
-        let mut combined = Vec::with_capacity(PREFIX_META_SIZE + data.len());
-        combined.extend_from_slice(&meta_buffer);
-        combined.extend_from_slice(&data);
+        // Write metadata
+        slice[..meta_bytes.len()].copy_from_slice(&meta_bytes);
+        // Write data
+        slice[PREFIX_META_SIZE..PREFIX_META_SIZE + data.len()].copy_from_slice(&data);
 
-        fd.write_all(&combined)?;
+        // Write the aligned buffer
+        // Note: as_slice_mut().len() is aligned to 4096, which satisfies O_DIRECT
+        fd.write_all(buffer.as_slice())?;
         fd.sync_all()?;
 
         Ok(())
@@ -164,7 +242,7 @@ impl PageIO {
         let fd = types::Fd(file.as_raw_fd());
         let mut ring = IoUring::new(writes.len() as u32)?;
 
-        // Prepare all buffers upfront (io_uring needs stable pointers)
+        // Prepare all buffers upfront
         let mut buffers = Vec::with_capacity(writes.len());
         for (_, data) in writes.iter() {
             let new_meta = Metadata {
@@ -175,20 +253,20 @@ impl PageIO {
             serializer.serialize_value(&new_meta).unwrap();
             let meta_bytes = serializer.into_serializer().into_inner();
 
-            let mut meta_buffer = vec![0u8; PREFIX_META_SIZE];
-            meta_buffer[..meta_bytes.len()].copy_from_slice(&meta_bytes);
+            let total_size = PREFIX_META_SIZE + data.len();
+            let mut buffer = AlignedBuffer::new(total_size);
+            let slice = buffer.as_slice_mut();
 
-            let mut combined = Vec::with_capacity(PREFIX_META_SIZE + data.len());
-            combined.extend_from_slice(&meta_buffer);
-            combined.extend_from_slice(data);
+            slice[..meta_bytes.len()].copy_from_slice(&meta_bytes);
+            slice[PREFIX_META_SIZE..PREFIX_META_SIZE + data.len()].copy_from_slice(data);
 
-            buffers.push(combined);
+            buffers.push(buffer);
         }
 
         // Submit all writes
         for (idx, (offset, _)) in writes.iter().enumerate() {
             let buffer = &buffers[idx];
-            let entry = opcode::Write::new(fd, buffer.as_ptr(), buffer.len() as u32)
+            let entry = opcode::Write::new(fd, buffer.ptr, buffer.capacity as u32)
                 .offset(*offset)
                 .build()
                 .user_data(idx as u64);

@@ -69,6 +69,19 @@ impl PhysicalEvaluator {
                 }
                 bm
             }
+            PhysicalExpr::Cast { expr, target_type } => {
+                // For now, casts in WHERE are limited or not fully supported in filter pushdown
+                // Simplest fallback: evaluate inner, ignore cast if types are compatible-ish?
+                // Actually, if we just ignore it, we might be wrong.
+                // Let's return empty for safety or unsupported.
+                Bitmap::new(batch.num_rows)
+            }
+            PhysicalExpr::IsNull(expr) => evaluate_is_null(expr, batch),
+            PhysicalExpr::IsNotNull(expr) => {
+                let mut bitmap = evaluate_is_null(expr, batch);
+                bitmap.invert();
+                bitmap
+            }
             _ => {
                 // Unsupported expression - return empty bitmap (safe fallback)
                 Bitmap::new(batch.num_rows)
@@ -82,23 +95,50 @@ impl PhysicalEvaluator {
         right: &PhysicalExpr,
         batch: &ColumnarBatch,
     ) -> Bitmap {
+        let left_unwrapped = strip_cast(left);
+        let right_unwrapped = strip_cast(right);
+
         // Most common case: Column <Op> Literal
-        if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(val)) = (left, right) {
+        if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(val)) =
+            (left_unwrapped, right_unwrapped)
+        {
             if let Some(col_page) = batch.columns.get(index) {
-                return evaluate_col_lit(&col_page.data, op, val, batch.num_rows);
+                return evaluate_col_lit(
+                    &col_page.data,
+                    &col_page.null_bitmap,
+                    op,
+                    val,
+                    batch.num_rows,
+                );
             }
         }
 
         // Handle Literal <Op> Column (Flip it)
-        if let (PhysicalExpr::Literal(val), PhysicalExpr::Column { index, .. }) = (left, right) {
+        if let (PhysicalExpr::Literal(val), PhysicalExpr::Column { index, .. }) =
+            (left_unwrapped, right_unwrapped)
+        {
             if let Some(col_page) = batch.columns.get(index) {
                 if let Some(rev_op) = reverse_operator(op) {
-                    return evaluate_col_lit(&col_page.data, &rev_op, val, batch.num_rows);
+                    return evaluate_col_lit(
+                        &col_page.data,
+                        &col_page.null_bitmap,
+                        &rev_op,
+                        val,
+                        batch.num_rows,
+                    );
                 }
             }
         }
 
         Bitmap::new(batch.num_rows) // Fallback empty
+    }
+}
+
+fn strip_cast(expr: &PhysicalExpr) -> &PhysicalExpr {
+    if let PhysicalExpr::Cast { expr, .. } = expr {
+        strip_cast(expr)
+    } else {
+        expr
     }
 }
 
@@ -117,6 +157,7 @@ pub fn reverse_operator(op: &BinaryOperator) -> Option<BinaryOperator> {
 
 pub(crate) fn evaluate_col_lit(
     col: &ColumnData,
+    null_bitmap: &Bitmap,
     op: &BinaryOperator,
     lit: &ScalarValue,
     num_rows: usize,
@@ -133,42 +174,42 @@ pub(crate) fn evaluate_col_lit(
             match op {
                 BinaryOperator::Eq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v == target {
+                        if !null_bitmap.is_set(i) && v == target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::NotEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v != target {
+                        if !null_bitmap.is_set(i) && v != target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::Gt => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v > target {
+                        if !null_bitmap.is_set(i) && v > target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::GtEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v >= target {
+                        if !null_bitmap.is_set(i) && v >= target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::Lt => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v < target {
+                        if !null_bitmap.is_set(i) && v < target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::LtEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v <= target {
+                        if !null_bitmap.is_set(i) && v <= target {
                             bitmap.set(i);
                         }
                     }
@@ -185,42 +226,42 @@ pub(crate) fn evaluate_col_lit(
             match op {
                 BinaryOperator::Eq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v - target).abs() < f64::EPSILON {
+                        if !null_bitmap.is_set(i) && (v - target).abs() < f64::EPSILON {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::NotEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v - target).abs() >= f64::EPSILON {
+                        if !null_bitmap.is_set(i) && (v - target).abs() >= f64::EPSILON {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::Gt => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v > target {
+                        if !null_bitmap.is_set(i) && v > target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::GtEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v >= target {
+                        if !null_bitmap.is_set(i) && v >= target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::Lt => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v < target {
+                        if !null_bitmap.is_set(i) && v < target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::LtEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v <= target {
+                        if !null_bitmap.is_set(i) && v <= target {
                             bitmap.set(i);
                         }
                     }
@@ -237,42 +278,42 @@ pub(crate) fn evaluate_col_lit(
             match op {
                 BinaryOperator::Eq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v as f64 - target).abs() < f64::EPSILON {
+                        if !null_bitmap.is_set(i) && (v as f64 - target).abs() < f64::EPSILON {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::NotEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v as f64 - target).abs() >= f64::EPSILON {
+                        if !null_bitmap.is_set(i) && (v as f64 - target).abs() >= f64::EPSILON {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::Gt => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v as f64) > target {
+                        if !null_bitmap.is_set(i) && (v as f64) > target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::GtEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v as f64) >= target {
+                        if !null_bitmap.is_set(i) && (v as f64) >= target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::Lt => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v as f64) < target {
+                        if !null_bitmap.is_set(i) && (v as f64) < target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::LtEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v as f64) <= target {
+                        if !null_bitmap.is_set(i) && (v as f64) <= target {
                             bitmap.set(i);
                         }
                     }
@@ -285,42 +326,42 @@ pub(crate) fn evaluate_col_lit(
             match op {
                 BinaryOperator::Eq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v - target).abs() < f64::EPSILON {
+                        if !null_bitmap.is_set(i) && (v - target).abs() < f64::EPSILON {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::NotEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if (v - target).abs() >= f64::EPSILON {
+                        if !null_bitmap.is_set(i) && (v - target).abs() >= f64::EPSILON {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::Gt => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v > target {
+                        if !null_bitmap.is_set(i) && v > target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::GtEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v >= target {
+                        if !null_bitmap.is_set(i) && v >= target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::Lt => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v < target {
+                        if !null_bitmap.is_set(i) && v < target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::LtEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v <= target {
+                        if !null_bitmap.is_set(i) && v <= target {
                             bitmap.set(i);
                         }
                     }
@@ -337,14 +378,14 @@ pub(crate) fn evaluate_col_lit(
             match op {
                 BinaryOperator::Eq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v == target {
+                        if !null_bitmap.is_set(i) && v == target {
                             bitmap.set(i);
                         }
                     }
                 }
                 BinaryOperator::NotEq => {
                     for (i, &v) in vec.iter().enumerate() {
-                        if v != target {
+                        if !null_bitmap.is_set(i) && v != target {
                             bitmap.set(i);
                         }
                     }
@@ -365,6 +406,9 @@ pub(crate) fn evaluate_col_lit(
                     // Length-first filtering: if lengths differ, strings cannot be equal.
                     // This avoids touching the data buffer for most rows.
                     for i in 0..num_rows {
+                        if null_bitmap.is_set(i) {
+                            continue;
+                        }
                         let row_len = col.get_len(i);
                         if row_len != val_len {
                             continue; // Fast reject: length mismatch
@@ -378,6 +422,9 @@ pub(crate) fn evaluate_col_lit(
                 }
                 BinaryOperator::NotEq => {
                     for i in 0..num_rows {
+                        if null_bitmap.is_set(i) {
+                            continue;
+                        }
                         let row_len = col.get_len(i);
                         if row_len != val_len {
                             bitmap.set(i); // Different length = definitely not equal
@@ -391,33 +438,41 @@ pub(crate) fn evaluate_col_lit(
                 }
                 BinaryOperator::Gt => {
                     for i in 0..num_rows {
-                        let row_bytes = col.get_bytes(i);
-                        if row_bytes > val_bytes {
-                            bitmap.set(i);
+                        if !null_bitmap.is_set(i) {
+                            let row_bytes = col.get_bytes(i);
+                            if row_bytes > val_bytes {
+                                bitmap.set(i);
+                            }
                         }
                     }
                 }
                 BinaryOperator::GtEq => {
                     for i in 0..num_rows {
-                        let row_bytes = col.get_bytes(i);
-                        if row_bytes >= val_bytes {
-                            bitmap.set(i);
+                        if !null_bitmap.is_set(i) {
+                            let row_bytes = col.get_bytes(i);
+                            if row_bytes >= val_bytes {
+                                bitmap.set(i);
+                            }
                         }
                     }
                 }
                 BinaryOperator::Lt => {
                     for i in 0..num_rows {
-                        let row_bytes = col.get_bytes(i);
-                        if row_bytes < val_bytes {
-                            bitmap.set(i);
+                        if !null_bitmap.is_set(i) {
+                            let row_bytes = col.get_bytes(i);
+                            if row_bytes < val_bytes {
+                                bitmap.set(i);
+                            }
                         }
                     }
                 }
                 BinaryOperator::LtEq => {
                     for i in 0..num_rows {
-                        let row_bytes = col.get_bytes(i);
-                        if row_bytes <= val_bytes {
-                            bitmap.set(i);
+                        if !null_bitmap.is_set(i) {
+                            let row_bytes = col.get_bytes(i);
+                            if row_bytes <= val_bytes {
+                                bitmap.set(i);
+                            }
                         }
                     }
                 }
@@ -438,7 +493,7 @@ pub(crate) fn evaluate_col_lit(
                     if let Some(target_key) = dict.find_key(val_bytes) {
                         // Integer comparison - much faster than memcmp
                         for i in 0..num_rows {
-                            if dict.keys[i] == target_key {
+                            if !null_bitmap.is_set(i) && dict.keys[i] == target_key {
                                 bitmap.set(i);
                             }
                         }
@@ -449,14 +504,16 @@ pub(crate) fn evaluate_col_lit(
                     if let Some(target_key) = dict.find_key(val_bytes) {
                         // Integer comparison
                         for i in 0..num_rows {
-                            if dict.keys[i] != target_key {
+                            if !null_bitmap.is_set(i) && dict.keys[i] != target_key {
                                 bitmap.set(i);
                             }
                         }
                     } else {
                         // Value not in dictionary - all non-null rows match
                         for i in 0..num_rows {
-                            bitmap.set(i);
+                            if !null_bitmap.is_set(i) {
+                                bitmap.set(i);
+                            }
                         }
                     }
                 }
@@ -464,33 +521,41 @@ pub(crate) fn evaluate_col_lit(
                 // (dictionary order doesn't preserve lexicographic order)
                 BinaryOperator::Gt => {
                     for i in 0..num_rows {
-                        let row_bytes = dict.get_bytes(i);
-                        if row_bytes > val_bytes {
-                            bitmap.set(i);
+                        if !null_bitmap.is_set(i) {
+                            let row_bytes = dict.get_bytes(i);
+                            if row_bytes > val_bytes {
+                                bitmap.set(i);
+                            }
                         }
                     }
                 }
                 BinaryOperator::GtEq => {
                     for i in 0..num_rows {
-                        let row_bytes = dict.get_bytes(i);
-                        if row_bytes >= val_bytes {
-                            bitmap.set(i);
+                        if !null_bitmap.is_set(i) {
+                            let row_bytes = dict.get_bytes(i);
+                            if row_bytes >= val_bytes {
+                                bitmap.set(i);
+                            }
                         }
                     }
                 }
                 BinaryOperator::Lt => {
                     for i in 0..num_rows {
-                        let row_bytes = dict.get_bytes(i);
-                        if row_bytes < val_bytes {
-                            bitmap.set(i);
+                        if !null_bitmap.is_set(i) {
+                            let row_bytes = dict.get_bytes(i);
+                            if row_bytes < val_bytes {
+                                bitmap.set(i);
+                            }
                         }
                     }
                 }
                 BinaryOperator::LtEq => {
                     for i in 0..num_rows {
-                        let row_bytes = dict.get_bytes(i);
-                        if row_bytes <= val_bytes {
-                            bitmap.set(i);
+                        if !null_bitmap.is_set(i) {
+                            let row_bytes = dict.get_bytes(i);
+                            if row_bytes <= val_bytes {
+                                bitmap.set(i);
+                            }
                         }
                     }
                 }
@@ -502,6 +567,9 @@ pub(crate) fn evaluate_col_lit(
         (ColumnData::Dictionary(dict), ScalarValue::Int64(val)) => {
             let target = *val as f64;
             for i in 0..num_rows {
+                if null_bitmap.is_set(i) {
+                    continue;
+                }
                 let s = dict.get_string(i);
                 let Ok(num) = s.parse::<f64>() else {
                     continue;
@@ -544,6 +612,9 @@ pub(crate) fn evaluate_col_lit(
         (ColumnData::Dictionary(dict), ScalarValue::Float64(val)) => {
             let target = *val;
             for i in 0..num_rows {
+                if null_bitmap.is_set(i) {
+                    continue;
+                }
                 let s = dict.get_string(i);
                 let Ok(num) = s.parse::<f64>() else {
                     continue;
@@ -590,6 +661,9 @@ pub(crate) fn evaluate_col_lit(
         (ColumnData::Text(col), ScalarValue::Int64(val)) => {
             let target = *val as f64;
             for i in 0..num_rows {
+                if null_bitmap.is_set(i) {
+                    continue;
+                }
                 let s = col.get_string(i);
                 let Ok(num) = s.parse::<f64>() else {
                     continue;
@@ -632,6 +706,9 @@ pub(crate) fn evaluate_col_lit(
         (ColumnData::Text(col), ScalarValue::Float64(val)) => {
             let target = *val;
             for i in 0..num_rows {
+                if null_bitmap.is_set(i) {
+                    continue;
+                }
                 let s = col.get_string(i);
                 let Ok(num) = s.parse::<f64>() else {
                     continue;
@@ -888,5 +965,16 @@ fn evaluate_like(
             }
         }
     }
+    Bitmap::new(batch.num_rows)
+}
+
+fn evaluate_is_null(expr: &PhysicalExpr, batch: &ColumnarBatch) -> Bitmap {
+    if let PhysicalExpr::Column { index, .. } = expr {
+        if let Some(page) = batch.columns.get(index) {
+            return page.null_bitmap.clone();
+        }
+    }
+    // For literals, they are never null in our system (ScalarValue::Null is handled but usually we don't IS NULL a literal in WHERE)
+    // If we support complex expressions in IS NULL, we'd need full evaluation.
     Bitmap::new(batch.num_rows)
 }
