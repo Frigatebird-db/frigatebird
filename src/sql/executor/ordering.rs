@@ -225,10 +225,6 @@ pub(super) fn sort_batch_in_memory(
     Ok(batch.gather(&indices))
 }
 
-fn column_scalar_from_text(value: &str) -> ScalarValue {
-    ScalarValue::String(value.to_string())
-}
-
 fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
     if page.null_bitmap.is_set(idx) {
         return ScalarValue::Null;
@@ -236,9 +232,12 @@ fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
     match &page.data {
         ColumnData::Int64(values) => ScalarValue::Int64(values[idx]),
         ColumnData::Float64(values) => ScalarValue::Float64(values[idx]),
-        ColumnData::Text(values) => column_scalar_from_text(&values[idx]),
+        // Legacy bridge: allocates String for ordering compatibility
+        ColumnData::Text(col) => ScalarValue::String(col.get_string(idx)),
         ColumnData::Boolean(values) => ScalarValue::Boolean(values[idx]),
         ColumnData::Timestamp(values) => ScalarValue::Timestamp(values[idx]),
+        // Legacy bridge: allocates String for ordering compatibility
+        ColumnData::Dictionary(dict) => ScalarValue::String(dict.get_string(idx)),
     }
 }
 

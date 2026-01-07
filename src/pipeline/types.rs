@@ -153,15 +153,17 @@ fn evaluate_like(
     if *index != column_index {
         return Bitmap::new(page.num_rows);
     }
-    let ColumnData::Text(values) = &page.data else {
+    let ColumnData::Text(col) = &page.data else {
         return Bitmap::new(page.num_rows);
     };
     let mut bitmap = Bitmap::new(page.num_rows);
-    for (idx, value) in values.iter().enumerate() {
+    for idx in 0..col.len() {
         if page.null_bitmap.is_set(idx) {
             continue;
         }
-        if like_match(value, pat, case_insensitive) {
+        // LIKE requires string semantics
+        let value = col.get_string(idx);
+        if like_match(&value, pat, case_insensitive) {
             bitmap.set(idx);
         }
     }
@@ -258,20 +260,50 @@ fn evaluate_in_list(
                 }
             }
         }
-        ColumnData::Text(values) => {
-            let mut set = std::collections::HashSet::new();
+        ColumnData::Text(col) => {
+            // Build HashSet of literal values as bytes for fast comparison
+            let mut set: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
             for item in list {
                 if let PhysicalExpr::Literal(val) = item {
                     if let Some(text) = scalar_to_string(val) {
-                        set.insert(text);
+                        set.insert(text.into_bytes());
                     }
                 }
             }
-            for (idx, value) in values.iter().enumerate() {
+            for idx in 0..col.len() {
                 if page.null_bitmap.is_set(idx) {
                     continue;
                 }
-                let matches = set.contains(value);
+                let row_bytes = col.get_bytes(idx);
+                let matches = set.contains(row_bytes);
+                if (matches && !negated) || (!matches && negated) {
+                    bitmap.set(idx);
+                }
+            }
+        }
+        ColumnData::Dictionary(dict) => {
+            // Build set of matching keys for dictionary optimization
+            let mut set: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+            for item in list {
+                if let PhysicalExpr::Literal(val) = item {
+                    if let Some(text) = scalar_to_string(val) {
+                        set.insert(text.into_bytes());
+                    }
+                }
+            }
+            // Pre-compute which dictionary keys match
+            let mut matching_keys = std::collections::HashSet::new();
+            for key in 0..dict.values.len() {
+                if set.contains(dict.values.get_bytes(key)) {
+                    matching_keys.insert(key as u16);
+                }
+            }
+            for idx in 0..dict.len() {
+                if page.null_bitmap.is_set(idx) {
+                    continue;
+                }
+                let key = dict.keys[idx];
+                let matches = matching_keys.contains(&key);
                 if (matches && !negated) || (!matches && negated) {
                     bitmap.set(idx);
                 }

@@ -1,4 +1,4 @@
-use super::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
+use super::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
 use super::expressions::evaluate_expression_on_batch;
 use super::grouping_helpers::evaluate_group_keys_on_batch;
 use super::helpers::parse_interval_seconds;
@@ -1172,9 +1172,12 @@ fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
     match &page.data {
         ColumnData::Int64(values) => ScalarValue::Int64(values[idx]),
         ColumnData::Float64(values) => ScalarValue::Float64(values[idx]),
-        ColumnData::Text(values) => ScalarValue::String(values[idx].clone()),
+        // Legacy bridge: allocates String for compatibility
+        ColumnData::Text(col) => ScalarValue::String(col.get_string(idx)),
         ColumnData::Boolean(values) => ScalarValue::Boolean(values[idx]),
         ColumnData::Timestamp(values) => ScalarValue::Timestamp(values[idx]),
+        // Legacy bridge: allocates String for compatibility
+        ColumnData::Dictionary(dict) => ScalarValue::String(dict.get_string(idx)),
     }
 }
 
@@ -1199,12 +1202,28 @@ fn scalar_column_to_numeric(page: &ColumnarPage) -> Result<Vec<Option<f64>>, Sql
                 }
             }
         }
-        ColumnData::Text(texts) => {
-            for (idx, value) in texts.iter().enumerate() {
+        ColumnData::Text(col) => {
+            for idx in 0..col.len() {
                 if page.null_bitmap.is_set(idx) {
                     values.push(None);
                 } else {
-                    let parsed = value.parse::<f64>().map_err(|_| {
+                    let s = col.get_string(idx);
+                    let parsed = s.parse::<f64>().map_err(|_| {
+                        SqlExecutionError::Unsupported(
+                            "SUM window requires numeric argument".into(),
+                        )
+                    })?;
+                    values.push(Some(parsed));
+                }
+            }
+        }
+        ColumnData::Dictionary(dict) => {
+            for idx in 0..dict.len() {
+                if page.null_bitmap.is_set(idx) {
+                    values.push(None);
+                } else {
+                    let s = dict.get_string(idx);
+                    let parsed = s.parse::<f64>().map_err(|_| {
                         SqlExecutionError::Unsupported(
                             "SUM window requires numeric argument".into(),
                         )
@@ -1289,7 +1308,8 @@ fn scalars_to_column(
             | ColumnData::Float64(_)
             | ColumnData::Text(_)
             | ColumnData::Boolean(_)
-            | ColumnData::Timestamp(_) => {
+            | ColumnData::Timestamp(_)
+            | ColumnData::Dictionary(_) => {
                 let target_kind = determine_template_kind(template, &values);
                 match target_kind {
                     TemplateOutputKind::Int => {
@@ -1340,20 +1360,20 @@ fn scalars_to_column(
                         })
                     }
                     TemplateOutputKind::Text => {
-                        let mut data = Vec::with_capacity(len);
+                        let mut col = BytesColumn::with_capacity(len, len * 16);
                         for (idx, value) in values.iter().enumerate() {
                             match value {
                                 ScalarValue::Null => {
                                     null_bitmap.set(idx);
-                                    data.push(String::new());
+                                    col.push("");
                                 }
-                                ScalarValue::String(text) => data.push(text.clone()),
-                                _ => data.push(scalar_to_string(value)),
+                                ScalarValue::String(text) => col.push(text),
+                                _ => col.push(&scalar_to_string(value)),
                             }
                         }
                         Ok(ColumnarPage {
                             page_metadata: String::new(),
-                            data: ColumnData::Text(data),
+                            data: ColumnData::Text(col),
                             null_bitmap,
                             num_rows: len,
                         })

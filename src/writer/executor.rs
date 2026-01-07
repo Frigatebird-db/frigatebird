@@ -929,27 +929,28 @@ fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
             stats.min_value = min_val.map(|v| v.to_string());
             stats.max_value = max_val.map(|v| v.to_string());
         }
-        ColumnData::Text(values) => {
+        ColumnData::Text(col) => {
             stats.kind = ColumnStatsKind::Text;
             let mut min_val: Option<String> = None;
             let mut max_val: Option<String> = None;
-            for (idx, value) in values.iter().enumerate().take(page.num_rows) {
+            for idx in 0..page.num_rows.min(col.len()) {
                 if page.null_bitmap.is_set(idx) {
                     continue;
                 }
-                if min_val
+                let value = col.get_bytes(idx);
+                let is_new_min = min_val
                     .as_ref()
-                    .map(|current| value < current)
-                    .unwrap_or(true)
-                {
-                    min_val = Some(value.clone());
+                    .map(|current| value < current.as_bytes())
+                    .unwrap_or(true);
+                if is_new_min {
+                    min_val = Some(col.get_string(idx));
                 }
-                if max_val
+                let is_new_max = max_val
                     .as_ref()
-                    .map(|current| value > current)
-                    .unwrap_or(true)
-                {
-                    max_val = Some(value.clone());
+                    .map(|current| value > current.as_bytes())
+                    .unwrap_or(true);
+                if is_new_max {
+                    max_val = Some(col.get_string(idx));
                 }
             }
             stats.min_value = min_val;
@@ -990,6 +991,34 @@ fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
             }
             stats.min_value = min_val.map(|v| v.to_string());
             stats.max_value = max_val.map(|v| v.to_string());
+        }
+        ColumnData::Dictionary(dict) => {
+            // Treat Dictionary like Text for stats
+            stats.kind = ColumnStatsKind::Text;
+            let mut min_val: Option<String> = None;
+            let mut max_val: Option<String> = None;
+            for idx in 0..page.num_rows.min(dict.len()) {
+                if page.null_bitmap.is_set(idx) {
+                    continue;
+                }
+                let value = dict.get_bytes(idx);
+                let is_new_min = min_val
+                    .as_ref()
+                    .map(|current| value < current.as_bytes())
+                    .unwrap_or(true);
+                if is_new_min {
+                    min_val = Some(dict.get_string(idx));
+                }
+                let is_new_max = max_val
+                    .as_ref()
+                    .map(|current| value > current.as_bytes())
+                    .unwrap_or(true);
+                if is_new_max {
+                    max_val = Some(dict.get_string(idx));
+                }
+            }
+            stats.min_value = min_val;
+            stats.max_value = max_val;
         }
     }
 
@@ -1045,9 +1074,13 @@ mod writer_stats_tests {
 
     #[test]
     fn derive_stats_tracks_all_null_pages() {
+        use crate::sql::executor::batch::BytesColumn;
+        let mut col = BytesColumn::new();
+        col.push("a");
+        col.push("b");
         let page = ColumnarPage {
             page_metadata: String::new(),
-            data: ColumnData::Text(vec!["a".into(), "b".into()]),
+            data: ColumnData::Text(col),
             null_bitmap: make_bitmap(2, &[0, 1]),
             num_rows: 2,
         };

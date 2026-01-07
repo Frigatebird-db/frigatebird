@@ -13,7 +13,7 @@ mod spill;
 pub(crate) mod values;
 mod window_helpers;
 
-use self::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
+use self::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
 use self::spill::SpillManager;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
@@ -3426,13 +3426,14 @@ fn remove_sql_executor_wal_dir(namespace: &str) {
 
 fn boolean_bitmap_from_page(page: &ColumnarPage) -> Result<Bitmap, SqlExecutionError> {
     match &page.data {
-        ColumnData::Text(values) => {
+        ColumnData::Text(col) => {
             let mut bitmap = Bitmap::new(page.len());
-            for (idx, value) in values.iter().enumerate() {
+            for idx in 0..col.len() {
                 if page.null_bitmap.is_set(idx) {
                     continue;
                 }
-                if value.eq_ignore_ascii_case("true") {
+                let value = col.get_bytes(idx);
+                if value.eq_ignore_ascii_case(b"true") {
                     bitmap.set(idx);
                 }
             }
@@ -3447,19 +3448,19 @@ fn boolean_bitmap_from_page(page: &ColumnarPage) -> Result<Bitmap, SqlExecutionE
 fn strings_to_text_column(values: Vec<Option<String>>) -> ColumnarPage {
     let len = values.len();
     let mut null_bitmap = Bitmap::new(len);
-    let mut data: Vec<String> = Vec::with_capacity(len);
+    let mut col = BytesColumn::with_capacity(len, len * 16);
     for (idx, value) in values.into_iter().enumerate() {
         match value {
-            Some(text) => data.push(text),
+            Some(text) => col.push(&text),
             None => {
                 null_bitmap.set(idx);
-                data.push(String::new());
+                col.push("");
             }
         }
     }
     ColumnarPage {
         page_metadata: String::new(),
-        data: ColumnData::Text(data),
+        data: ColumnData::Text(col),
         null_bitmap,
         num_rows: len,
     }
@@ -3604,11 +3605,11 @@ fn build_distinct_key(batch: &ColumnarBatch, row_idx: usize, column_count: usize
                         DistinctValue::Float(data[row_idx].to_bits())
                     }
                 }
-                ColumnData::Text(data) => {
+                ColumnData::Text(col) => {
                     if page.null_bitmap.is_set(row_idx) {
                         DistinctValue::Null
                     } else {
-                        DistinctValue::Text(data[row_idx].clone())
+                        DistinctValue::Text(col.get_string(row_idx))
                     }
                 }
                 ColumnData::Boolean(data) => {
@@ -3623,6 +3624,13 @@ fn build_distinct_key(batch: &ColumnarBatch, row_idx: usize, column_count: usize
                         DistinctValue::Null
                     } else {
                         DistinctValue::Timestamp(data[row_idx])
+                    }
+                }
+                ColumnData::Dictionary(dict) => {
+                    if page.null_bitmap.is_set(row_idx) {
+                        DistinctValue::Null
+                    } else {
+                        DistinctValue::Text(dict.get_string(row_idx))
                     }
                 }
             },

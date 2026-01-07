@@ -2,7 +2,7 @@ use super::SqlExecutionError;
 use super::aggregates::{
     AggregateDataset, MaterializedColumns, evaluate_aggregate_function, is_aggregate_function,
 };
-use super::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
+use super::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
 use super::helpers::{like_match, regex_match};
 use super::row_functions::evaluate_row_function;
 use super::scalar_functions::evaluate_scalar_function;
@@ -832,34 +832,44 @@ fn page_value_truthy(page: &ColumnarPage, row_idx: usize) -> bool {
     match &page.data {
         ColumnData::Int64(values) => values[row_idx] != 0,
         ColumnData::Float64(values) => values[row_idx] != 0.0,
-        ColumnData::Text(values) => {
-            let value = values[row_idx].trim();
+        ColumnData::Text(col) => {
+            let value = col.get_string(row_idx);
+            let trimmed = value.trim();
             matches!(
-                value.to_ascii_lowercase().as_str(),
+                trimmed.to_ascii_lowercase().as_str(),
                 "true" | "t" | "1" | "yes" | "y"
             )
         }
         ColumnData::Boolean(values) => values[row_idx],
         ColumnData::Timestamp(values) => values[row_idx] != 0,
+        ColumnData::Dictionary(dict) => {
+            let value = dict.get_string(row_idx);
+            let trimmed = value.trim();
+            matches!(
+                trimmed.to_ascii_lowercase().as_str(),
+                "true" | "t" | "1" | "yes" | "y"
+            )
+        }
     }
 }
 
 fn column_from_strings(values: Vec<Option<String>>) -> ColumnarPage {
     let len = values.len();
-    let mut data: Vec<String> = Vec::with_capacity(len);
+    // Estimate 16 bytes per string
+    let mut col = BytesColumn::with_capacity(len, len * 16);
     let mut bitmap = Bitmap::new(len);
     for (idx, value) in values.into_iter().enumerate() {
         match value {
-            Some(text) => data.push(text),
+            Some(text) => col.push(&text),
             None => {
                 bitmap.set(idx);
-                data.push(String::new());
+                col.push("");
             }
         }
     }
     ColumnarPage {
         page_metadata: String::new(),
-        data: ColumnData::Text(data),
+        data: ColumnData::Text(col),
         null_bitmap: bitmap,
         num_rows: len,
     }
@@ -1007,12 +1017,12 @@ where
         ));
     }
 
-    let mut values = Vec::with_capacity(len);
+    let mut col = BytesColumn::with_capacity(len, len * 5); // "true"/"false" ~5 chars
     let mut null_bitmap = Bitmap::new(len);
     for idx in 0..len {
         if left.null_bitmap.is_set(idx) || right.null_bitmap.is_set(idx) {
             null_bitmap.set(idx);
-            values.push(String::new());
+            col.push("");
             continue;
         }
         let lhs = numeric_value_at(left, idx)?;
@@ -1021,12 +1031,12 @@ where
             .partial_cmp(&rhs)
             .map(|ord| predicate(ord))
             .unwrap_or(false);
-        values.push(bool_to_text(matches));
+        col.push(&bool_to_text(matches));
     }
 
     Ok(ColumnarPage {
         page_metadata: String::new(),
-        data: ColumnData::Text(values),
+        data: ColumnData::Text(col),
         null_bitmap,
         num_rows: len,
     })

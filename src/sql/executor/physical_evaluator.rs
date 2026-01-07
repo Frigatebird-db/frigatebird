@@ -354,61 +354,156 @@ pub(crate) fn evaluate_col_lit(
         }
 
         // ---------------------------------------------------------
-        // LEGACY PATH: STRING (Still faster because no type guessing)
+        // FAST PATH: STRING with length-first optimization
         // ---------------------------------------------------------
-        (ColumnData::Text(vec), ScalarValue::String(val)) => match op {
-            BinaryOperator::Eq => {
-                for (i, v) in vec.iter().enumerate() {
-                    if v == val {
-                        bitmap.set(i);
+        (ColumnData::Text(col), ScalarValue::String(val)) => {
+            let val_bytes = val.as_bytes();
+            let val_len = val_bytes.len();
+
+            match op {
+                BinaryOperator::Eq => {
+                    // Length-first filtering: if lengths differ, strings cannot be equal.
+                    // This avoids touching the data buffer for most rows.
+                    for i in 0..num_rows {
+                        let row_len = col.get_len(i);
+                        if row_len != val_len {
+                            continue; // Fast reject: length mismatch
+                        }
+                        // Only compare bytes if lengths match
+                        let row_bytes = col.get_bytes(i);
+                        if row_bytes == val_bytes {
+                            bitmap.set(i);
+                        }
                     }
                 }
-            }
-            BinaryOperator::NotEq => {
-                for (i, v) in vec.iter().enumerate() {
-                    if v != val {
-                        bitmap.set(i);
+                BinaryOperator::NotEq => {
+                    for i in 0..num_rows {
+                        let row_len = col.get_len(i);
+                        if row_len != val_len {
+                            bitmap.set(i); // Different length = definitely not equal
+                            continue;
+                        }
+                        let row_bytes = col.get_bytes(i);
+                        if row_bytes != val_bytes {
+                            bitmap.set(i);
+                        }
                     }
                 }
-            }
-            BinaryOperator::Gt => {
-                for (i, v) in vec.iter().enumerate() {
-                    if v > val {
-                        bitmap.set(i);
+                BinaryOperator::Gt => {
+                    for i in 0..num_rows {
+                        let row_bytes = col.get_bytes(i);
+                        if row_bytes > val_bytes {
+                            bitmap.set(i);
+                        }
                     }
                 }
-            }
-            BinaryOperator::GtEq => {
-                for (i, v) in vec.iter().enumerate() {
-                    if v >= val {
-                        bitmap.set(i);
+                BinaryOperator::GtEq => {
+                    for i in 0..num_rows {
+                        let row_bytes = col.get_bytes(i);
+                        if row_bytes >= val_bytes {
+                            bitmap.set(i);
+                        }
                     }
                 }
-            }
-            BinaryOperator::Lt => {
-                for (i, v) in vec.iter().enumerate() {
-                    if v < val {
-                        bitmap.set(i);
+                BinaryOperator::Lt => {
+                    for i in 0..num_rows {
+                        let row_bytes = col.get_bytes(i);
+                        if row_bytes < val_bytes {
+                            bitmap.set(i);
+                        }
                     }
                 }
-            }
-            BinaryOperator::LtEq => {
-                for (i, v) in vec.iter().enumerate() {
-                    if v <= val {
-                        bitmap.set(i);
+                BinaryOperator::LtEq => {
+                    for i in 0..num_rows {
+                        let row_bytes = col.get_bytes(i);
+                        if row_bytes <= val_bytes {
+                            bitmap.set(i);
+                        }
                     }
                 }
+                _ => {}
             }
-            _ => {}
-        },
+        }
 
         // ---------------------------------------------------------
-        // TEXT COLUMN WITH NUMERIC LITERAL
+        // FAST PATH: DICTIONARY with key-based optimization
         // ---------------------------------------------------------
-        (ColumnData::Text(vec), ScalarValue::Int64(val)) => {
+        (ColumnData::Dictionary(dict), ScalarValue::String(val)) => {
+            let val_bytes = val.as_bytes();
+
+            match op {
+                BinaryOperator::Eq => {
+                    // Key optimization: look up literal in dictionary ONCE
+                    // If found, compare integer keys instead of bytes
+                    if let Some(target_key) = dict.find_key(val_bytes) {
+                        // Integer comparison - much faster than memcmp
+                        for i in 0..num_rows {
+                            if dict.keys[i] == target_key {
+                                bitmap.set(i);
+                            }
+                        }
+                    }
+                    // If value not in dictionary, no rows can match - bitmap stays empty
+                }
+                BinaryOperator::NotEq => {
+                    if let Some(target_key) = dict.find_key(val_bytes) {
+                        // Integer comparison
+                        for i in 0..num_rows {
+                            if dict.keys[i] != target_key {
+                                bitmap.set(i);
+                            }
+                        }
+                    } else {
+                        // Value not in dictionary - all non-null rows match
+                        for i in 0..num_rows {
+                            bitmap.set(i);
+                        }
+                    }
+                }
+                // For ordering comparisons, fall back to byte comparison
+                // (dictionary order doesn't preserve lexicographic order)
+                BinaryOperator::Gt => {
+                    for i in 0..num_rows {
+                        let row_bytes = dict.get_bytes(i);
+                        if row_bytes > val_bytes {
+                            bitmap.set(i);
+                        }
+                    }
+                }
+                BinaryOperator::GtEq => {
+                    for i in 0..num_rows {
+                        let row_bytes = dict.get_bytes(i);
+                        if row_bytes >= val_bytes {
+                            bitmap.set(i);
+                        }
+                    }
+                }
+                BinaryOperator::Lt => {
+                    for i in 0..num_rows {
+                        let row_bytes = dict.get_bytes(i);
+                        if row_bytes < val_bytes {
+                            bitmap.set(i);
+                        }
+                    }
+                }
+                BinaryOperator::LtEq => {
+                    for i in 0..num_rows {
+                        let row_bytes = dict.get_bytes(i);
+                        if row_bytes <= val_bytes {
+                            bitmap.set(i);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Dictionary with numeric literal - parse and compare
+        (ColumnData::Dictionary(dict), ScalarValue::Int64(val)) => {
             let target = *val as f64;
-            for (i, v) in vec.iter().enumerate() {
-                let Ok(num) = v.parse::<f64>() else {
+            for i in 0..num_rows {
+                let s = dict.get_string(i);
+                let Ok(num) = s.parse::<f64>() else {
                     continue;
                 };
                 match op {
@@ -446,10 +541,99 @@ pub(crate) fn evaluate_col_lit(
                 }
             }
         }
-        (ColumnData::Text(vec), ScalarValue::Float64(val)) => {
+        (ColumnData::Dictionary(dict), ScalarValue::Float64(val)) => {
             let target = *val;
-            for (i, v) in vec.iter().enumerate() {
-                let Ok(num) = v.parse::<f64>() else {
+            for i in 0..num_rows {
+                let s = dict.get_string(i);
+                let Ok(num) = s.parse::<f64>() else {
+                    continue;
+                };
+                match op {
+                    BinaryOperator::Eq => {
+                        if (num - target).abs() < f64::EPSILON {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::NotEq => {
+                        if (num - target).abs() >= f64::EPSILON {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::Gt => {
+                        if num > target {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::GtEq => {
+                        if num >= target {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::Lt => {
+                        if num < target {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::LtEq => {
+                        if num <= target {
+                            bitmap.set(i);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // ---------------------------------------------------------
+        // TEXT COLUMN WITH NUMERIC LITERAL (legacy path with allocation)
+        // ---------------------------------------------------------
+        (ColumnData::Text(col), ScalarValue::Int64(val)) => {
+            let target = *val as f64;
+            for i in 0..num_rows {
+                let s = col.get_string(i);
+                let Ok(num) = s.parse::<f64>() else {
+                    continue;
+                };
+                match op {
+                    BinaryOperator::Eq => {
+                        if (num - target).abs() < f64::EPSILON {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::NotEq => {
+                        if (num - target).abs() >= f64::EPSILON {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::Gt => {
+                        if num > target {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::GtEq => {
+                        if num >= target {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::Lt => {
+                        if num < target {
+                            bitmap.set(i);
+                        }
+                    }
+                    BinaryOperator::LtEq => {
+                        if num <= target {
+                            bitmap.set(i);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (ColumnData::Text(col), ScalarValue::Float64(val)) => {
+            let target = *val;
+            for i in 0..num_rows {
+                let s = col.get_string(i);
+                let Ok(num) = s.parse::<f64>() else {
                     continue;
                 };
                 match op {
@@ -595,20 +779,50 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
                 }
             }
         }
-        ColumnData::Text(values) => {
-            let mut set = HashSet::new();
+        ColumnData::Text(col) => {
+            // Build HashSet of literal values as bytes for fast comparison
+            let mut set: HashSet<Vec<u8>> = HashSet::new();
             for item in list {
                 if let PhysicalExpr::Literal(val) = item {
                     if let Some(text) = scalar_to_string(val) {
-                        set.insert(text);
+                        set.insert(text.into_bytes());
                     }
                 }
             }
-            for (idx, value) in values.iter().enumerate() {
+            for idx in 0..col.len() {
                 if page.null_bitmap.is_set(idx) {
                     continue;
                 }
-                let matches = set.contains(value);
+                let row_bytes = col.get_bytes(idx);
+                let matches = set.contains(row_bytes);
+                if (matches && !negated) || (!matches && negated) {
+                    bitmap.set(idx);
+                }
+            }
+        }
+        ColumnData::Dictionary(dict) => {
+            // Dictionary optimization: check dictionary values once, then scan keys
+            let mut set: HashSet<Vec<u8>> = HashSet::new();
+            for item in list {
+                if let PhysicalExpr::Literal(val) = item {
+                    if let Some(text) = scalar_to_string(val) {
+                        set.insert(text.into_bytes());
+                    }
+                }
+            }
+            // Pre-compute which dictionary keys match
+            let mut matching_keys = HashSet::new();
+            for key in 0..dict.values.len() {
+                if set.contains(dict.values.get_bytes(key)) {
+                    matching_keys.insert(key as u16);
+                }
+            }
+            for idx in 0..dict.len() {
+                if page.null_bitmap.is_set(idx) {
+                    continue;
+                }
+                let key = dict.keys[idx];
+                let matches = matching_keys.contains(&key);
                 if (matches && !negated) || (!matches && negated) {
                     bitmap.set(idx);
                 }
@@ -660,10 +874,13 @@ fn evaluate_like(
         (expr, pattern)
     {
         if let Some(page) = batch.columns.get(index) {
-            if let ColumnData::Text(values) = &page.data {
+            if let ColumnData::Text(col) = &page.data {
                 let mut bitmap = Bitmap::new(batch.num_rows);
-                for (i, value) in values.iter().enumerate() {
-                    if like_match(value, pat, !case_insensitive) {
+                for i in 0..col.len() {
+                    // LIKE requires string semantics, so we use get_string here
+                    // TODO: optimize with byte-level pattern matching
+                    let value = col.get_string(i);
+                    if like_match(&value, pat, !case_insensitive) {
                         bitmap.set(i);
                     }
                 }
