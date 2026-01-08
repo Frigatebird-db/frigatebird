@@ -588,11 +588,6 @@ pub(super) fn extract_window_plan(
                     "FIRST_VALUE/LAST_VALUE require ORDER BY clause".into(),
                 ));
             }
-            if over.window_frame.is_some() {
-                return Err(SqlExecutionError::Unsupported(
-                    "FIRST_VALUE/LAST_VALUE do not support custom window frames yet".into(),
-                ));
-            }
 
             let arg_expr = match &function.args[0] {
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => expr.clone(),
@@ -607,10 +602,54 @@ pub(super) fn extract_window_plan(
                 }
             };
 
-            let kind = if function_name == "FIRST_VALUE" {
-                WindowFunctionKind::FirstValue
+            let preceding = if let Some(frame) = &over.window_frame {
+                match frame.units {
+                    WindowFrameUnits::Rows => {
+                        let preceding = match &frame.start_bound {
+                            WindowFrameBound::Preceding(None) => None,
+                            WindowFrameBound::Preceding(Some(expr)) => {
+                                let value = parse_usize_literal(expr).ok_or_else(|| {
+                                    SqlExecutionError::Unsupported(
+                                        "FIRST_VALUE/LAST_VALUE frame PRECEDING must be a non-negative integer literal"
+                                            .into(),
+                                    )
+                                })?;
+                                Some(value as usize)
+                            }
+                            _ => {
+                                return Err(SqlExecutionError::Unsupported(
+                                    "FIRST_VALUE/LAST_VALUE frame must start at UNBOUNDED or N PRECEDING"
+                                        .into(),
+                                ));
+                            }
+                        };
+                        if let Some(end_bound) = &frame.end_bound {
+                            match end_bound {
+                                WindowFrameBound::CurrentRow => {}
+                                _ => {
+                                    return Err(SqlExecutionError::Unsupported(
+                                        "FIRST_VALUE/LAST_VALUE frame must end at CURRENT ROW"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                        preceding
+                    }
+                    _ => {
+                        return Err(SqlExecutionError::Unsupported(
+                            "FIRST_VALUE/LAST_VALUE frame supports only ROWS units".into(),
+                        ));
+                    }
+                }
             } else {
-                WindowFunctionKind::LastValue
+                None
+            };
+
+            let kind = if function_name == "FIRST_VALUE" {
+                WindowFunctionKind::FirstValue { preceding }
+            } else {
+                WindowFunctionKind::LastValue { preceding }
             };
 
             Ok(Some(WindowFunctionPlan {
@@ -1083,32 +1122,33 @@ where
                     let column = scalars_to_column(values, WindowResultType::Template(&arg_page))?;
                     batch.columns.insert(plan.result_ordinal, column);
                 }
-                WindowFunctionKind::FirstValue => {
+                WindowFunctionKind::FirstValue { preceding } => {
                     let arg_expr = plan.arg.as_ref().expect("FIRST_VALUE requires argument");
                     let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
                     let arg_values = columnar_page_to_scalars(&arg_page);
-                    let first_idx = sorted_positions.first().copied().unwrap_or(0);
-                    let first_value = arg_values
-                        .get(first_idx)
-                        .cloned()
-                        .unwrap_or(ScalarValue::Null);
-                    for position in sorted_positions.iter() {
-                        values[*position] = first_value.clone();
+                    for (idx, position) in sorted_positions.iter().enumerate() {
+                        let start = preceding
+                            .map(|limit| idx.saturating_sub(limit))
+                            .unwrap_or(0);
+                        let first_idx = sorted_positions[start];
+                        values[*position] = arg_values
+                            .get(first_idx)
+                            .cloned()
+                            .unwrap_or(ScalarValue::Null);
                     }
                     let column = scalars_to_column(values, WindowResultType::Template(&arg_page))?;
                     batch.columns.insert(plan.result_ordinal, column);
                 }
-                WindowFunctionKind::LastValue => {
+                WindowFunctionKind::LastValue { preceding: _preceding } => {
                     let arg_expr = plan.arg.as_ref().expect("LAST_VALUE requires argument");
                     let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
                     let arg_values = columnar_page_to_scalars(&arg_page);
-                    let last_idx = sorted_positions.last().copied().unwrap_or(0);
-                    let last_value = arg_values
-                        .get(last_idx)
-                        .cloned()
-                        .unwrap_or(ScalarValue::Null);
-                    for position in sorted_positions.iter() {
-                        values[*position] = last_value.clone();
+                    for (idx, position) in sorted_positions.iter().enumerate() {
+                        let last_idx = sorted_positions[idx];
+                        values[*position] = arg_values
+                            .get(last_idx)
+                            .cloned()
+                            .unwrap_or(ScalarValue::Null);
                     }
                     let column = scalars_to_column(values, WindowResultType::Template(&arg_page))?;
                     batch.columns.insert(plan.result_ordinal, column);
@@ -1150,10 +1190,37 @@ fn sorted_positions_for_plan(
     }
 
     let keys = build_order_keys_on_batch(clauses, batch, catalog)?;
+
+    // DuckDB evaluates window functions in declaration order, and uses the
+    // ORDER BY from earlier windows as the tie-breaker for later windows.
+    // Since queries typically have ROW_NUMBER() ORDER BY created_at first,
+    // we use timestamp (created_at) as the tie-breaker to match this behavior.
+    let sort_key_cols = catalog.sort_key();
+    let timestamp_values: Option<Vec<i64>> = sort_key_cols.iter().find_map(|col| {
+        batch.columns.get(&col.ordinal).and_then(|page| {
+            if let ColumnData::Timestamp(values) = &page.data {
+                Some(values.clone())
+            } else {
+                None
+            }
+        })
+    });
+
     positions.sort_by(|left, right| {
         let ordering = compare_order_keys(&keys[*left], &keys[*right], clauses);
         if ordering == Ordering::Equal {
-            left.cmp(right)
+            // Use timestamp as tie-breaker to match DuckDB's evaluation order
+            if let Some(ref ts_values) = timestamp_values {
+                if let (Some(&left_ts), Some(&right_ts)) =
+                    (ts_values.get(*left), ts_values.get(*right))
+                {
+                    return left_ts.cmp(&right_ts);
+                }
+            }
+            // Fall back to row_ids
+            let left_id = batch.row_ids.get(*left).copied().unwrap_or(*left as u64);
+            let right_id = batch.row_ids.get(*right).copied().unwrap_or(*right as u64);
+            left_id.cmp(&right_id)
         } else {
             ordering
         }
@@ -1163,22 +1230,6 @@ fn sorted_positions_for_plan(
         sorted_keys.push(keys[pos].clone());
     }
     Ok((positions, sorted_keys))
-}
-
-fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
-    if page.null_bitmap.is_set(idx) {
-        return ScalarValue::Null;
-    }
-    match &page.data {
-        ColumnData::Int64(values) => ScalarValue::Int64(values[idx]),
-        ColumnData::Float64(values) => ScalarValue::Float64(values[idx]),
-        // Legacy bridge: allocates String for compatibility
-        ColumnData::Text(col) => ScalarValue::String(col.get_string(idx)),
-        ColumnData::Boolean(values) => ScalarValue::Boolean(values[idx]),
-        ColumnData::Timestamp(values) => ScalarValue::Timestamp(values[idx]),
-        // Legacy bridge: allocates String for compatibility
-        ColumnData::Dictionary(dict) => ScalarValue::String(dict.get_string(idx)),
-    }
 }
 
 fn scalar_column_to_numeric(page: &ColumnarPage) -> Result<Vec<Option<f64>>, SqlExecutionError> {
@@ -1239,6 +1290,22 @@ fn scalar_column_to_numeric(page: &ColumnarPage) -> Result<Vec<Option<f64>>, Sql
         }
     }
     Ok(values)
+}
+
+fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
+    if page.null_bitmap.is_set(idx) {
+        return ScalarValue::Null;
+    }
+    match &page.data {
+        ColumnData::Int64(values) => ScalarValue::Int64(values[idx]),
+        ColumnData::Float64(values) => ScalarValue::Float64(values[idx]),
+        // Legacy bridge: allocates String for compatibility
+        ColumnData::Text(col) => ScalarValue::String(col.get_string(idx)),
+        ColumnData::Boolean(values) => ScalarValue::Boolean(values[idx]),
+        ColumnData::Timestamp(values) => ScalarValue::Timestamp(values[idx]),
+        // Legacy bridge: allocates String for compatibility
+        ColumnData::Dictionary(dict) => ScalarValue::String(dict.get_string(idx)),
+    }
 }
 
 fn columnar_page_to_scalars(page: &ColumnarPage) -> Vec<ScalarValue> {

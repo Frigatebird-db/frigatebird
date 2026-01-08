@@ -4,6 +4,7 @@ use super::batch::{ColumnData, ColumnarPage};
 use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
 use super::helpers::collect_expr_column_ordinals;
 use super::values::{CachedValue, ScalarValue, format_float, scalar_from_f64};
+use crate::sql::types::DataType;
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, SelectItem};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -300,6 +301,7 @@ pub(super) struct AggregateDataset<'a> {
     pub(super) rows: &'a [u64],
     pub(super) materialized: &'a MaterializedColumns,
     pub(super) column_ordinals: &'a HashMap<String, usize>,
+    pub(super) column_types: &'a HashMap<String, DataType>,
     pub(super) masked_exprs: Option<&'a [Expr]>,
     pub(super) prefer_exact_numeric: bool,
 }
@@ -310,6 +312,10 @@ impl<'a> AggregateDataset<'a> {
             .get(column)
             .and_then(|ordinal| self.materialized.get(ordinal))
             .and_then(|map| map.get(&row_idx))
+    }
+
+    pub(super) fn column_type(&self, column: &str) -> Option<DataType> {
+        self.column_types.get(column).copied()
     }
 
     pub(super) fn is_expr_masked(&self, expr: &Expr) -> bool {

@@ -369,6 +369,14 @@ impl PageHandler {
         self.locator.pages_for(table, column)
     }
 
+    pub fn get_column_pages(
+        &self,
+        table: &str,
+        columns: &[String],
+    ) -> HashMap<String, Vec<PageDescriptor>> {
+        self.locator.directory.get_column_pages(table, columns)
+    }
+
     pub fn list_range(&self, column: &str, start_row: u64, end_row: u64) -> Vec<PageSlice> {
         self.locator
             .range_slices_for_column(column, start_row, end_row)

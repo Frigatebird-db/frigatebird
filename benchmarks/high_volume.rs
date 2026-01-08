@@ -3,7 +3,9 @@ use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutor};
+use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutor, SqlExecutorWalOptions};
+use idk_uwu_ig::wal::FsyncSchedule;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -19,12 +21,16 @@ impl ResultRowsExt for SelectResult {
 
 const DEFAULT_TOTAL_ROWS: usize = 10_000_000;
 const DEFAULT_ROW_SIZE_KB: usize = 1;
-const BATCH_SIZE: usize = 1000;
+const DEFAULT_BATCH_SIZE: usize = 1000;
+
+static WAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 struct BenchmarkConfig {
     total_rows: usize,
     row_size_bytes: usize,
+    batch_size: usize,
+    wal_disabled: bool,
 }
 
 impl Default for BenchmarkConfig {
@@ -32,11 +38,13 @@ impl Default for BenchmarkConfig {
         Self {
             total_rows: DEFAULT_TOTAL_ROWS,
             row_size_bytes: DEFAULT_ROW_SIZE_KB * 1024,
+            batch_size: DEFAULT_BATCH_SIZE,
+            wal_disabled: false,
         }
     }
 }
 
-fn setup_executor() -> (SqlExecutor, Arc<PageHandler>, Arc<PageDirectory>) {
+fn setup_executor(config: &BenchmarkConfig) -> (SqlExecutor, Arc<PageHandler>, Arc<PageDirectory>) {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
     let directory = Arc::new(PageDirectory::new(Arc::clone(&store)));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -52,7 +60,25 @@ fn setup_executor() -> (SqlExecutor, Arc<PageHandler>, Arc<PageDirectory>) {
         Arc::new(Compressor::new()),
     ));
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
-    let executor = SqlExecutor::new(Arc::clone(&handler), Arc::clone(&directory));
+
+    let wal_id = WAL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let namespace = format!("bench-{wal_id}");
+    let mut options = SqlExecutorWalOptions::new(namespace);
+    
+    if config.wal_disabled {
+        // When WAL is disabled, we skip WAL writes entirely AND disable fsync on the Walrus instance just in case
+        options = options
+            .fsync_schedule(FsyncSchedule::NoFsync)
+            .wal_enabled(false);
+    }
+
+    let executor = SqlExecutor::with_wal_options(
+        Arc::clone(&handler), 
+        Arc::clone(&directory), 
+        true, 
+        options
+    );
+    
     (executor, handler, directory)
 }
 
@@ -88,6 +114,45 @@ fn parse_args() -> BenchmarkConfig {
                     std::process::exit(1);
                 }
             }
+            "--bytes" | "-b" => {
+                if i + 1 < args.len() {
+                    let size_bytes: usize = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("Invalid value for --bytes: {}", args[i + 1]);
+                        std::process::exit(1);
+                    });
+                    config.row_size_bytes = size_bytes;
+                    i += 2;
+                } else {
+                    eprintln!("--bytes requires a value (in bytes)");
+                    std::process::exit(1);
+                }
+            }
+            "--batch-size" | "-B" => {
+                if i + 1 < args.len() {
+                    let size: usize = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("Invalid value for --batch-size: {}", args[i + 1]);
+                        std::process::exit(1);
+                    });
+                    config.batch_size = size;
+                    i += 2;
+                } else {
+                    eprintln!("--batch-size requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--wal-disabled" => {
+                if i + 1 < args.len() {
+                    let val: bool = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("Invalid value for --wal-disabled: {}", args[i + 1]);
+                        std::process::exit(1);
+                    });
+                    config.wal_disabled = val;
+                    i += 2;
+                } else {
+                    eprintln!("--wal-disabled requires a value (true/false)");
+                    std::process::exit(1);
+                }
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -109,11 +174,15 @@ fn print_usage() {
     println!("Options:");
     println!("  -r, --rows <N>         Number of rows to insert (default: 10,000,000)");
     println!("  -s, --row-size <KB>    Target row size in KB (default: 1)");
+    println!("  -b, --bytes <N>        Target row size in bytes (overrides -s)");
+    println!("  -B, --batch-size <N>   Rows per insert batch (default: 1,000)");
+    println!("  --wal-disabled <BOOL>  Disable WAL fsync for faster benchmarks (default: false)");
     println!("  -h, --help             Print this help message");
     println!();
     println!("Examples:");
     println!("  high_volume_bench --rows 1000000 --row-size 2");
     println!("  high_volume_bench -r 500000 -s 4");
+    println!("  high_volume_bench -r 100000 -b 100 -B 5000 --wal-disabled true");
 }
 
 fn generate_large_text(id: usize, prefix: &str, target_size: usize) -> String {
@@ -173,7 +242,7 @@ fn main() {
     );
     println!("╚══════════════════════════════════════════════════════════════════════════════╝\n");
 
-    let (executor, _, _) = setup_executor();
+    let (executor, _, _) = setup_executor(&config);
 
     // STEP 1: Create Table
     print_separator();
@@ -203,14 +272,14 @@ fn main() {
     println!(
         "\nSTEP 2: Inserting {} rows in batches of {}...",
         format_number(config.total_rows),
-        BATCH_SIZE
+        config.batch_size
     );
     let start = Instant::now();
     let mut total_inserted = 0;
     const LOG_INTERVAL: usize = 2000;
 
-    for batch_start in (0..config.total_rows).step_by(BATCH_SIZE) {
-        let batch_end = (batch_start + BATCH_SIZE).min(config.total_rows);
+    for batch_start in (0..config.total_rows).step_by(config.batch_size) {
+        let batch_end = (batch_start + config.batch_size).min(config.total_rows);
         let mut values = Vec::new();
 
         for i in batch_start..batch_end {

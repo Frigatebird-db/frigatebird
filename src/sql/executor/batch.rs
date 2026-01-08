@@ -3,7 +3,7 @@ use crate::page::Page;
 use crate::sql::types::DataType;
 use crate::sql::utils::{parse_bool, parse_datetime};
 
-use super::values::{encode_null, format_float, is_encoded_null};
+use super::values::{encode_null, format_float, format_timestamp_micros, is_encoded_null};
 use std::collections::HashMap;
 
 /// Bitmap used for null tracking and predicate evaluation.
@@ -639,7 +639,9 @@ impl ColumnData {
             ColumnData::Boolean(v) => v[idx].to_string(),
             ColumnData::Int64(v) => v[idx].to_string(),
             ColumnData::Float64(v) => format_float(v[idx]),
-            ColumnData::Timestamp(v) => v[idx].to_string(),
+            ColumnData::Timestamp(v) => {
+                format_timestamp_micros(v[idx]).unwrap_or_else(|| v[idx].to_string())
+            }
             ColumnData::Text(col) => col.get_string(idx),
             ColumnData::Dictionary(dict) => dict.get_string(idx),
         }
@@ -664,6 +666,7 @@ pub struct ColumnarBatch {
     pub columns: HashMap<usize, ColumnarPage>,
     pub num_rows: usize,
     pub aliases: HashMap<String, usize>,
+    pub row_ids: Vec<u64>,
 }
 
 impl ColumnarBatch {
@@ -672,6 +675,7 @@ impl ColumnarBatch {
             columns: HashMap::new(),
             num_rows: 0,
             aliases: HashMap::new(),
+            row_ids: Vec::new(),
         }
     }
 
@@ -680,6 +684,7 @@ impl ColumnarBatch {
             columns: HashMap::with_capacity(capacity),
             num_rows: 0,
             aliases: HashMap::new(),
+            row_ids: Vec::new(),
         }
     }
 
@@ -691,10 +696,19 @@ impl ColumnarBatch {
         for (ordinal, page) in &self.columns {
             columns.insert(*ordinal, page.gather(indices));
         }
+        let row_ids = if self.row_ids.is_empty() {
+            indices.iter().map(|&idx| idx as u64).collect()
+        } else {
+            indices
+                .iter()
+                .filter_map(|&idx| self.row_ids.get(idx).copied())
+                .collect()
+        };
         ColumnarBatch {
             columns,
             num_rows: indices.len(),
             aliases: self.aliases.clone(),
+            row_ids,
         }
     }
 
@@ -707,10 +721,16 @@ impl ColumnarBatch {
         for (ordinal, page) in &self.columns {
             columns.insert(*ordinal, page.slice(start, end));
         }
+        let row_ids = if self.row_ids.is_empty() {
+            (start as u64..end as u64).collect()
+        } else {
+            self.row_ids[start..end].to_vec()
+        };
         ColumnarBatch {
             columns,
             num_rows: end - start,
             aliases: self.aliases.clone(),
+            row_ids,
         }
     }
 
@@ -729,6 +749,17 @@ impl ColumnarBatch {
                 .or_insert_with(|| page.clone());
         }
         self.num_rows += other.num_rows;
+        if !self.row_ids.is_empty() || !other.row_ids.is_empty() {
+            if self.row_ids.is_empty() {
+                self.row_ids = (0..self.num_rows as u64 - other.num_rows as u64).collect();
+            }
+            if other.row_ids.is_empty() {
+                let start = self.row_ids.len() as u64;
+                self.row_ids.extend(start..start + other.num_rows as u64);
+            } else {
+                self.row_ids.extend_from_slice(&other.row_ids);
+            }
+        }
         if self.aliases != other.aliases {
             for (alias, ordinal) in &other.aliases {
                 self.aliases.insert(alias.clone(), *ordinal);
@@ -744,10 +775,24 @@ impl ColumnarBatch {
         for (ordinal, page) in &self.columns {
             columns.insert(*ordinal, page.filter_by_bitmap(bitmap));
         }
+        let row_ids = if self.row_ids.is_empty() {
+            bitmap
+                .iter_ones()
+                .take_while(|&idx| idx < self.num_rows)
+                .map(|idx| idx as u64)
+                .collect()
+        } else {
+            bitmap
+                .iter_ones()
+                .take_while(|&idx| idx < self.num_rows)
+                .filter_map(|idx| self.row_ids.get(idx).copied())
+                .collect()
+        };
         ColumnarBatch {
             columns,
             num_rows: bitmap.count_ones(),
             aliases: self.aliases.clone(),
+            row_ids,
         }
     }
 }
@@ -919,7 +964,8 @@ impl ColumnarPage {
                     ColumnData::Boolean(v) => v[idx].to_string(),
                     ColumnData::Int64(values) => values[idx].to_string(),
                     ColumnData::Float64(values) => format_float(values[idx]),
-                    ColumnData::Timestamp(v) => v[idx].to_string(),
+                    ColumnData::Timestamp(v) => format_timestamp_micros(v[idx])
+                        .unwrap_or_else(|| v[idx].to_string()),
                     ColumnData::Text(col) => col.get_string(idx),
                     ColumnData::Dictionary(dict) => dict.get_string(idx),
                 }

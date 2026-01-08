@@ -829,8 +829,24 @@ impl<'a> ExpressionPlanner<'a> {
                 list,
                 negated,
             } => self.plan_in_list(expr, list, *negated),
-            Expr::Like { expr, pattern, .. } => self.plan_like(expr, pattern, false),
-            Expr::ILike { expr, pattern, .. } => self.plan_like(expr, pattern, true),
+            Expr::Like {
+                expr,
+                pattern,
+                negated,
+                ..
+            } => self.plan_like(expr, pattern, false, *negated),
+            Expr::ILike {
+                expr,
+                pattern,
+                negated,
+                ..
+            } => self.plan_like(expr, pattern, true, *negated),
+            Expr::RLike {
+                expr,
+                pattern,
+                negated,
+                ..
+            } => self.plan_rlike(expr, pattern, *negated),
             Expr::IsNull(expr) => Ok(PhysicalExpr::IsNull(Box::new(self.plan_expression(expr)?))),
             Expr::IsNotNull(expr) => Ok(PhysicalExpr::IsNotNull(Box::new(
                 self.plan_expression(expr)?,
@@ -1015,6 +1031,7 @@ impl<'a> ExpressionPlanner<'a> {
         expr: &Expr,
         pattern: &Expr,
         case_insensitive: bool,
+        negated: bool,
     ) -> Result<PhysicalExpr, PlannerError> {
         let left = self.plan_expression(expr)?;
         let right = self.plan_expression(pattern)?;
@@ -1029,6 +1046,29 @@ impl<'a> ExpressionPlanner<'a> {
             expr: Box::new(left),
             pattern: Box::new(right),
             case_insensitive,
+            negated,
+        })
+    }
+
+    fn plan_rlike(
+        &self,
+        expr: &Expr,
+        pattern: &Expr,
+        negated: bool,
+    ) -> Result<PhysicalExpr, PlannerError> {
+        let left = self.plan_expression(expr)?;
+        let right = self.plan_expression(pattern)?;
+        let left_type = self.get_type(&left);
+        let right_type = self.get_type(&right);
+        if left_type != DataType::String || right_type != DataType::String {
+            return Err(PlannerError::Unsupported(
+                "RLIKE requires string operands".into(),
+            ));
+        }
+        Ok(PhysicalExpr::RLike {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            negated,
         })
     }
 
@@ -1138,6 +1178,7 @@ impl<'a> ExpressionPlanner<'a> {
             },
             PhysicalExpr::UnaryOp { expr, .. } => self.get_type(expr),
             PhysicalExpr::Like { .. } => DataType::Boolean,
+            PhysicalExpr::RLike { .. } => DataType::Boolean,
             PhysicalExpr::InList { .. } => DataType::Boolean,
             PhysicalExpr::IsNull(_) | PhysicalExpr::IsNotNull(_) => DataType::Boolean,
             PhysicalExpr::Cast { target_type, .. } => *target_type,

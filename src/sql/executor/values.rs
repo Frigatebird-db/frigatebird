@@ -1,5 +1,7 @@
 use crate::entry::Entry;
 use crate::sql::types::DataType;
+use crate::sql::utils::parse_datetime;
+use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
 
 const NULL_SENTINEL: &str = "\u{0001}";
@@ -111,7 +113,7 @@ impl ScalarValue {
             ScalarValue::Int64(i) => Some(i.to_string()),
             ScalarValue::Float64(f) => Some(format_float(f)),
             ScalarValue::String(s) => Some(s),
-            ScalarValue::Timestamp(t) => Some(t.to_string()),
+            ScalarValue::Timestamp(t) => format_timestamp_micros(t),
         }
     }
 }
@@ -157,6 +159,23 @@ pub fn cached_to_scalar(value: &CachedValue) -> ScalarValue {
             }
         }
     }
+}
+
+pub fn cached_to_scalar_with_type(value: &CachedValue, data_type: DataType) -> ScalarValue {
+    match (value, data_type) {
+        (CachedValue::Null, _) => ScalarValue::Null,
+        (CachedValue::Text(s), DataType::Timestamp) => {
+            parse_datetime(s).map(ScalarValue::Timestamp).unwrap_or_else(|| {
+                ScalarValue::String(s.clone())
+            })
+        }
+        _ => cached_to_scalar(value),
+    }
+}
+
+pub(super) fn format_timestamp_micros(micros: i64) -> Option<String> {
+    DateTime::<Utc>::from_timestamp_micros(micros)
+        .map(|dt| dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
 pub(super) fn format_float(value: f64) -> String {

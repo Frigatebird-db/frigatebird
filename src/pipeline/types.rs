@@ -105,7 +105,15 @@ fn evaluate_physical_expr(expr: &PhysicalExpr, column_index: usize, page: &Colum
             expr,
             pattern,
             case_insensitive,
-        } => evaluate_like(expr, pattern, *case_insensitive, column_index, page),
+            negated,
+        } => evaluate_like(
+            expr,
+            pattern,
+            *case_insensitive,
+            *negated,
+            column_index,
+            page,
+        ),
         PhysicalExpr::InList {
             expr,
             list,
@@ -148,6 +156,7 @@ fn evaluate_like(
     expr: &PhysicalExpr,
     pattern: &PhysicalExpr,
     case_insensitive: bool,
+    negated: bool,
     column_index: usize,
     page: &ColumnarPage,
 ) -> Bitmap {
@@ -169,7 +178,8 @@ fn evaluate_like(
         }
         // LIKE requires string semantics
         let value = col.get_string(idx);
-        if like_match(&value, pat, case_insensitive) {
+        let matches = like_match(&value, pat, !case_insensitive);
+        if if negated { !matches } else { matches } {
             bitmap.set(idx);
         }
     }

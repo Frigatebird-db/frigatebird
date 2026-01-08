@@ -7,7 +7,7 @@ pub mod journal;
 pub use journal::{JournalColumnDef, MetaJournal, MetaJournalEntry, MetaRecord};
 
 pub const DEFAULT_TABLE: &str = "_default";
-pub const ROWS_PER_PAGE_GROUP: u64 = 8192;
+pub const ROWS_PER_PAGE_GROUP: u64 = 50000;
 
 fn split_table_column(identifier: &str) -> (&str, &str) {
     if let Some(pos) = identifier.find('.') {
@@ -645,6 +645,21 @@ impl TableMetaStore {
         descriptor
     }
 
+    pub fn get_column_pages(
+        &self,
+        table: &str,
+        columns: &[String],
+    ) -> HashMap<String, Vec<PageDescriptor>> {
+        let mut results = HashMap::with_capacity(columns.len());
+        for col in columns {
+            let key = TableColumnKey::new(table, col);
+            if let Some(chain) = self.column_chains.get(&key) {
+                results.insert(col.clone(), chain.all_pages());
+            }
+        }
+        results
+    }
+
     pub fn latest(&self, table: &str, column: &str) -> Option<PageDescriptor> {
         let key = TableColumnKey::new(table, column);
         self.column_chains.get(&key).and_then(|chain| chain.last())
@@ -826,31 +841,13 @@ impl TableMetaStore {
                 if page.replace_last {
                     old_id = chain.last().map(|p| p.id.clone());
                     if old_id.is_some() {
-                        eprintln!(
-                            "[register_batch] replacing last page for {}.{}, old_id={:?}, new entry_count={}",
-                            page.table, page.column, old_id, page.entry_count
-                        );
                         chain.replace_last(descriptor.clone());
                     } else {
-                        eprintln!(
-                            "[register_batch] replace_last=true but chain is empty, pushing for {}.{}",
-                            page.table, page.column
-                        );
                         chain.push(descriptor.clone());
                     }
                 } else {
-                    eprintln!(
-                        "[register_batch] pushing new page for {}.{}, entry_count={}",
-                        page.table, page.column, page.entry_count
-                    );
                     chain.push(descriptor.clone());
                 }
-                eprintln!(
-                    "[register_batch] chain for {}.{} now has {} pages",
-                    page.table,
-                    page.column,
-                    chain.pages.len()
-                );
             } else {
                 continue;
             }
@@ -952,6 +949,18 @@ impl PageDirectory {
     pub fn table_catalog(&self, name: &str) -> Option<TableCatalog> {
         let guard = self.store.read().ok()?;
         guard.table_catalog(name)
+    }
+
+    pub fn get_column_pages(
+        &self,
+        table: &str,
+        columns: &[String],
+    ) -> HashMap<String, Vec<PageDescriptor>> {
+        let guard = match self.store.read() {
+            Ok(g) => g,
+            Err(_) => return HashMap::new(),
+        };
+        guard.get_column_pages(table, columns)
     }
 
     pub fn latest_in_table(&self, table: &str, column: &str) -> Option<PageDescriptor> {

@@ -23,18 +23,22 @@ pub fn overwrite_row(
     }
 
     for column in catalog.columns() {
-        let descriptor = handler
-            .locate_latest_in_table(table, &column.name)
+        let location = handler
+            .locate_row_in_table(table, &column.name, row_idx)
             .ok_or_else(|| {
-                other_error(format!("missing page metadata for {table}.{}", column.name))
+                other_error(format!(
+                    "unable to locate row {row_idx} for {table}.{}",
+                    column.name
+                ))
             })?;
 
+        let descriptor = location.descriptor;
         let page_arc = handler
             .get_page(descriptor.clone())
             .ok_or_else(|| other_error("unable to load page"))?;
 
         let mut updated = (*page_arc).clone();
-        let idx = row_idx as usize;
+        let idx = location.page_row_index as usize;
         let mut in_bounds = true;
         updated.mutate_disk_page(
             |disk_page| {
@@ -44,7 +48,7 @@ pub fn overwrite_row(
                 }
                 disk_page.entries[idx] = Entry::new(&new_values[column.ordinal]);
             },
-            crate::sql::types::DataType::String,
+            column.data_type,
         );
         if !in_bounds {
             return Err(other_error(format!("row {row_idx} out of bounds")));
@@ -76,6 +80,10 @@ pub fn update_column_entry_in_table(
     data: &str,
     row: u64,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    let data_type = handler
+        .table_catalog(table)
+        .and_then(|catalog| catalog.column(col).map(|column| column.data_type))
+        .unwrap_or(crate::sql::types::DataType::String);
     let page_meta = handler
         .locate_latest_in_table(table, col)
         .ok_or_else(|| "missing page metadata for column")?;
@@ -95,7 +103,7 @@ pub fn update_column_entry_in_table(
             }
             disk_page.entries[idx] = Entry::new(data);
         },
-        crate::sql::types::DataType::String,
+        data_type,
     );
     if !in_bounds {
         return Ok(false);

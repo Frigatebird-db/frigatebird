@@ -7,11 +7,13 @@ use super::helpers::{like_match, regex_match};
 use super::row_functions::evaluate_row_function;
 use super::scalar_functions::evaluate_scalar_function;
 use super::values::{
-    ScalarValue, cached_to_scalar, combine_numeric, compare_scalar_values, scalar_from_f64,
+    ScalarValue, cached_to_scalar, cached_to_scalar_with_type, combine_numeric,
+    compare_scalar_values, scalar_from_f64,
 };
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, UnaryOperator, Value,
+    BinaryOperator, DateTimeField, Expr, Function, FunctionArg, FunctionArgExpr, UnaryOperator,
+    Value,
 };
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -27,7 +29,11 @@ pub(super) fn evaluate_scalar_expression(
         Expr::Identifier(ident) => {
             for &row in dataset.rows {
                 if let Some(value) = dataset.column_value(&ident.value, row) {
-                    return Ok(cached_to_scalar(value));
+                    let scalar = dataset
+                        .column_type(&ident.value)
+                        .map(|data_type| cached_to_scalar_with_type(value, data_type))
+                        .unwrap_or_else(|| cached_to_scalar(value));
+                    return Ok(scalar);
                 }
             }
             Ok(ScalarValue::Null)
@@ -36,7 +42,11 @@ pub(super) fn evaluate_scalar_expression(
             if let Some(last) = idents.last() {
                 for &row in dataset.rows {
                     if let Some(value) = dataset.column_value(&last.value, row) {
-                        return Ok(cached_to_scalar(value));
+                        let scalar = dataset
+                            .column_type(&last.value)
+                            .map(|data_type| cached_to_scalar_with_type(value, data_type))
+                            .unwrap_or_else(|| cached_to_scalar(value));
+                        return Ok(scalar);
                     }
                 }
                 Ok(ScalarValue::Null)
@@ -68,6 +78,36 @@ pub(super) fn evaluate_scalar_expression(
             } else {
                 evaluate_scalar_function(function, dataset)
             }
+        }
+        Expr::Ceil { expr, field } => {
+            if *field != DateTimeField::NoDateTime {
+                return Err(SqlExecutionError::Unsupported(
+                    "CEIL only supports numeric expressions".into(),
+                ));
+            }
+            let value = evaluate_scalar_expression(expr, dataset)?;
+            if value.is_null() {
+                return Ok(ScalarValue::Null);
+            }
+            let num = value.as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("CEIL requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(num.ceil()))
+        }
+        Expr::Floor { expr, field } => {
+            if *field != DateTimeField::NoDateTime {
+                return Err(SqlExecutionError::Unsupported(
+                    "FLOOR only supports numeric expressions".into(),
+                ));
+            }
+            let value = evaluate_scalar_expression(expr, dataset)?;
+            if value.is_null() {
+                return Ok(ScalarValue::Null);
+            }
+            let num = value.as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("FLOOR requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(num.floor()))
         }
         Expr::BinaryOp { left, op, right } => {
             let lhs = evaluate_scalar_expression(left, dataset)?;
@@ -175,6 +215,7 @@ pub(super) fn evaluate_scalar_expression(
         Expr::Like {
             expr,
             pattern,
+            negated,
             escape_char: _,
             ..
         } => {
@@ -187,11 +228,16 @@ pub(super) fn evaluate_scalar_expression(
                 (Some(value), Some(pattern)) => like_match(&value, &pattern, true),
                 _ => false,
             };
-            Ok(ScalarValue::Boolean(matches))
+            Ok(ScalarValue::Boolean(if *negated {
+                !matches
+            } else {
+                matches
+            }))
         }
         Expr::ILike {
             expr,
             pattern,
+            negated,
             escape_char: _,
             ..
         } => {
@@ -204,7 +250,11 @@ pub(super) fn evaluate_scalar_expression(
                 (Some(value), Some(pattern)) => like_match(&value, &pattern, false),
                 _ => false,
             };
-            Ok(ScalarValue::Boolean(matches))
+            Ok(ScalarValue::Boolean(if *negated {
+                !matches
+            } else {
+                matches
+            }))
         }
         Expr::RLike {
             expr,
@@ -329,13 +379,23 @@ pub(super) fn evaluate_row_expr(
     match expr {
         Expr::Identifier(ident) => Ok(dataset
             .column_value(&ident.value, row_idx)
-            .map(cached_to_scalar)
+            .map(|value| {
+                dataset
+                    .column_type(&ident.value)
+                    .map(|data_type| cached_to_scalar_with_type(value, data_type))
+                    .unwrap_or_else(|| cached_to_scalar(value))
+            })
             .unwrap_or(ScalarValue::Null)),
         Expr::CompoundIdentifier(idents) => {
             if let Some(last) = idents.last() {
                 Ok(dataset
                     .column_value(&last.value, row_idx)
-                    .map(cached_to_scalar)
+                    .map(|value| {
+                        dataset
+                            .column_type(&last.value)
+                            .map(|data_type| cached_to_scalar_with_type(value, data_type))
+                            .unwrap_or_else(|| cached_to_scalar(value))
+                    })
                     .unwrap_or(ScalarValue::Null))
             } else {
                 Err(SqlExecutionError::Unsupported(
@@ -436,6 +496,7 @@ pub(super) fn evaluate_row_expr(
         Expr::Like {
             expr,
             pattern,
+            negated,
             escape_char: _,
             ..
         } => {
@@ -448,11 +509,16 @@ pub(super) fn evaluate_row_expr(
                 (Some(value), Some(pattern)) => like_match(&value, &pattern, true),
                 _ => false,
             };
-            Ok(ScalarValue::Boolean(matches))
+            Ok(ScalarValue::Boolean(if *negated {
+                !matches
+            } else {
+                matches
+            }))
         }
         Expr::ILike {
             expr,
             pattern,
+            negated,
             escape_char: _,
             ..
         } => {
@@ -465,7 +531,11 @@ pub(super) fn evaluate_row_expr(
                 (Some(value), Some(pattern)) => like_match(&value, &pattern, false),
                 _ => false,
             };
-            Ok(ScalarValue::Boolean(matches))
+            Ok(ScalarValue::Boolean(if *negated {
+                !matches
+            } else {
+                matches
+            }))
         }
         Expr::RLike {
             expr,
@@ -559,6 +629,36 @@ pub(super) fn evaluate_row_expr(
             } else {
                 evaluate_row_function(function, row_idx, dataset)
             }
+        }
+        Expr::Ceil { expr, field } => {
+            if *field != DateTimeField::NoDateTime {
+                return Err(SqlExecutionError::Unsupported(
+                    "CEIL only supports numeric expressions".into(),
+                ));
+            }
+            let value = evaluate_row_expr(expr, row_idx, dataset)?;
+            if value.is_null() {
+                return Ok(ScalarValue::Null);
+            }
+            let num = value.as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("CEIL requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(num.ceil()))
+        }
+        Expr::Floor { expr, field } => {
+            if *field != DateTimeField::NoDateTime {
+                return Err(SqlExecutionError::Unsupported(
+                    "FLOOR only supports numeric expressions".into(),
+                ));
+            }
+            let value = evaluate_row_expr(expr, row_idx, dataset)?;
+            if value.is_null() {
+                return Ok(ScalarValue::Null);
+            }
+            let num = value.as_f64().ok_or_else(|| {
+                SqlExecutionError::Unsupported("FLOOR requires numeric argument".into())
+            })?;
+            Ok(scalar_from_f64(num.floor()))
         }
         Expr::Nested(inner) => evaluate_row_expr(inner, row_idx, dataset),
         Expr::Cast { expr, .. }

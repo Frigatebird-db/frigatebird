@@ -21,6 +21,12 @@ pub fn upsert_data_into_table_column(
     col: &str,
     data: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    let catalog = handler.table_catalog(table);
+    let data_type = catalog
+        .as_ref()
+        .and_then(|catalog| catalog.column(col))
+        .map(|column| column.data_type)
+        .unwrap_or(crate::sql::types::DataType::String);
     if let Some(catalog) = handler.table_catalog(table) {
         let sort_columns = catalog.sort_key();
         if sort_columns.len() == 1 && sort_columns[0].name == col {
@@ -41,7 +47,7 @@ pub fn upsert_data_into_table_column(
         |disk_page| {
             disk_page.add_entry(Entry::new(data));
         },
-        crate::sql::types::DataType::String,
+        data_type,
     );
 
     handler
@@ -58,6 +64,10 @@ pub fn sorted_insert_single_column(
     col: &str,
     data: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    let data_type = handler
+        .table_catalog(table)
+        .and_then(|catalog| catalog.column(col).map(|column| column.data_type))
+        .unwrap_or(crate::sql::types::DataType::String);
     let page_meta = handler
         .locate_latest_in_table(table, col)
         .ok_or_else(|| "missing page metadata for column")?;
@@ -74,7 +84,7 @@ pub fn sorted_insert_single_column(
             disk_page.entries.insert(insert_idx, Entry::new(data));
             new_entry_count = disk_page.entries.len() as u64;
         },
-        crate::sql::types::DataType::String,
+        data_type,
     );
 
     handler
@@ -181,7 +191,7 @@ pub fn sorted_insert_row(
                     .entries
                     .insert(insert_pos, Entry::new(&final_row[ordinal]));
             },
-            crate::sql::types::DataType::String,
+            column.data_type,
         );
 
         handler

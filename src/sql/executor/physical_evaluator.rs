@@ -1,11 +1,65 @@
 use crate::sql::executor::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
-use crate::sql::executor::helpers::like_match;
+use crate::sql::executor::helpers::{like_match, regex_match};
 use crate::sql::executor::values::ScalarValue;
 use crate::sql::physical_plan::PhysicalExpr;
+use crate::sql::types::DataType;
 use sqlparser::ast::BinaryOperator;
 use std::collections::HashSet;
 
 pub struct PhysicalEvaluator;
+
+pub(crate) fn filter_supported(expr: &PhysicalExpr) -> bool {
+    match expr {
+        PhysicalExpr::BinaryOp { left, op, right } => match op {
+            BinaryOperator::And | BinaryOperator::Or => {
+                filter_supported(left) && filter_supported(right)
+            }
+            BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq => {
+                (is_column_or_cast(left) && is_literal_or_cast(right))
+                    || (is_literal_or_cast(left) && is_column_or_cast(right))
+            }
+            _ => false,
+        },
+        PhysicalExpr::UnaryOp { op, expr } => {
+            matches!(op, sqlparser::ast::UnaryOperator::Not) && filter_supported(expr)
+        }
+        PhysicalExpr::Like { expr, pattern, .. } => {
+            is_column_or_cast(expr) && is_literal_or_cast(pattern)
+        }
+        PhysicalExpr::RLike { expr, pattern, .. } => {
+            is_column_or_cast(expr) && is_literal_or_cast(pattern)
+        }
+        PhysicalExpr::InList { expr, list, .. } => {
+            is_column_or_cast(expr) && list.iter().all(is_literal_or_cast)
+        }
+        PhysicalExpr::IsNull(expr) | PhysicalExpr::IsNotNull(expr) => is_column_or_cast(expr),
+        PhysicalExpr::Column { .. } => false,
+        PhysicalExpr::Literal(ScalarValue::Boolean(_)) => true,
+        PhysicalExpr::Literal(_) => false,
+        PhysicalExpr::Cast { .. } => false,
+    }
+}
+
+fn is_column_or_cast(expr: &PhysicalExpr) -> bool {
+    match expr {
+        PhysicalExpr::Column { .. } => true,
+        PhysicalExpr::Cast { expr, .. } => matches!(**expr, PhysicalExpr::Column { .. }),
+        _ => false,
+    }
+}
+
+fn is_literal_or_cast(expr: &PhysicalExpr) -> bool {
+    match expr {
+        PhysicalExpr::Literal(_) => true,
+        PhysicalExpr::Cast { expr, .. } => matches!(**expr, PhysicalExpr::Literal(_)),
+        _ => false,
+    }
+}
 
 impl PhysicalEvaluator {
     /// Evaluates a boolean expression against a batch, returning a selection Bitmap.
@@ -41,7 +95,13 @@ impl PhysicalEvaluator {
                 expr,
                 pattern,
                 case_insensitive,
-            } => evaluate_like(expr, pattern, *case_insensitive, batch),
+                negated,
+            } => evaluate_like(expr, pattern, *case_insensitive, *negated, batch),
+            PhysicalExpr::RLike {
+                expr,
+                pattern,
+                negated,
+            } => evaluate_rlike(expr, pattern, *negated, batch),
             PhysicalExpr::InList {
                 expr,
                 list,
@@ -945,6 +1005,7 @@ fn evaluate_like(
     expr: &PhysicalExpr,
     pattern: &PhysicalExpr,
     case_insensitive: bool,
+    negated: bool,
     batch: &ColumnarBatch,
 ) -> Bitmap {
     if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(ScalarValue::String(pat))) =
@@ -957,7 +1018,34 @@ fn evaluate_like(
                     // LIKE requires string semantics, so we use get_string here
                     // TODO: optimize with byte-level pattern matching
                     let value = col.get_string(i);
-                    if like_match(&value, pat, !case_insensitive) {
+                    let matches = like_match(&value, pat, !case_insensitive);
+                    if if negated { !matches } else { matches } {
+                        bitmap.set(i);
+                    }
+                }
+                return bitmap;
+            }
+        }
+    }
+    Bitmap::new(batch.num_rows)
+}
+
+fn evaluate_rlike(
+    expr: &PhysicalExpr,
+    pattern: &PhysicalExpr,
+    negated: bool,
+    batch: &ColumnarBatch,
+) -> Bitmap {
+    if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(ScalarValue::String(pat))) =
+        (expr, pattern)
+    {
+        if let Some(page) = batch.columns.get(index) {
+            if let ColumnData::Text(col) = &page.data {
+                let mut bitmap = Bitmap::new(batch.num_rows);
+                for i in 0..col.len() {
+                    let value = col.get_string(i);
+                    let matches = regex_match(&value, pat);
+                    if if negated { !matches } else { matches } {
                         bitmap.set(i);
                     }
                 }

@@ -391,14 +391,14 @@ fn sql_executor_query_group_by_requires_prefix() {
     let executor =
         SqlExecutor::new_with_writer_mode(Arc::clone(&handler), Arc::clone(&directory), false);
 
-    let err = executor
+    let result = executor
         .query("SELECT amount, SUM(amount) FROM sales GROUP BY amount")
-        .expect_err("invalid group by should fail");
-    assert!(matches!(
-        err,
-        SqlExecutionError::Unsupported(message)
-            if message.contains("GROUP BY columns must match")
-    ));
+        .expect("group by on non-sort column");
+    assert_eq!(result.columns, vec!["amount", "SUM(amount)"]);
+    assert_eq!(
+        result.rows(),
+        vec![vec![Some("10".to_string()), Some("10".to_string())]]
+    );
 }
 
 #[test]

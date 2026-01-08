@@ -61,7 +61,16 @@ pub(super) fn evaluate_row_function(
             })?;
             let digits = args
                 .get(1)
-                .and_then(|v| v.as_i64())
+                .and_then(|v| match v {
+                    ScalarValue::Int64(i) => Some(*i),
+                    ScalarValue::Float64(f)
+                        if f.is_finite() && f.fract().abs() < f64::EPSILON =>
+                    {
+                        Some(*f as i64)
+                    }
+                    ScalarValue::String(s) => s.parse::<i64>().ok(),
+                    _ => None,
+                })
                 .unwrap_or(0)
                 .clamp(-18, 18) as i32;
             let factor = 10_f64.powi(digits);
@@ -373,18 +382,32 @@ enum TimeValueKind {
 
 fn scalar_to_seconds(value: &ScalarValue) -> Option<(f64, TimeValueKind)> {
     match value {
-        ScalarValue::Int64(v) => Some((*v as f64, TimeValueKind::Numeric)),
-        ScalarValue::Float64(v) => Some((*v, TimeValueKind::Numeric)),
+        ScalarValue::Int64(v) => numeric_to_seconds(*v as f64),
+        ScalarValue::Float64(v) => numeric_to_seconds(*v),
         ScalarValue::Boolean(v) => Some((if *v { 1.0 } else { 0.0 }, TimeValueKind::Numeric)),
         ScalarValue::String(text) => parse_timestamp(text)
             .map(|ts| (ts.and_utc().timestamp() as f64, TimeValueKind::Timestamp))
             .or_else(|| {
                 text.parse::<f64>()
                     .ok()
-                    .map(|v| (v, TimeValueKind::Numeric))
+                    .and_then(numeric_to_seconds)
             }),
-        ScalarValue::Timestamp(ts) => Some((*ts as f64, TimeValueKind::Timestamp)),
+        ScalarValue::Timestamp(ts) => {
+            Some((*ts as f64 / 1_000_000.0, TimeValueKind::Timestamp))
+        }
         ScalarValue::Null => None,
+    }
+}
+
+fn numeric_to_seconds(value: f64) -> Option<(f64, TimeValueKind)> {
+    if !value.is_finite() {
+        return None;
+    }
+    let abs = value.abs();
+    if abs >= 1_000_000_000_000.0 {
+        Some((value / 1_000_000.0, TimeValueKind::Timestamp))
+    } else {
+        Some((value, TimeValueKind::Numeric))
     }
 }
 

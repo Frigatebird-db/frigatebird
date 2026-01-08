@@ -6,6 +6,7 @@ use super::expressions::{
 };
 use super::values::{ScalarValue, compare_scalar_values, compare_strs, format_float};
 use crate::metadata_store::TableCatalog;
+use crate::sql::types::DataType;
 use sqlparser::ast::Expr;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -29,6 +30,7 @@ pub(super) fn sort_rows_logical(
     clauses: &[OrderClause],
     materialized: &MaterializedColumns,
     column_ordinals: &HashMap<String, usize>,
+    column_types: &HashMap<String, DataType>,
     rows: &mut Vec<u64>,
 ) -> Result<(), SqlExecutionError> {
     if clauses.is_empty() || rows.len() <= 1 {
@@ -39,6 +41,7 @@ pub(super) fn sort_rows_logical(
         rows: rows.as_slice(),
         materialized,
         column_ordinals,
+        column_types,
         masked_exprs: None,
         prefer_exact_numeric: false,
     };
@@ -49,7 +52,14 @@ pub(super) fn sort_rows_logical(
         keyed.push((key, row_idx));
     }
 
-    keyed.sort_unstable_by(|left, right| compare_order_keys(&left.0, &right.0, clauses));
+    keyed.sort_by(|left, right| {
+        let ordering = compare_order_keys(&left.0, &right.0, clauses);
+        if ordering == Ordering::Equal {
+            left.1.cmp(&right.1)
+        } else {
+            ordering
+        }
+    });
 
     rows.clear();
     rows.extend(keyed.into_iter().map(|(_, row)| row));
@@ -142,14 +152,14 @@ fn compare_scalar_with_clause(
             NullsPlacement::Default => {
                 if clause.descending {
                     if left_null {
-                        Ordering::Greater
-                    } else {
                         Ordering::Less
+                    } else {
+                        Ordering::Greater
                     }
                 } else if left_null {
-                    Ordering::Less
-                } else {
                     Ordering::Greater
+                } else {
+                    Ordering::Less
                 }
             }
         };
@@ -219,8 +229,15 @@ pub(super) fn sort_batch_in_memory(
 
     let order_keys = build_order_keys_on_batch(clauses, batch, catalog)?;
     let mut indices: Vec<usize> = (0..batch.num_rows).collect();
-    indices.sort_unstable_by(|&left, &right| {
-        compare_order_keys(&order_keys[left], &order_keys[right], clauses)
+    indices.sort_by(|&left, &right| {
+        let ordering = compare_order_keys(&order_keys[left], &order_keys[right], clauses);
+        if ordering == Ordering::Equal {
+            let left_id = batch.row_ids.get(left).copied().unwrap_or(left as u64);
+            let right_id = batch.row_ids.get(right).copied().unwrap_or(right as u64);
+            left_id.cmp(&right_id)
+        } else {
+            ordering
+        }
     });
     Ok(batch.gather(&indices))
 }
@@ -274,11 +291,27 @@ impl MergeOperator {
             }
             let keys = build_order_keys_on_batch(clauses_arc.as_slice(), &batch, catalog)?;
             let run_idx = merge_runs.len();
-            merge_runs.push(MergeRun { batch, keys });
+            let row_ids = if batch.row_ids.is_empty() {
+                (0..batch.num_rows as u64).collect()
+            } else {
+                batch.row_ids.clone()
+            };
+            merge_runs.push(MergeRun {
+                batch,
+                keys,
+                row_ids,
+            });
             let key = merge_runs[run_idx].keys.get(0).cloned().ok_or_else(|| {
                 SqlExecutionError::OperationFailed("missing order key for merge run".into())
             })?;
-            heap.push(HeapItem::new(run_idx, 0, key, Arc::clone(&clauses_arc)));
+            let row_id = merge_runs[run_idx].row_ids.get(0).copied().unwrap_or(0);
+            heap.push(HeapItem::new(
+                run_idx,
+                0,
+                row_id,
+                key,
+                Arc::clone(&clauses_arc),
+            ));
         }
 
         Ok(Self {
@@ -315,9 +348,15 @@ impl MergeOperator {
 
             let next_row = item.row_idx + 1;
             if let Some(next_key) = self.runs[item.run_idx].keys.get(next_row).cloned() {
+                let row_id = self.runs[item.run_idx]
+                    .row_ids
+                    .get(next_row)
+                    .copied()
+                    .unwrap_or(next_row as u64);
                 self.heap.push(HeapItem::new(
                     item.run_idx,
                     next_row,
+                    row_id,
                     next_key,
                     Arc::clone(&self.clauses),
                 ));
@@ -342,21 +381,30 @@ impl MergeOperator {
 struct MergeRun {
     batch: ColumnarBatch,
     keys: Vec<OrderKey>,
+    row_ids: Vec<u64>,
 }
 
 #[derive(Clone)]
 struct HeapItem {
     run_idx: usize,
     row_idx: usize,
+    row_id: u64,
     key: OrderKey,
     clauses: Arc<Vec<OrderClause>>,
 }
 
 impl HeapItem {
-    fn new(run_idx: usize, row_idx: usize, key: OrderKey, clauses: Arc<Vec<OrderClause>>) -> Self {
+    fn new(
+        run_idx: usize,
+        row_idx: usize,
+        row_id: u64,
+        key: OrderKey,
+        clauses: Arc<Vec<OrderClause>>,
+    ) -> Self {
         Self {
             run_idx,
             row_idx,
+            row_id,
             key,
             clauses,
         }
@@ -381,8 +429,9 @@ impl Ord for HeapItem {
     fn cmp(&self, other: &Self) -> Ordering {
         match compare_order_keys(&self.key, &other.key, self.clauses.as_slice()) {
             Ordering::Equal => other
-                .run_idx
-                .cmp(&self.run_idx)
+                .row_id
+                .cmp(&self.row_id)
+                .then_with(|| other.run_idx.cmp(&self.run_idx))
                 .then_with(|| other.row_idx.cmp(&self.row_idx)),
             ord => ord.reverse(),
         }

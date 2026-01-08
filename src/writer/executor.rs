@@ -213,6 +213,7 @@ struct WorkerContext {
     wal: Arc<Walrus>,
     rx: Receiver<WriterMessage>,
     buffered_rows: HashMap<String, Vec<Vec<String>>>,
+    wal_enabled: bool,
 }
 
 impl WorkerContext {
@@ -240,7 +241,9 @@ impl WorkerContext {
         }
 
         self.publish_staged_columns(&table, staged);
-        self.ack_wal_entries(&table, 1);
+        if self.wal_enabled {
+            self.ack_wal_entries(&table, 1);
+        }
     }
 
     fn stage_column(&self, table: &str, update: ColumnUpdate) -> Option<StagedColumn> {
@@ -447,8 +450,10 @@ impl WorkerContext {
             self.stage_rows_as_new_group(table, &columns, rows);
         }
 
-        self.ack_wal_entries(table, total_rows);
-        self.wal.mark_topic_clean(table);
+        if self.wal_enabled {
+            self.ack_wal_entries(table, total_rows);
+            self.wal.mark_topic_clean(table);
+        }
     }
 
     fn flush_pending(&mut self, table: &str) {
@@ -681,6 +686,7 @@ pub struct Writer {
     shards: Vec<WriterShard>,
     wal: Arc<Walrus>,
     is_shutdown: AtomicBool,
+    wal_enabled: bool,
 }
 
 impl Writer {
@@ -691,7 +697,7 @@ impl Writer {
         wal: Arc<Walrus>,
     ) -> Self {
         let shard_count = GLOBAL_WRITER_SHARD_COUNT.load(Ordering::Acquire).max(1);
-        Writer::with_shard_count(page_handler, allocator, metadata, wal, shard_count)
+        Writer::with_shard_count(page_handler, allocator, metadata, wal, shard_count, true)
     }
 
     pub fn with_shard_count(
@@ -700,14 +706,17 @@ impl Writer {
         metadata: Arc<dyn MetadataClient>,
         wal: Arc<Walrus>,
         shard_count: usize,
+        wal_enabled: bool,
     ) -> Self {
-        Self::replay_pending_jobs(
-            Arc::clone(&page_handler),
-            Arc::clone(&allocator),
-            Arc::clone(&metadata),
-            Arc::clone(&wal),
-        )
-        .expect("writer: wal replay failed");
+        if wal_enabled {
+            Self::replay_pending_jobs(
+                Arc::clone(&page_handler),
+                Arc::clone(&allocator),
+                Arc::clone(&metadata),
+                Arc::clone(&wal),
+            )
+            .expect("writer: wal replay failed");
+        }
 
         let shard_total = shard_count.max(1);
         let mut shards = Vec::with_capacity(shard_total);
@@ -721,6 +730,7 @@ impl Writer {
                 wal: Arc::clone(&wal),
                 rx,
                 buffered_rows: HashMap::new(),
+                wal_enabled,
             };
             let shutdown_flag = Arc::clone(&is_shutdown);
             let handle = thread::spawn(move || run_worker(ctx, shutdown_flag));
@@ -735,6 +745,7 @@ impl Writer {
             shards,
             wal,
             is_shutdown: AtomicBool::new(false),
+            wal_enabled,
         }
     }
 
@@ -742,7 +753,9 @@ impl Writer {
         if self.is_shutdown.load(Ordering::Acquire) {
             return Err(WriterError::Shutdown);
         }
-        self.append_to_wal(&job)?;
+        if self.wal_enabled {
+            self.append_to_wal(&job)?;
+        }
         let shard_index = self.shard_index_for_table(&job.table);
         self.send_job_to_shard(shard_index, WriterMessage::Job(job))
     }
@@ -816,6 +829,7 @@ impl Writer {
             wal: Arc::clone(&wal),
             rx: stub_rx,
             buffered_rows: HashMap::new(),
+            wal_enabled: false,
         };
 
         for table in tables {

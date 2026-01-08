@@ -704,10 +704,11 @@ pub fn assert_query_matches(
     let duck_sql = options.duckdb_sql.unwrap_or(sql);
     let (_duck_columns, duck_rows) = query_duckdb(fixture.duckdb(), duck_sql)
         .unwrap_or_else(|err| panic!("duckdb query failed for `{duck_sql}`: {err:?}"));
-    compare_results(ours, duck_rows, options);
+    compare_results(sql, ours, duck_rows, options);
 }
 
 fn compare_results(
+    sql: &str,
     ours: SelectResult,
     duck_rows: Vec<Vec<Option<String>>>,
     options: QueryOptions<'_>,
@@ -717,7 +718,7 @@ fn compare_results(
 
     if ours_norm.len() != duck_norm.len() {
         panic!(
-            "row count mismatch: ours={} duck={}",
+            "row count mismatch for `{sql}`: ours={} duck={}",
             ours_norm.len(),
             duck_norm.len()
         );
@@ -729,7 +730,7 @@ fn compare_results(
 
     if ours_norm[0].values.len() != duck_norm[0].values.len() {
         panic!(
-            "column count mismatch: ours={} duck={}",
+            "column count mismatch for `{sql}`: ours={} duck={}",
             ours_norm[0].values.len(),
             duck_norm[0].values.len()
         );
@@ -744,7 +745,7 @@ fn compare_results(
         for (col_idx, (lhs_val, rhs_val)) in lhs.values.iter().zip(rhs.values.iter()).enumerate() {
             if !lhs_val.equals_with_tol(rhs_val, options.float_abs_tol, options.float_rel_tol) {
                 panic!(
-                    "value mismatch at row {idx}, column {col_idx}: ours={lhs_val:?} duck={rhs_val:?} | row ours={:?} duck={:?}",
+                    "value mismatch for `{sql}` at row {idx}, column {col_idx}: ours={lhs_val:?} duck={rhs_val:?} | row ours={:?} duck={:?}",
                     lhs.values, rhs.values
                 );
             }

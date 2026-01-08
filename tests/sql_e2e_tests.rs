@@ -137,6 +137,35 @@ fn test_e2e_index_refine_with_non_sort_predicate() {
 }
 
 #[test]
+fn test_e2e_qualify_with_aggregate_alias() {
+    let (executor, _, _) = setup_executor();
+
+    executor
+        .execute("CREATE TABLE sales (region TEXT, amount TEXT) ORDER BY region")
+        .expect("create table");
+    executor
+        .execute(
+            "INSERT INTO sales (region, amount) VALUES ('east', '10'), ('east', '7'), ('west', '5')",
+        )
+        .expect("insert");
+
+    let result = executor
+        .query(
+            "SELECT region, SUM(amount) AS total \
+             FROM sales \
+             GROUP BY region \
+             QUALIFY total > 10 \
+             ORDER BY region",
+        )
+        .expect("qualify with aggregate alias");
+    assert_eq!(result.columns, vec!["region", "total"]);
+    assert_eq!(
+        result.rows(),
+        vec![vec![Some("east".to_string()), Some("17".to_string())]]
+    );
+}
+
+#[test]
 fn test_e2e_math_functions_comprehensive() {
     let (executor, _, _) = setup_executor();
 

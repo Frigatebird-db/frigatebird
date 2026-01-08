@@ -28,16 +28,16 @@ use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::planner::ExpressionPlanner;
-use crate::sql::{CreateTablePlan, plan_create_table_statement};
+use crate::sql::{CreateTablePlan, PlannerError, plan_create_table_statement};
 use crate::wal::{FsyncSchedule, ReadConsistency, Walrus};
 use crate::writer::{
     ColumnUpdate, DirectBlockAllocator, DirectoryMetadataClient, MetadataClient, PageAllocator,
     UpdateJob, UpdateOp, Writer,
 };
 use sqlparser::ast::{
-    Assignment, BinaryOperator, Expr, FromTable, GroupByExpr, Ident, ObjectName, Offset,
-    OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,
-    UnaryOperator, Value,
+    Assignment, BinaryOperator, Expr, FromTable, FunctionArg, FunctionArgExpr, GroupByExpr, Ident,
+    ObjectName, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    TableWithJoins, UnaryOperator, Value, WindowType,
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
@@ -49,11 +49,12 @@ use std::sync::{Arc, Once};
 
 use aggregates::{
     AggregateDataset, AggregateFunctionKind, AggregateFunctionPlan, AggregateProjection,
-    AggregateProjectionPlan, AggregateState, AggregationHashTable, evaluate_aggregate_outputs,
-    plan_aggregate_projection, select_item_contains_aggregate, vectorized_average_update,
-    vectorized_count_star_update, vectorized_count_value_update, vectorized_sum_update,
+    AggregateProjectionPlan, AggregateState, AggregationHashTable, MaterializedColumns,
+    evaluate_aggregate_outputs, plan_aggregate_projection, select_item_contains_aggregate,
+    vectorized_average_update, vectorized_count_star_update, vectorized_count_value_update,
+    vectorized_sum_update,
 };
-use expressions::{evaluate_expression_on_batch, evaluate_row_expr};
+use expressions::{evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression};
 use grouping_helpers::{
     evaluate_group_key, evaluate_group_keys_on_batch, evaluate_having, validate_group_by,
 };
@@ -65,16 +66,21 @@ use ordering::{
     MergeOperator, NullsPlacement, OrderClause, OrderKey, build_group_order_key,
     compare_order_keys, sort_batch_in_memory, sort_rows_logical,
 };
-use physical_evaluator::PhysicalEvaluator;
+use physical_evaluator::{filter_supported, PhysicalEvaluator};
 use projection_helpers::{build_projection, materialize_columns};
 use scan_helpers::{SortKeyPrefix, collect_sort_key_filters, collect_sort_key_prefixes};
+use crate::sql::types::DataType;
 use values::{
-    CachedValue, ScalarValue, combine_numeric, compare_scalar_values, compare_strs, scalar_from_f64,
+    CachedValue, ScalarValue, cached_to_scalar_with_type, combine_numeric, compare_scalar_values,
+    compare_strs, scalar_from_f64,
 };
 use window_helpers::{
     WindowOperator, collect_window_function_plans, collect_window_plans_from_expr,
     ensure_common_partition, plan_order_clauses, rewrite_window_expressions,
 };
+
+const ENABLE_VECTORIZED_PROJECTION: bool = false;
+const ENABLE_VECTORIZED_AGGREGATION: bool = false;
 
 #[derive(Debug)]
 pub enum SqlExecutionError {
@@ -624,12 +630,11 @@ fn determine_group_by_strategy(
             }
             let mut names = Vec::with_capacity(exprs.len());
             for expr in exprs {
-                let name = column_name_from_expr(expr).ok_or_else(|| {
-                    SqlExecutionError::Unsupported(
-                        "GROUP BY columns must match table sort key prefix".into(),
-                    )
-                })?;
-                names.push(name);
+                if let Some(name) = column_name_from_expr(expr) {
+                    names.push(name);
+                } else {
+                    return Ok(GroupByStrategy::Hash);
+                }
             }
             names
         }
@@ -658,14 +663,13 @@ fn determine_group_by_strategy(
         return Ok(GroupByStrategy::OrderAligned);
     }
 
-    Err(SqlExecutionError::Unsupported(
-        "GROUP BY columns must match table sort key prefix".into(),
-    ))
+    Ok(GroupByStrategy::Hash)
 }
 
 enum GroupByStrategy {
     SortPrefix,
     OrderAligned,
+    Hash,
 }
 
 impl GroupByStrategy {
@@ -706,6 +710,84 @@ fn resolve_projection_reference(
             Ok(projection_exprs[position - 1].clone())
         }
         _ => Ok(expr.clone()),
+    }
+}
+
+fn rewrite_aliases_in_expr(expr: &Expr, alias_map: &HashMap<String, Expr>) -> Expr {
+    use sqlparser::ast::Expr::*;
+
+    match expr {
+        Identifier(ident) => alias_map
+            .get(&ident.value)
+            .cloned()
+            .unwrap_or_else(|| Identifier(ident.clone())),
+        CompoundIdentifier(idents) => {
+            if idents.len() == 1 {
+                if let Some(replacement) = alias_map.get(&idents[0].value) {
+                    return replacement.clone();
+                }
+            }
+            CompoundIdentifier(idents.clone())
+        }
+        BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(rewrite_aliases_in_expr(left, alias_map)),
+            op: op.clone(),
+            right: Box::new(rewrite_aliases_in_expr(right, alias_map)),
+        },
+        UnaryOp { op, expr } => Expr::UnaryOp {
+            op: op.clone(),
+            expr: Box::new(rewrite_aliases_in_expr(expr, alias_map)),
+        },
+        Nested(inner) => Expr::Nested(Box::new(rewrite_aliases_in_expr(inner, alias_map))),
+        Function(function) => {
+            let mut function = function.clone();
+            for arg in &mut function.args {
+                match arg {
+                    FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+                        if let FunctionArgExpr::Expr(inner) = arg {
+                            *inner = rewrite_aliases_in_expr(inner, alias_map);
+                        }
+                    }
+                }
+            }
+            if let Some(filter) = &mut function.filter {
+                *filter = Box::new(rewrite_aliases_in_expr(filter, alias_map));
+            }
+            for order in &mut function.order_by {
+                order.expr = rewrite_aliases_in_expr(&order.expr, alias_map);
+            }
+            if let Some(WindowType::WindowSpec(spec)) = &mut function.over {
+                for expr in &mut spec.partition_by {
+                    *expr = rewrite_aliases_in_expr(expr, alias_map);
+                }
+                for order in &mut spec.order_by {
+                    order.expr = rewrite_aliases_in_expr(&order.expr, alias_map);
+                }
+            }
+            Expr::Function(function)
+        }
+        Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => Expr::Case {
+            operand: operand
+                .as_ref()
+                .map(|expr| Box::new(rewrite_aliases_in_expr(expr, alias_map))),
+            conditions: conditions
+                .iter()
+                .map(|expr| rewrite_aliases_in_expr(expr, alias_map))
+                .collect(),
+            results: results
+                .iter()
+                .map(|expr| rewrite_aliases_in_expr(expr, alias_map))
+                .collect(),
+            else_result: else_result
+                .as_ref()
+                .map(|expr| Box::new(rewrite_aliases_in_expr(expr, alias_map))),
+        },
+        _ => expr.clone(),
     }
 }
 
@@ -763,8 +845,8 @@ enum WindowFunctionKind {
     Sum { frame: SumWindowFrame },
     Lag { offset: usize },
     Lead { offset: usize },
-    FirstValue,
-    LastValue,
+    FirstValue { preceding: Option<usize> },
+    LastValue { preceding: Option<usize> },
 }
 
 #[derive(Clone)]
@@ -838,6 +920,8 @@ impl SqlExecutor {
             cleanup_on_drop,
             reset_namespace,
             storage_dir,
+            fsync_schedule,
+            wal_enabled,
         } = options;
         let allocator: Arc<dyn PageAllocator> = if let Some(dir) = storage_dir {
             Arc::new(DirectBlockAllocator::with_data_dir(dir).expect("allocator init failed"))
@@ -854,7 +938,7 @@ impl SqlExecutor {
             Walrus::with_consistency_and_schedule_for_key(
                 &namespace,
                 ReadConsistency::StrictlyAtOnce,
-                FsyncSchedule::SyncEach,
+                fsync_schedule,
             )
             .expect("wal init failed"),
         );
@@ -876,12 +960,20 @@ impl SqlExecutor {
             Arc::clone(&page_directory),
             Arc::clone(&meta_journal),
         ));
-        let writer = Arc::new(Writer::new(
+        
+        let shard_count = crate::writer::GLOBAL_WRITER_SHARD_COUNT
+            .load(AtomicOrdering::Acquire)
+            .max(1);
+            
+        let writer = Arc::new(Writer::with_shard_count(
             Arc::clone(&page_handler),
             allocator,
             metadata_client,
             wal,
+            shard_count,
+            wal_enabled,
         ));
+        
         SqlExecutor {
             page_handler,
             page_directory,
@@ -1048,8 +1140,10 @@ impl SqlExecutor {
             .ok_or_else(|| SqlExecutionError::TableNotFound(table_name.clone()))?;
         let columns: Vec<ColumnCatalog> = catalog.columns().to_vec();
         let mut column_ordinals: HashMap<String, usize> = HashMap::new();
+        let mut column_types: HashMap<String, DataType> = HashMap::new();
         for column in &columns {
             column_ordinals.insert(column.name.clone(), column.ordinal);
+            column_types.insert(column.name.clone(), column.data_type);
         }
 
         let projection_items = projection;
@@ -1066,14 +1160,17 @@ impl SqlExecutor {
 
         let expr_planner = ExpressionPlanner::new(&catalog);
         let physical_selection_expr = if has_selection {
-            Some(
-                expr_planner
-                    .plan_expression(&selection_expr)
-                    .map_err(SqlExecutionError::Plan)?,
-            )
+            match expr_planner.plan_expression(&selection_expr) {
+                Ok(expr) => Some(expr),
+                Err(PlannerError::Unsupported(_)) => None,
+                Err(err) => return Err(SqlExecutionError::Plan(err)),
+            }
         } else {
             None
         };
+        let can_use_physical_filter = physical_selection_expr
+            .as_ref()
+            .map_or(false, filter_supported);
 
         let sort_columns_refs = catalog.sort_key();
         if sort_columns_refs.is_empty() {
@@ -1099,12 +1196,6 @@ impl SqlExecutor {
         if has_grouping && !aggregate_query {
             return Err(SqlExecutionError::Unsupported(
                 "GROUP BY requires aggregate projections".into(),
-            ));
-        }
-
-        if needs_aggregation && qualify.is_some() {
-            return Err(SqlExecutionError::Unsupported(
-                "QUALIFY with aggregates is not supported yet".into(),
             ));
         }
 
@@ -1157,6 +1248,13 @@ impl SqlExecutor {
                 Some(&alias_map)
             },
         )?;
+        let qualify_expr = qualify.as_ref().map(|expr| {
+            if alias_map.is_empty() {
+                expr.clone()
+            } else {
+                rewrite_aliases_in_expr(expr, &alias_map)
+            }
+        });
         let group_strategy = if has_grouping {
             Some(determine_group_by_strategy(
                 &resolved_group_by,
@@ -1232,7 +1330,8 @@ impl SqlExecutor {
             None
         };
 
-        let scan_selection_expr = if has_selection && !apply_selection_late {
+        let scan_selection_expr = if has_selection && !apply_selection_late && can_use_physical_filter
+        {
             physical_selection_expr.as_ref()
         } else {
             None
@@ -1240,13 +1339,18 @@ impl SqlExecutor {
         let mut selection_applied_in_scan = scan_selection_expr.is_some();
 
         if !window_plans.is_empty() {
+            if has_selection && !can_use_physical_filter {
+                return Err(SqlExecutionError::Unsupported(
+                    "complex WHERE predicates are not supported with window queries".into(),
+                ));
+            }
             let projection_plan = projection_plan_opt.take().ok_or_else(|| {
                 SqlExecutionError::Unsupported(
                     "window queries require an explicit projection plan".into(),
                 )
             })?;
             let partition_exprs = ensure_common_partition(&window_plans)?;
-            let vectorized_selection_expr = if has_selection {
+            let vectorized_selection_expr = if has_selection && can_use_physical_filter {
                 physical_selection_expr.as_ref()
             } else {
                 None
@@ -1271,13 +1375,15 @@ impl SqlExecutor {
             );
         }
 
-        let can_run_vectorized_projection = !needs_aggregation
+        let can_run_vectorized_projection = ENABLE_VECTORIZED_PROJECTION
+            && !needs_aggregation
             && qualify.is_none()
             && window_plans.is_empty()
             && sort_key_filters.is_none()
             && sort_key_prefixes.is_none()
             && projection_plan_opt.is_some()
-            && (order_clauses.is_empty() || !distinct_flag);
+            && (order_clauses.is_empty() || !distinct_flag)
+            && (!has_selection || can_use_physical_filter);
 
         if can_run_vectorized_projection {
             if let Some(projection_plan) = &projection_plan_opt {
@@ -1312,7 +1418,8 @@ impl SqlExecutor {
             Some(Vec::new())
         };
 
-        let can_run_vectorized_aggregation = needs_aggregation
+        let can_run_vectorized_aggregation = ENABLE_VECTORIZED_AGGREGATION
+            && needs_aggregation
             && !distinct_flag
             && order_clauses.is_empty()
             && sort_key_filters.is_none()
@@ -1320,7 +1427,8 @@ impl SqlExecutor {
             && !apply_selection_late
             && window_plans.is_empty()
             && aggregate_plan_opt.is_some()
-            && simple_group_exprs.is_some();
+            && simple_group_exprs.is_some()
+            && (!has_selection || can_use_physical_filter);
 
         if can_run_vectorized_aggregation {
             if let Some(aggregate_plan) = &aggregate_plan_opt {
@@ -1380,7 +1488,7 @@ impl SqlExecutor {
                     &columns,
                     &synthetic_plan,
                     &group_exprs,
-                    &projection_plan.required_ordinals,
+                    &required_ordinals,
                     scan_selection_expr,
                     &column_ordinals,
                     result_columns,
@@ -1428,7 +1536,7 @@ impl SqlExecutor {
         candidate_rows.sort_unstable();
         candidate_rows.dedup();
 
-        if !selection_applied_in_scan {
+        if !selection_applied_in_scan && can_use_physical_filter {
             if let Some(expr) = &physical_selection_expr {
                 candidate_rows = refine_rows_with_vectorized_filter(
                     &self.page_handler,
@@ -1450,14 +1558,18 @@ impl SqlExecutor {
             &required_ordinals,
             &candidate_rows,
         )?;
-
-        if !selection_applied_in_scan && physical_selection_expr.is_some() {
-            return Err(SqlExecutionError::OperationFailed(
-                "selection predicate was not applied during scan".into(),
-            ));
-        }
-
         let mut matching_rows = candidate_rows.clone();
+        if has_selection && !selection_applied_in_scan {
+            matching_rows = filter_rows_with_expr(
+                &selection_expr,
+                &matching_rows,
+                &materialized,
+                &column_ordinals,
+                &column_types,
+                false,
+            )?;
+            selection_applied_in_scan = true;
+        }
         let mut selection_set: HashSet<u64> = if apply_selection_late {
             candidate_rows.iter().copied().collect()
         } else {
@@ -1478,6 +1590,7 @@ impl SqlExecutor {
                 &order_clauses,
                 &materialized,
                 &column_ordinals,
+                &column_types,
                 &mut matching_rows,
             )?;
         }
@@ -1497,6 +1610,7 @@ impl SqlExecutor {
                 rows: matching_rows.as_slice(),
                 materialized: &materialized,
                 column_ordinals: &column_ordinals,
+                column_types: &column_types,
                 masked_exprs: None,
                 prefer_exact_numeric,
             };
@@ -1526,12 +1640,19 @@ impl SqlExecutor {
                             rows: rows.as_slice(),
                             materialized: &materialized,
                             column_ordinals: &column_ordinals,
+                            column_types: &column_types,
                             masked_exprs: Some(grouping.masked_exprs.as_slice()),
                             prefer_exact_numeric,
                         };
 
                         if !evaluate_having(&having, &dataset)? {
                             continue;
+                        }
+                        if let Some(expr) = &qualify_expr {
+                            let qualifies = evaluate_scalar_expression(expr, &dataset)?;
+                            if !qualifies.as_bool().unwrap_or(false) {
+                                continue;
+                            }
                         }
 
                         let order_key = if order_clauses.is_empty() {
@@ -1552,21 +1673,31 @@ impl SqlExecutor {
                     rows: matching_rows.as_slice(),
                     materialized: &materialized,
                     column_ordinals: &column_ordinals,
+                    column_types: &column_types,
                     masked_exprs: None,
                     prefer_exact_numeric,
                 };
 
                 if evaluate_having(&having, &dataset)? {
-                    let order_key = if order_clauses.is_empty() {
-                        OrderKey { values: Vec::new() }
+                    let qualifies = if let Some(expr) = &qualify_expr {
+                        evaluate_scalar_expression(expr, &dataset)?
+                            .as_bool()
+                            .unwrap_or(false)
                     } else {
-                        build_group_order_key(&order_clauses, &dataset)?
+                        true
                     };
-                    let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
-                    aggregated_rows.push(AggregatedRow {
-                        order_key,
-                        values: output_row,
-                    });
+                    if qualifies {
+                        let order_key = if order_clauses.is_empty() {
+                            OrderKey { values: Vec::new() }
+                        } else {
+                            build_group_order_key(&order_clauses, &dataset)?
+                        };
+                        let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
+                        aggregated_rows.push(AggregatedRow {
+                            order_key,
+                            values: output_row,
+                        });
+                    }
                 }
             }
 
@@ -1623,6 +1754,7 @@ impl SqlExecutor {
                 rows: matching_rows.as_slice(),
                 materialized: &materialized,
                 column_ordinals: &column_ordinals,
+                column_types: &column_types,
                 masked_exprs: None,
                 prefer_exact_numeric: false,
             })
@@ -1662,7 +1794,9 @@ impl SqlExecutor {
                                     columns[*ordinal].name
                                 ))
                             })?;
-                        projected.push(cached.into_option_string());
+                        let scalar =
+                            cached_to_scalar_with_type(&cached, columns[*ordinal].data_type);
+                        projected.push(scalar.into_option_string());
                     }
                     ProjectionItem::Computed { expr } => {
                         let dataset = dataset.expect("dataset required for computed projection");
@@ -1714,6 +1848,7 @@ impl SqlExecutor {
             required_ordinals,
             selection_expr,
             column_ordinals,
+            catalog.rows_per_page_group,
         )?;
 
         if batch.num_rows == 0 || batch.columns.is_empty() {
@@ -1807,6 +1942,7 @@ impl SqlExecutor {
             required_ordinals,
             selection_expr,
             column_ordinals,
+            catalog.rows_per_page_group,
         )?;
         if batch.num_rows == 0 {
             return Ok(SelectResult {
@@ -1891,6 +2027,7 @@ impl SqlExecutor {
     ) -> Result<ColumnarBatch, SqlExecutionError> {
         let mut final_batch = ColumnarBatch::with_capacity(projection_plan.items.len());
         final_batch.num_rows = batch.num_rows;
+        final_batch.row_ids = batch.row_ids.clone();
         for (idx, item) in projection_plan.items.iter().enumerate() {
             let column_page = match item {
                 ProjectionItem::Direct { ordinal } => {
@@ -2060,6 +2197,7 @@ impl SqlExecutor {
             required_ordinals,
             selection_expr,
             column_ordinals,
+            catalog.rows_per_page_group,
         )?;
 
         let group_keys = evaluate_group_keys_on_batch(group_exprs, &batch, catalog)?;
@@ -2125,60 +2263,66 @@ impl SqlExecutor {
                 ));
             }
 
-            for (slot_index, plan) in aggregate_plans.iter().enumerate() {
-                match plan.kind {
-                    AggregateFunctionKind::CountStar => {
-                        vectorized_count_star_update(
-                            &mut hash_table,
-                            slot_index,
-                            &group_keys,
-                            &state_template,
-                        );
-                    }
-                    AggregateFunctionKind::CountExpr => {
-                        let expr = plan.arg.as_ref().ok_or_else(|| {
-                            SqlExecutionError::OperationFailed(
-                                "COUNT expression missing argument".into(),
-                            )
-                        })?;
-                        let values_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
-                        vectorized_count_value_update(
-                            &mut hash_table,
-                            slot_index,
-                            &group_keys,
-                            &values_page,
-                            &state_template,
-                        );
-                    }
-                    AggregateFunctionKind::Sum => {
-                        let expr = plan.arg.as_ref().ok_or_else(|| {
-                            SqlExecutionError::OperationFailed(
-                                "SUM expression missing argument".into(),
-                            )
-                        })?;
-                        let values_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
-                        vectorized_sum_update(
-                            &mut hash_table,
-                            slot_index,
-                            &group_keys,
-                            &values_page,
-                            &state_template,
-                        );
-                    }
-                    AggregateFunctionKind::Average => {
-                        let expr = plan.arg.as_ref().ok_or_else(|| {
-                            SqlExecutionError::OperationFailed(
-                                "AVG expression missing argument".into(),
-                            )
-                        })?;
-                        let values_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
-                        vectorized_average_update(
-                            &mut hash_table,
-                            slot_index,
-                            &group_keys,
-                            &values_page,
-                            &state_template,
-                        );
+            if aggregate_plans.is_empty() {
+                for key in &group_keys {
+                    hash_table.entry(key.clone()).or_insert_with(|| state_template.clone());
+                }
+            } else {
+                for (slot_index, plan) in aggregate_plans.iter().enumerate() {
+                    match plan.kind {
+                        AggregateFunctionKind::CountStar => {
+                            vectorized_count_star_update(
+                                &mut hash_table,
+                                slot_index,
+                                &group_keys,
+                                &state_template,
+                            );
+                        }
+                        AggregateFunctionKind::CountExpr => {
+                            let expr = plan.arg.as_ref().ok_or_else(|| {
+                                SqlExecutionError::OperationFailed(
+                                    "COUNT expression missing argument".into(),
+                                )
+                            })?;
+                            let values_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
+                            vectorized_count_value_update(
+                                &mut hash_table,
+                                slot_index,
+                                &group_keys,
+                                &values_page,
+                                &state_template,
+                            );
+                        }
+                        AggregateFunctionKind::Sum => {
+                            let expr = plan.arg.as_ref().ok_or_else(|| {
+                                SqlExecutionError::OperationFailed(
+                                    "SUM expression missing argument".into(),
+                                )
+                            })?;
+                            let values_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
+                            vectorized_sum_update(
+                                &mut hash_table,
+                                slot_index,
+                                &group_keys,
+                                &values_page,
+                                &state_template,
+                            );
+                        }
+                        AggregateFunctionKind::Average => {
+                            let expr = plan.arg.as_ref().ok_or_else(|| {
+                                SqlExecutionError::OperationFailed(
+                                    "AVG expression missing argument".into(),
+                                )
+                            })?;
+                            let values_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
+                            vectorized_average_update(
+                                &mut hash_table,
+                                slot_index,
+                                &group_keys,
+                                &values_page,
+                                &state_template,
+                            );
+                        }
                     }
                 }
             }
@@ -2248,6 +2392,9 @@ impl SqlExecutor {
             .map(|values| values.len())
             .unwrap_or(0);
         result_batch.num_rows = num_rows;
+        if num_rows > 0 {
+            result_batch.row_ids = (0..num_rows as u64).collect();
+        }
         for (idx, values) in column_values.into_iter().enumerate() {
             result_batch
                 .columns
@@ -2536,8 +2683,10 @@ impl SqlExecutor {
             .collect();
 
         let mut column_ordinals: HashMap<String, usize> = HashMap::new();
+        let mut column_types: HashMap<String, DataType> = HashMap::new();
         for column in &columns {
             column_ordinals.insert(column.name.clone(), column.ordinal);
+            column_types.insert(column.name.clone(), column.data_type);
         }
 
         if assignments.is_empty() {
@@ -2567,15 +2716,18 @@ impl SqlExecutor {
 
         let expr_planner = ExpressionPlanner::new(&catalog);
         let physical_selection_expr = if has_selection {
-            Some(
-                expr_planner
-                    .plan_expression(&selection_expr)
-                    .map_err(SqlExecutionError::Plan)?,
-            )
+            match expr_planner.plan_expression(&selection_expr) {
+                Ok(expr) => Some(expr),
+                Err(PlannerError::Unsupported(_)) => None,
+                Err(err) => return Err(SqlExecutionError::Plan(err)),
+            }
         } else {
             None
         };
 
+        let can_use_physical_filter = physical_selection_expr
+            .as_ref()
+            .map_or(false, filter_supported);
         let mut required_ordinals: BTreeSet<usize> = sort_indices.iter().copied().collect();
         if has_selection {
             let predicate_ordinals =
@@ -2616,7 +2768,11 @@ impl SqlExecutor {
                 &table_name,
                 &columns,
                 &required_ordinals,
-                physical_selection_expr.as_ref(),
+                if can_use_physical_filter {
+                    physical_selection_expr.as_ref()
+                } else {
+                    None
+                },
                 &column_ordinals,
                 catalog.rows_per_page_group,
             )?
@@ -2628,7 +2784,7 @@ impl SqlExecutor {
         candidate_rows.sort_unstable();
         candidate_rows.dedup();
 
-        if has_selection {
+        if has_selection && can_use_physical_filter {
             if let Some(expr) = &physical_selection_expr {
                 candidate_rows = refine_rows_with_vectorized_filter(
                     &self.page_handler,
@@ -2640,6 +2796,23 @@ impl SqlExecutor {
                     catalog.rows_per_page_group,
                 )?;
             }
+        }
+        if has_selection && !can_use_physical_filter {
+            let materialized = materialize_columns(
+                &self.page_handler,
+                &table_name,
+                &columns,
+                &required_ordinals,
+                &candidate_rows,
+            )?;
+            candidate_rows = filter_rows_with_expr(
+                &selection_expr,
+                &candidate_rows,
+                &materialized,
+                &column_ordinals,
+                &column_types,
+                false,
+            )?;
         }
         if candidate_rows.is_empty() {
             return Ok(());
@@ -2733,8 +2906,10 @@ impl SqlExecutor {
             .ok_or_else(|| SqlExecutionError::TableNotFound(table_name.clone()))?;
         let columns: Vec<ColumnCatalog> = catalog.columns().to_vec();
         let mut column_ordinals: HashMap<String, usize> = HashMap::new();
+        let mut column_types: HashMap<String, DataType> = HashMap::new();
         for column in &columns {
             column_ordinals.insert(column.name.clone(), column.ordinal);
+            column_types.insert(column.name.clone(), column.data_type);
         }
 
         let sort_indices: Vec<usize> = catalog.sort_key().iter().map(|col| col.ordinal).collect();
@@ -2753,15 +2928,18 @@ impl SqlExecutor {
 
         let expr_planner = ExpressionPlanner::new(&catalog);
         let physical_selection_expr = if has_selection {
-            Some(
-                expr_planner
-                    .plan_expression(&selection_expr)
-                    .map_err(SqlExecutionError::Plan)?,
-            )
+            match expr_planner.plan_expression(&selection_expr) {
+                Ok(expr) => Some(expr),
+                Err(PlannerError::Unsupported(_)) => None,
+                Err(err) => return Err(SqlExecutionError::Plan(err)),
+            }
         } else {
             None
         };
 
+        let can_use_physical_filter = physical_selection_expr
+            .as_ref()
+            .map_or(false, filter_supported);
         let mut required_ordinals: BTreeSet<usize> = sort_indices.iter().copied().collect();
         if has_selection {
             let predicate_ordinals =
@@ -2802,7 +2980,11 @@ impl SqlExecutor {
                 &table_name,
                 &columns,
                 &required_ordinals,
-                physical_selection_expr.as_ref(),
+                if can_use_physical_filter {
+                    physical_selection_expr.as_ref()
+                } else {
+                    None
+                },
                 &column_ordinals,
                 catalog.rows_per_page_group,
             )?
@@ -2815,7 +2997,7 @@ impl SqlExecutor {
         candidate_rows.sort_unstable();
         candidate_rows.dedup();
 
-        if has_selection {
+        if has_selection && can_use_physical_filter {
             if let Some(expr) = &physical_selection_expr {
                 candidate_rows = refine_rows_with_vectorized_filter(
                     &self.page_handler,
@@ -2827,6 +3009,23 @@ impl SqlExecutor {
                     catalog.rows_per_page_group,
                 )?;
             }
+        }
+        if has_selection && !can_use_physical_filter {
+            let materialized = materialize_columns(
+                &self.page_handler,
+                &table_name,
+                &columns,
+                &required_ordinals,
+                &candidate_rows,
+            )?;
+            candidate_rows = filter_rows_with_expr(
+                &selection_expr,
+                &candidate_rows,
+                &materialized,
+                &column_ordinals,
+                &column_types,
+                false,
+            )?;
         }
         if candidate_rows.is_empty() {
             return Ok(());
@@ -3019,9 +3218,19 @@ impl SqlExecutor {
             return Ok(rows);
         };
         let driving_col = &columns[driving_col_ordinal];
-        let descriptors = self
-            .page_handler
-            .list_pages_in_table(table, &driving_col.name);
+
+        // Collect all column names needed
+        let mut required_names = Vec::with_capacity(required_ordinals.len());
+        for &ordinal in required_ordinals {
+            required_names.push(columns[ordinal].name.clone());
+        }
+
+        // Snapshot all metadata at once
+        let all_pages = self.page_handler.get_column_pages(table, &required_names);
+        let descriptors = all_pages
+            .get(&driving_col.name)
+            .cloned()
+            .unwrap_or_default();
 
         for (page_idx, _) in descriptors.iter().enumerate() {
             let mut batch_slice = ColumnarBatch::with_capacity(required_ordinals.len());
@@ -3031,13 +3240,18 @@ impl SqlExecutor {
 
             for &ordinal in required_ordinals {
                 let column = &columns[ordinal];
-                let col_descriptors = self.page_handler.list_pages_in_table(table, &column.name);
-                if let Some(desc) = col_descriptors.get(page_idx) {
-                    let page_arc = self.page_handler.get_page(desc.clone()).ok_or_else(|| {
-                        SqlExecutionError::OperationFailed("page load failed".into())
-                    })?;
-                    num_rows = page_arc.page.num_rows;
-                    pages_keepalive.push((ordinal, page_arc));
+                let col_descriptors = all_pages.get(&column.name);
+                if let Some(desc_list) = col_descriptors {
+                    if let Some(desc) = desc_list.get(page_idx) {
+                        let page_arc = self.page_handler.get_page(desc.clone()).ok_or_else(|| {
+                            SqlExecutionError::OperationFailed("page load failed".into())
+                        })?;
+                        num_rows = page_arc.page.num_rows;
+                        pages_keepalive.push((ordinal, page_arc));
+                    } else {
+                        segment_valid = false;
+                        break;
+                    }
                 } else {
                     segment_valid = false;
                     break;
@@ -3131,6 +3345,7 @@ impl SqlExecutor {
         scan_ordinals: &BTreeSet<usize>,
         selection_expr: Option<&PhysicalExpr>,
         column_ordinals: &HashMap<String, usize>,
+        rows_per_page_group: u64,
     ) -> Result<ColumnarBatch, SqlExecutionError> {
         let mut final_batch = ColumnarBatch::with_capacity(columns.len());
         final_batch.aliases = column_ordinals.clone();
@@ -3143,9 +3358,18 @@ impl SqlExecutor {
         };
         let driving_col = &columns[driving_col_ordinal];
 
-        let descriptors = self
-            .page_handler
-            .list_pages_in_table(table, &driving_col.name);
+        // Collect all column names needed
+        let mut required_names = Vec::with_capacity(scan_ordinals.len());
+        for &ordinal in scan_ordinals {
+            required_names.push(columns[ordinal].name.clone());
+        }
+
+        // Snapshot all metadata at once
+        let all_pages = self.page_handler.get_column_pages(table, &required_names);
+        let descriptors = all_pages
+            .get(&driving_col.name)
+            .cloned()
+            .unwrap_or_default();
 
         for (page_idx, _) in descriptors.iter().enumerate() {
             // Collect pages for this segment
@@ -3157,14 +3381,19 @@ impl SqlExecutor {
             for &ordinal in scan_ordinals {
                 let column = &columns[ordinal];
                 // Assume 1:1 page mapping for prototype
-                let col_descriptors = self.page_handler.list_pages_in_table(table, &column.name);
-                if let Some(desc) = col_descriptors.get(page_idx) {
-                    let page_arc = self.page_handler.get_page(desc.clone()).ok_or_else(|| {
-                        SqlExecutionError::OperationFailed("page load failed".into())
-                    })?;
+                let col_descriptors = all_pages.get(&column.name);
+                if let Some(desc_list) = col_descriptors {
+                    if let Some(desc) = desc_list.get(page_idx) {
+                        let page_arc = self.page_handler.get_page(desc.clone()).ok_or_else(|| {
+                            SqlExecutionError::OperationFailed("page load failed".into())
+                        })?;
 
-                    num_rows = page_arc.page.num_rows;
-                    pages_keepalive.push((ordinal, page_arc));
+                        num_rows = page_arc.page.num_rows;
+                        pages_keepalive.push((ordinal, page_arc));
+                    } else {
+                        segment_valid = false;
+                        break;
+                    }
                 } else {
                     segment_valid = false;
                     break;
@@ -3207,6 +3436,10 @@ impl SqlExecutor {
                     .entry(ordinal)
                     .and_modify(|existing| existing.append(&filtered_page))
                     .or_insert(filtered_page);
+            }
+            let base_row = (page_idx as u64).saturating_mul(rows_per_page_group);
+            for row_idx in bitmap.iter_ones().take_while(|&idx| idx < num_rows) {
+                final_batch.row_ids.push(base_row + row_idx as u64);
             }
             final_batch.num_rows += bitmap.count_ones();
         }
@@ -3251,6 +3484,15 @@ fn collect_physical_ordinals(expr: &PhysicalExpr, ordinals: &mut BTreeSet<usize>
             expr,
             pattern,
             case_insensitive: _,
+            negated: _,
+        } => {
+            collect_physical_ordinals(expr, ordinals);
+            collect_physical_ordinals(pattern, ordinals);
+        }
+        PhysicalExpr::RLike {
+            expr,
+            pattern,
+            negated: _,
         } => {
             collect_physical_ordinals(expr, ordinals);
             collect_physical_ordinals(pattern, ordinals);
@@ -3269,6 +3511,38 @@ fn collect_physical_ordinals(expr: &PhysicalExpr, ordinals: &mut BTreeSet<usize>
         }
         PhysicalExpr::Literal(_) => {}
     }
+}
+
+fn filter_rows_with_expr(
+    expr: &Expr,
+    rows: &[u64],
+    materialized: &MaterializedColumns,
+    column_ordinals: &HashMap<String, usize>,
+    column_types: &HashMap<String, DataType>,
+    prefer_exact_numeric: bool,
+) -> Result<Vec<u64>, SqlExecutionError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let dataset = AggregateDataset {
+        rows,
+        materialized,
+        column_ordinals,
+        column_types,
+        masked_exprs: None,
+        prefer_exact_numeric,
+    };
+
+    let mut filtered = Vec::with_capacity(rows.len());
+    for &row_idx in rows {
+        let value = evaluate_row_expr(expr, row_idx, &dataset)?;
+        if value.as_bool().unwrap_or(false) {
+            filtered.push(row_idx);
+        }
+    }
+
+    Ok(filtered)
 }
 
 fn refine_rows_with_vectorized_filter(
@@ -3365,6 +3639,8 @@ pub struct SqlExecutorWalOptions {
     cleanup_on_drop: bool,
     reset_namespace: bool,
     storage_dir: Option<String>,
+    fsync_schedule: FsyncSchedule,
+    wal_enabled: bool,
 }
 
 impl SqlExecutorWalOptions {
@@ -3374,6 +3650,8 @@ impl SqlExecutorWalOptions {
             cleanup_on_drop: true,
             reset_namespace: true,
             storage_dir: None,
+            fsync_schedule: FsyncSchedule::SyncEach,
+            wal_enabled: true,
         }
     }
 
@@ -3389,6 +3667,16 @@ impl SqlExecutorWalOptions {
 
     pub fn storage_dir(mut self, dir: impl Into<String>) -> Self {
         self.storage_dir = Some(dir.into());
+        self
+    }
+
+    pub fn fsync_schedule(mut self, schedule: FsyncSchedule) -> Self {
+        self.fsync_schedule = schedule;
+        self
+    }
+
+    pub fn wal_enabled(mut self, enabled: bool) -> Self {
+        self.wal_enabled = enabled;
         self
     }
 
@@ -3534,6 +3822,7 @@ fn rows_to_batch(rows: Vec<Vec<Option<String>>>) -> ColumnarBatch {
     let column_count = rows[0].len();
     let mut batch = ColumnarBatch::with_capacity(column_count);
     batch.num_rows = rows.len();
+    batch.row_ids = (0..rows.len() as u64).collect();
     for column_idx in 0..column_count {
         let mut column_values = Vec::with_capacity(rows.len());
         for row in &rows {

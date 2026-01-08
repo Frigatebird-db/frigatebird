@@ -36,6 +36,13 @@ pub enum PhysicalExpr {
         expr: Box<PhysicalExpr>,
         pattern: Box<PhysicalExpr>,
         case_insensitive: bool,
+        negated: bool,
+    },
+    /// RLIKE regex match
+    RLike {
+        expr: Box<PhysicalExpr>,
+        pattern: Box<PhysicalExpr>,
+        negated: bool,
     },
 
     /// IN list match
@@ -81,8 +88,22 @@ impl fmt::Display for PhysicalExpr {
                 expr,
                 pattern,
                 case_insensitive,
+                negated,
             } => {
-                let op = if *case_insensitive { "ILIKE" } else { "LIKE" };
+                let op = match (*case_insensitive, *negated) {
+                    (true, true) => "NOT ILIKE",
+                    (true, false) => "ILIKE",
+                    (false, true) => "NOT LIKE",
+                    (false, false) => "LIKE",
+                };
+                write!(f, "{} {} {}", expr, op, pattern)
+            }
+            PhysicalExpr::RLike {
+                expr,
+                pattern,
+                negated,
+            } => {
+                let op = if *negated { "NOT RLIKE" } else { "RLIKE" };
                 write!(f, "{} {} {}", expr, op, pattern)
             }
             PhysicalExpr::InList {
