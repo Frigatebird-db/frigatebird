@@ -64,7 +64,7 @@ fn setup_executor(config: &BenchmarkConfig) -> (SqlExecutor, Arc<PageHandler>, A
     let wal_id = WAL_COUNTER.fetch_add(1, Ordering::Relaxed);
     let namespace = format!("bench-{wal_id}");
     let mut options = SqlExecutorWalOptions::new(namespace);
-    
+
     if config.wal_disabled {
         // When WAL is disabled, we skip WAL writes entirely AND disable fsync on the Walrus instance just in case
         options = options
@@ -72,13 +72,9 @@ fn setup_executor(config: &BenchmarkConfig) -> (SqlExecutor, Arc<PageHandler>, A
             .wal_enabled(false);
     }
 
-    let executor = SqlExecutor::with_wal_options(
-        Arc::clone(&handler), 
-        Arc::clone(&directory), 
-        true, 
-        options
-    );
-    
+    let executor =
+        SqlExecutor::with_wal_options(Arc::clone(&handler), Arc::clone(&directory), true, options);
+
     (executor, handler, directory)
 }
 

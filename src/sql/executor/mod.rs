@@ -47,6 +47,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Once};
 
+use crate::sql::types::DataType;
 use aggregates::{
     AggregateDataset, AggregateFunctionKind, AggregateFunctionPlan, AggregateProjection,
     AggregateProjectionPlan, AggregateState, AggregationHashTable, MaterializedColumns,
@@ -66,10 +67,9 @@ use ordering::{
     MergeOperator, NullsPlacement, OrderClause, OrderKey, build_group_order_key,
     compare_order_keys, sort_batch_in_memory, sort_rows_logical,
 };
-use physical_evaluator::{filter_supported, PhysicalEvaluator};
+use physical_evaluator::{PhysicalEvaluator, filter_supported};
 use projection_helpers::{build_projection, materialize_columns};
 use scan_helpers::{SortKeyPrefix, collect_sort_key_filters, collect_sort_key_prefixes};
-use crate::sql::types::DataType;
 use values::{
     CachedValue, ScalarValue, cached_to_scalar_with_type, combine_numeric, compare_scalar_values,
     compare_strs, scalar_from_f64,
@@ -960,11 +960,11 @@ impl SqlExecutor {
             Arc::clone(&page_directory),
             Arc::clone(&meta_journal),
         ));
-        
+
         let shard_count = crate::writer::GLOBAL_WRITER_SHARD_COUNT
             .load(AtomicOrdering::Acquire)
             .max(1);
-            
+
         let writer = Arc::new(Writer::with_shard_count(
             Arc::clone(&page_handler),
             allocator,
@@ -973,7 +973,7 @@ impl SqlExecutor {
             shard_count,
             wal_enabled,
         ));
-        
+
         SqlExecutor {
             page_handler,
             page_directory,
@@ -1330,12 +1330,12 @@ impl SqlExecutor {
             None
         };
 
-        let scan_selection_expr = if has_selection && !apply_selection_late && can_use_physical_filter
-        {
-            physical_selection_expr.as_ref()
-        } else {
-            None
-        };
+        let scan_selection_expr =
+            if has_selection && !apply_selection_late && can_use_physical_filter {
+                physical_selection_expr.as_ref()
+            } else {
+                None
+            };
         let mut selection_applied_in_scan = scan_selection_expr.is_some();
 
         if !window_plans.is_empty() {
@@ -2265,7 +2265,9 @@ impl SqlExecutor {
 
             if aggregate_plans.is_empty() {
                 for key in &group_keys {
-                    hash_table.entry(key.clone()).or_insert_with(|| state_template.clone());
+                    hash_table
+                        .entry(key.clone())
+                        .or_insert_with(|| state_template.clone());
                 }
             } else {
                 for (slot_index, plan) in aggregate_plans.iter().enumerate() {
@@ -3243,9 +3245,10 @@ impl SqlExecutor {
                 let col_descriptors = all_pages.get(&column.name);
                 if let Some(desc_list) = col_descriptors {
                     if let Some(desc) = desc_list.get(page_idx) {
-                        let page_arc = self.page_handler.get_page(desc.clone()).ok_or_else(|| {
-                            SqlExecutionError::OperationFailed("page load failed".into())
-                        })?;
+                        let page_arc =
+                            self.page_handler.get_page(desc.clone()).ok_or_else(|| {
+                                SqlExecutionError::OperationFailed("page load failed".into())
+                            })?;
                         num_rows = page_arc.page.num_rows;
                         pages_keepalive.push((ordinal, page_arc));
                     } else {
@@ -3384,9 +3387,10 @@ impl SqlExecutor {
                 let col_descriptors = all_pages.get(&column.name);
                 if let Some(desc_list) = col_descriptors {
                     if let Some(desc) = desc_list.get(page_idx) {
-                        let page_arc = self.page_handler.get_page(desc.clone()).ok_or_else(|| {
-                            SqlExecutionError::OperationFailed("page load failed".into())
-                        })?;
+                        let page_arc =
+                            self.page_handler.get_page(desc.clone()).ok_or_else(|| {
+                                SqlExecutionError::OperationFailed("page load failed".into())
+                            })?;
 
                         num_rows = page_arc.page.num_rows;
                         pages_keepalive.push((ordinal, page_arc));

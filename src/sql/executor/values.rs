@@ -164,11 +164,9 @@ pub fn cached_to_scalar(value: &CachedValue) -> ScalarValue {
 pub fn cached_to_scalar_with_type(value: &CachedValue, data_type: DataType) -> ScalarValue {
     match (value, data_type) {
         (CachedValue::Null, _) => ScalarValue::Null,
-        (CachedValue::Text(s), DataType::Timestamp) => {
-            parse_datetime(s).map(ScalarValue::Timestamp).unwrap_or_else(|| {
-                ScalarValue::String(s.clone())
-            })
-        }
+        (CachedValue::Text(s), DataType::Timestamp) => parse_datetime(s)
+            .map(ScalarValue::Timestamp)
+            .unwrap_or_else(|| ScalarValue::String(s.clone())),
         _ => cached_to_scalar(value),
     }
 }

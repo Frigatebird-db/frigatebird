@@ -1139,7 +1139,9 @@ where
                     let column = scalars_to_column(values, WindowResultType::Template(&arg_page))?;
                     batch.columns.insert(plan.result_ordinal, column);
                 }
-                WindowFunctionKind::LastValue { preceding: _preceding } => {
+                WindowFunctionKind::LastValue {
+                    preceding: _preceding,
+                } => {
                     let arg_expr = plan.arg.as_ref().expect("LAST_VALUE requires argument");
                     let arg_page = evaluate_expression_on_batch(arg_expr, &batch, self.catalog)?;
                     let arg_values = columnar_page_to_scalars(&arg_page);

@@ -964,8 +964,9 @@ impl ColumnarPage {
                     ColumnData::Boolean(v) => v[idx].to_string(),
                     ColumnData::Int64(values) => values[idx].to_string(),
                     ColumnData::Float64(values) => format_float(values[idx]),
-                    ColumnData::Timestamp(v) => format_timestamp_micros(v[idx])
-                        .unwrap_or_else(|| v[idx].to_string()),
+                    ColumnData::Timestamp(v) => {
+                        format_timestamp_micros(v[idx]).unwrap_or_else(|| v[idx].to_string())
+                    }
                     ColumnData::Text(col) => col.get_string(idx),
                     ColumnData::Dictionary(dict) => dict.get_string(idx),
                 }

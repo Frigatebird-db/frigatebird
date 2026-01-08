@@ -63,9 +63,7 @@ pub(super) fn evaluate_row_function(
                 .get(1)
                 .and_then(|v| match v {
                     ScalarValue::Int64(i) => Some(*i),
-                    ScalarValue::Float64(f)
-                        if f.is_finite() && f.fract().abs() < f64::EPSILON =>
-                    {
+                    ScalarValue::Float64(f) if f.is_finite() && f.fract().abs() < f64::EPSILON => {
                         Some(*f as i64)
                     }
                     ScalarValue::String(s) => s.parse::<i64>().ok(),
@@ -387,14 +385,8 @@ fn scalar_to_seconds(value: &ScalarValue) -> Option<(f64, TimeValueKind)> {
         ScalarValue::Boolean(v) => Some((if *v { 1.0 } else { 0.0 }, TimeValueKind::Numeric)),
         ScalarValue::String(text) => parse_timestamp(text)
             .map(|ts| (ts.and_utc().timestamp() as f64, TimeValueKind::Timestamp))
-            .or_else(|| {
-                text.parse::<f64>()
-                    .ok()
-                    .and_then(numeric_to_seconds)
-            }),
-        ScalarValue::Timestamp(ts) => {
-            Some((*ts as f64 / 1_000_000.0, TimeValueKind::Timestamp))
-        }
+            .or_else(|| text.parse::<f64>().ok().and_then(numeric_to_seconds)),
+        ScalarValue::Timestamp(ts) => Some((*ts as f64 / 1_000_000.0, TimeValueKind::Timestamp)),
         ScalarValue::Null => None,
     }
 }

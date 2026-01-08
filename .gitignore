@@ -1,3 +1,4 @@
+perf.*
 /mem:
 /wal_files
 /target

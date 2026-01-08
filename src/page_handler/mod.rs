@@ -278,7 +278,9 @@ impl PageMaterializer {
         dtype: DataType,
     ) -> Option<Arc<PageCacheEntryUncompressed>> {
         let disk_page = self.compressor.decompress(compressed);
-        let page = PageCacheEntryUncompressed::from_disk_page(disk_page, dtype);
+        let mut page = PageCacheEntryUncompressed::from_disk_page(disk_page, dtype);
+        // Ensure page metadata matches the descriptor id, even if the serialized page had stale data.
+        page.page.page_metadata = id.to_string();
         {
             let mut cache = self.uncompressed_page_cache.write().unwrap();
             cache.add(id, page);
@@ -299,7 +301,9 @@ impl PageMaterializer {
         for (id, comp) in items.into_iter() {
             let dtype = *dtypes.get(&id).unwrap_or(&DataType::String);
             let disk_page = self.compressor.decompress(comp);
-            let page = PageCacheEntryUncompressed::from_disk_page(disk_page, dtype);
+            let mut page = PageCacheEntryUncompressed::from_disk_page(disk_page, dtype);
+            // Normalize metadata to descriptor id to avoid relying on serialized page metadata.
+            page.page.page_metadata = id.clone();
             materialized.push((id, page));
         }
 

@@ -122,7 +122,9 @@ fn debug_window_case() {
     println!("duck rows: {:?}", duck_rows);
 
     let order_sql = "SELECT id, quantity, price, net_amount FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL ORDER BY quantity ASC, id ASC";
-    let ordered = executor.query(order_sql).expect("satori order query failed");
+    let ordered = executor
+        .query(order_sql)
+        .expect("satori order query failed");
     println!("ours order rows:\n{}", ordered);
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(order_sql).expect("duckdb prepare");
@@ -150,9 +152,7 @@ fn debug_window_case() {
         .expect("satori alpha window query failed");
     println!("ours alpha window rows:\n{}", ours);
     let conn = fixture.duckdb();
-    let mut stmt = conn
-        .prepare(alpha_window_sql)
-        .expect("duckdb prepare");
+    let mut stmt = conn.prepare(alpha_window_sql).expect("duckdb prepare");
     let mut rows = stmt.query([]).expect("duckdb query");
     let column_count = rows.as_ref().expect("statement reference").column_count();
     let mut duck_rows = Vec::new();
@@ -273,9 +273,7 @@ fn debug_window_case() {
 
     let duck_window_tie_sql = "SELECT id, quantity, price, q_rn FROM (SELECT id, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY quantity) AS q_rn FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL) WHERE quantity = 330 ORDER BY q_rn";
     let conn = fixture.duckdb();
-    let mut stmt = conn
-        .prepare(duck_window_tie_sql)
-        .expect("duckdb prepare");
+    let mut stmt = conn.prepare(duck_window_tie_sql).expect("duckdb prepare");
     let mut rows = stmt.query([]).expect("duckdb query");
     let column_count = rows.as_ref().expect("statement reference").column_count();
     let mut duck_rows = Vec::new();
@@ -296,9 +294,7 @@ fn debug_window_case() {
 
     let duck_running_sql = "SELECT id, quantity, price, SUM(quantity) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_qty FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL AND quantity = 330 ORDER BY id";
     let conn = fixture.duckdb();
-    let mut stmt = conn
-        .prepare(duck_running_sql)
-        .expect("duckdb prepare");
+    let mut stmt = conn.prepare(duck_running_sql).expect("duckdb prepare");
     let mut rows = stmt.query([]).expect("duckdb query");
     let column_count = rows.as_ref().expect("statement reference").column_count();
     let mut duck_rows = Vec::new();
@@ -319,9 +315,7 @@ fn debug_window_case() {
 
     let duck_full_running_sql = "SELECT id, quantity, price, running_qty FROM (SELECT id, quantity, price, SUM(quantity) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_qty FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL) WHERE quantity = 330 ORDER BY id";
     let conn = fixture.duckdb();
-    let mut stmt = conn
-        .prepare(duck_full_running_sql)
-        .expect("duckdb prepare");
+    let mut stmt = conn.prepare(duck_full_running_sql).expect("duckdb prepare");
     let mut rows = stmt.query([]).expect("duckdb query");
     let column_count = rows.as_ref().expect("statement reference").column_count();
     let mut duck_rows = Vec::new();
@@ -342,9 +336,7 @@ fn debug_window_case() {
 
     let duck_full_context_sql = "SELECT id, quantity, price, rn, running_qty FROM (SELECT id, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY created_at) AS rn, SUM(quantity) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_qty FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL) WHERE quantity = 330 ORDER BY id";
     let conn = fixture.duckdb();
-    let mut stmt = conn
-        .prepare(duck_full_context_sql)
-        .expect("duckdb prepare");
+    let mut stmt = conn.prepare(duck_full_context_sql).expect("duckdb prepare");
     let mut rows = stmt.query([]).expect("duckdb query");
     let column_count = rows.as_ref().expect("statement reference").column_count();
     let mut duck_rows = Vec::new();
@@ -421,9 +413,7 @@ fn debug_random_case_104() {
     println!("duck beta q_rn rows: {:?}", duck_rows);
 
     let tie_sql = "SELECT id, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY quantity) AS q_rn FROM massive_correctness WHERE id <= 293 AND tenant = 'beta' AND quantity = 330 ORDER BY q_rn";
-    let ours = executor
-        .query(tie_sql)
-        .expect("satori tie query failed");
+    let ours = executor.query(tie_sql).expect("satori tie query failed");
     println!("ours beta tie rows:\n{}", ours);
 
     let conn = fixture.duckdb();
@@ -448,9 +438,7 @@ fn debug_random_case_104() {
 
     let duck_full_context_sql = "SELECT id, quantity, price, rn, running_qty FROM (SELECT id, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY created_at) AS rn, SUM(quantity) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_qty FROM massive_correctness WHERE id <= 293 AND tenant = 'beta') WHERE quantity = 330 ORDER BY id";
     let conn = fixture.duckdb();
-    let mut stmt = conn
-        .prepare(duck_full_context_sql)
-        .expect("duckdb prepare");
+    let mut stmt = conn.prepare(duck_full_context_sql).expect("duckdb prepare");
     let mut rows = stmt.query([]).expect("duckdb query");
     let column_count = rows.as_ref().expect("statement reference").column_count();
     let mut duck_rows = Vec::new();

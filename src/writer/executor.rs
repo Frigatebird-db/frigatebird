@@ -295,6 +295,16 @@ impl WorkerContext {
             return;
         }
 
+        // Phase 1: Persist all data pages to disk (WAL-free durability for the page data)
+        for prepared in &staged {
+            if let Err(err) = persist_staged(prepared) {
+                eprintln!("writer: failed to persist allocation: {err}");
+                // If persistence fails, we should probably abort the commit to avoid corruption.
+                // For now, we return, effectively dropping the update (and losing data if WAL is acked).
+                return;
+            }
+        }
+
         let metadata_updates: Vec<MetadataUpdate> = staged
             .iter()
             .map(|prepared| MetadataUpdate {
@@ -311,6 +321,7 @@ impl WorkerContext {
             })
             .collect();
 
+        // Phase 2: Commit metadata (atomic switch)
         let descriptors = self.metadata.commit(table, metadata_updates);
         if descriptors.len() != staged.len() {
             eprintln!(
@@ -321,11 +332,8 @@ impl WorkerContext {
             return;
         }
 
+        // Phase 3: Update in-memory cache
         for (prepared, descriptor) in staged.into_iter().zip(descriptors.into_iter()) {
-            if let Err(err) = persist_allocation(&prepared, &descriptor) {
-                eprintln!("writer: failed to persist allocation: {err}");
-                continue;
-            }
             let mut page = prepared.page;
             page.page.page_metadata = descriptor.id.clone();
             self.page_handler
@@ -514,15 +522,16 @@ impl WorkerContext {
                 None => continue,
             };
             let mut updated = (*page_arc).clone();
-            for row in rows.iter().take(take) {
-                let value = row.get(idx).map(|v| v.as_str()).unwrap_or_default();
-                updated.mutate_disk_page(
-                    |disk_page| {
+            updated.mutate_disk_page(
+                |disk_page| {
+                    for row in rows.iter().take(take) {
+                        let value = row.get(idx).map(|v| v.as_str()).unwrap_or_default();
                         disk_page.add_entry(Entry::new(value));
-                    },
-                    column.data_type,
-                );
-            }
+                    }
+                },
+                column.data_type,
+            );
+
             let disk_page = updated.page.as_disk_page();
             let serialized = match bincode::serialize(&disk_page) {
                 Ok(bytes) => bytes,
@@ -587,6 +596,9 @@ impl WorkerContext {
             .map(|col| PageCacheEntryUncompressed::from_disk_page(Page::new(), col.data_type))
             .collect();
 
+        // Optimize: Convert to disk pages once
+        let mut disk_pages: Vec<Page> = column_pages.iter().map(|p| p.as_disk_page()).collect();
+
         for row in rows.iter() {
             if row.len() != columns.len() {
                 eprintln!(
@@ -596,14 +608,16 @@ impl WorkerContext {
                 return;
             }
             for (idx, value) in row.iter().enumerate() {
-                if let Some(page) = column_pages.get_mut(idx) {
-                    page.mutate_disk_page(
-                        |disk_page| {
-                            disk_page.add_entry(Entry::new(value));
-                        },
-                        columns[idx].data_type,
-                    );
+                if let Some(disk_page) = disk_pages.get_mut(idx) {
+                    disk_page.add_entry(Entry::new(value));
                 }
+            }
+        }
+
+        // Convert back to columnar format
+        for (idx, disk_page) in disk_pages.into_iter().enumerate() {
+            if let Some(page) = column_pages.get_mut(idx) {
+                page.replace_with_disk_page(disk_page, columns[idx].data_type);
             }
         }
 
@@ -1122,11 +1136,11 @@ fn run_worker(mut ctx: WorkerContext, shutdown_flag: Arc<AtomicBool>) {
     }
 }
 
-fn persist_allocation(prepared: &StagedColumn, descriptor: &PageDescriptor) -> io::Result<()> {
+fn persist_staged(prepared: &StagedColumn) -> io::Result<()> {
     let page_io = PageIO {};
     page_io.write_to_path(
-        &descriptor.disk_path,
-        descriptor.offset,
+        &prepared.disk_path,
+        prepared.offset,
         prepared.serialized.clone(),
     )
 }
