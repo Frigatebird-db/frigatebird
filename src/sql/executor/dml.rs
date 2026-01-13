@@ -10,10 +10,12 @@ use crate::sql::executor::helpers::{
     table_with_joins_to_name,
 };
 use crate::sql::executor::physical_evaluator::filter_supported;
+use crate::sql::executor::batch::ColumnarBatch;
 use crate::sql::executor::scan_stream::merge_stream_to_batch;
 use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
 use crate::sql::executor::values::compare_strs;
 use crate::sql::planner::ExpressionPlanner;
+use crate::pipeline::operators::{FilterOperator, PipelineOperator};
 use crate::sql::types::DataType;
 use crate::writer::{ColumnUpdate, UpdateJob, UpdateOp};
 use sqlparser::ast::{
@@ -369,8 +371,8 @@ impl SqlExecutor {
         let selection_applied_in_scan =
             has_selection && can_use_physical_filter && !has_row_ids;
         if has_selection && !selection_applied_in_scan {
-            batch = self.apply_filter_expr(
-                batch,
+            let mut filter = FilterOperator::new(
+                self,
                 &selection_expr,
                 vectorized_selection_expr,
                 &catalog,
@@ -378,7 +380,9 @@ impl SqlExecutor {
                 &columns,
                 &column_ordinals,
                 &column_types,
-            )?;
+            );
+            let mut results = filter.execute(batch)?;
+            batch = results.pop().unwrap_or_else(ColumnarBatch::new);
         }
 
         let mut matching_rows = batch.row_ids;
@@ -570,8 +574,8 @@ impl SqlExecutor {
         let selection_applied_in_scan =
             has_selection && can_use_physical_filter && !has_row_ids;
         if has_selection && !selection_applied_in_scan {
-            batch = self.apply_filter_expr(
-                batch,
+            let mut filter = FilterOperator::new(
+                self,
                 &selection_expr,
                 vectorized_selection_expr,
                 &catalog,
@@ -579,7 +583,9 @@ impl SqlExecutor {
                 &columns,
                 &column_ordinals,
                 &column_types,
-            )?;
+            );
+            let mut results = filter.execute(batch)?;
+            batch = results.pop().unwrap_or_else(ColumnarBatch::new);
         }
 
         let mut matching_rows = batch.row_ids;

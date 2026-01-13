@@ -148,7 +148,7 @@ pub(super) enum WindowFunctionKind {
 }
 
 #[derive(Clone)]
-pub(super) struct WindowFunctionPlan {
+pub(crate) struct WindowFunctionPlan {
     pub(super) key: String,
     pub(super) kind: WindowFunctionKind,
     pub(super) partition_by: Vec<Expr>,
@@ -905,7 +905,7 @@ pub(super) fn ensure_common_partition(
     Ok(reference)
 }
 
-pub(super) struct WindowOperator<'a, I>
+pub(crate) struct WindowOperator<'a, I>
 where
     I: Iterator<Item = ColumnarBatch>,
 {

@@ -74,7 +74,7 @@ fn build_distinct_key(
     DistinctKey { values }
 }
 
-pub(super) fn deduplicate_batches(
+pub(crate) fn deduplicate_batches(
     batches: Vec<ColumnarBatch>,
     column_count: usize,
 ) -> Vec<ColumnarBatch> {
@@ -103,7 +103,7 @@ pub(super) fn deduplicate_batches(
     deduped
 }
 
-pub(super) fn chunk_batch(batch: &ColumnarBatch, chunk_size: usize) -> Vec<ColumnarBatch> {
+pub(crate) fn chunk_batch(batch: &ColumnarBatch, chunk_size: usize) -> Vec<ColumnarBatch> {
     if batch.num_rows == 0 {
         return Vec::new();
     }
@@ -120,7 +120,7 @@ pub(super) fn chunk_batch(batch: &ColumnarBatch, chunk_size: usize) -> Vec<Colum
     chunks
 }
 
-pub(super) fn merge_batches(mut batches: Vec<ColumnarBatch>) -> ColumnarBatch {
+pub(crate) fn merge_batches(mut batches: Vec<ColumnarBatch>) -> ColumnarBatch {
     if batches.is_empty() {
         return ColumnarBatch::new();
     }

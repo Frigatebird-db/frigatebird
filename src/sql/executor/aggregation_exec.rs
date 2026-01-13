@@ -6,99 +6,20 @@ use super::grouping_helpers::{evaluate_group_keys_on_batch, evaluate_having};
 use super::helpers::{parse_limit, parse_offset};
 use super::ordering::{OrderClause, OrderKey, build_group_order_key, compare_order_keys};
 use super::projection_helpers::materialize_columns;
-use super::scan_stream::merge_stream_to_batch;
 use super::aggregation_helpers::{
     ensure_aggregate_plan_for_expr, find_group_expr_index, literal_value,
 };
 use super::{SelectResult, SqlExecutionError, SqlExecutor, rows_to_batch};
 use super::executor_types::{AggregatedRow, GroupKey, VectorAggregationOutput};
+use super::batch::ColumnarBatch;
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
-use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
 use sqlparser::ast::{Expr, Offset};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 impl SqlExecutor {
-    pub(super) fn execute_vectorized_aggregation(
-        &self,
-        table: &str,
-        catalog: &TableCatalog,
-        columns: &[ColumnCatalog],
-        aggregate_plan: &AggregateProjectionPlan,
-        group_exprs: &[Expr],
-        required_ordinals: &BTreeSet<usize>,
-        selection_expr: Option<&Expr>,
-        selection_physical_expr: Option<&PhysicalExpr>,
-        selection_applied_in_scan: bool,
-        column_ordinals: &HashMap<String, usize>,
-        column_types: &HashMap<String, DataType>,
-        prefer_exact_numeric: bool,
-        result_columns: Vec<String>,
-        limit_expr: Option<Expr>,
-        offset_expr: Option<Offset>,
-        having: Option<&Expr>,
-        qualify_expr: Option<&Expr>,
-        order_clauses: &[OrderClause],
-        distinct_flag: bool,
-        row_ids: Option<Vec<u64>>,
-    ) -> Result<SelectResult, SqlExecutionError> {
-        let mut aggregated_rows = self.execute_grouping_set_aggregation_rows(
-            table,
-            catalog,
-            columns,
-            aggregate_plan,
-            group_exprs,
-            required_ordinals,
-            selection_expr,
-            selection_physical_expr,
-            selection_applied_in_scan,
-            column_ordinals,
-            column_types,
-            prefer_exact_numeric,
-            having,
-            qualify_expr,
-            order_clauses,
-            None,
-            row_ids,
-        )?;
-
-        if distinct_flag {
-            let mut seen: HashSet<Vec<Option<String>>> = HashSet::new();
-            aggregated_rows.retain(|row| seen.insert(row.values.clone()));
-        }
-
-        if !order_clauses.is_empty() {
-            aggregated_rows.sort_unstable_by(|left, right| {
-                compare_order_keys(&left.order_key, &right.order_key, order_clauses)
-            });
-        }
-
-        let offset = parse_offset(offset_expr)?;
-        let limit = parse_limit(limit_expr)?;
-        let start_idx = offset.min(aggregated_rows.len());
-        let end_idx = if let Some(limit) = limit {
-            start_idx.saturating_add(limit).min(aggregated_rows.len())
-        } else {
-            aggregated_rows.len()
-        };
-
-        let final_rows: Vec<Vec<Option<String>>> = aggregated_rows[start_idx..end_idx]
-            .iter()
-            .map(|row| row.values.clone())
-            .collect();
-        let batch = rows_to_batch(final_rows);
-        let batches = if batch.num_rows == 0 {
-            Vec::new()
-        } else {
-            vec![batch]
-        };
-
-        Ok(SelectResult {
-            columns: result_columns,
-            batches,
-        })
-    }
-
+    /*
+    // Legacy scan-driven aggregation entrypoint (unused after pipeline refactor).
     pub(super) fn execute_grouping_set_aggregation_rows(
         &self,
         table: &str,
@@ -130,8 +51,8 @@ impl SqlExecutor {
 
         if !selection_applied_in_scan {
             if let Some(expr) = selection_expr {
-                batch = self.apply_filter_expr(
-                    batch,
+                let mut filter = FilterOperator::new(
+                    self,
                     expr,
                     selection_physical_expr,
                     catalog,
@@ -139,11 +60,49 @@ impl SqlExecutor {
                     columns,
                     column_ordinals,
                     column_types,
-                )?;
+                );
+                let mut results = filter.execute(batch)?;
+                batch = results.pop().unwrap_or_else(ColumnarBatch::new);
             }
         }
 
-        let group_keys = evaluate_group_keys_on_batch(group_exprs, &batch, catalog)?;
+        self.execute_grouping_set_aggregation_rows_from_batch(
+            &batch,
+            table,
+            catalog,
+            columns,
+            aggregate_plan,
+            group_exprs,
+            required_ordinals,
+            column_ordinals,
+            column_types,
+            prefer_exact_numeric,
+            having,
+            qualify_expr,
+            order_clauses,
+            masked_exprs,
+        )
+    }
+    */
+
+    pub(crate) fn execute_grouping_set_aggregation_rows_from_batch(
+        &self,
+        batch: &ColumnarBatch,
+        table: &str,
+        catalog: &TableCatalog,
+        columns: &[ColumnCatalog],
+        aggregate_plan: &AggregateProjectionPlan,
+        group_exprs: &[Expr],
+        required_ordinals: &BTreeSet<usize>,
+        column_ordinals: &HashMap<String, usize>,
+        column_types: &HashMap<String, DataType>,
+        prefer_exact_numeric: bool,
+        having: Option<&Expr>,
+        qualify_expr: Option<&Expr>,
+        order_clauses: &[OrderClause],
+        masked_exprs: Option<&[Expr]>,
+    ) -> Result<Vec<AggregatedRow>, SqlExecutionError> {
+        let group_keys = evaluate_group_keys_on_batch(group_exprs, batch, catalog)?;
 
         let mut seen_group_order: HashSet<GroupKey> = HashSet::new();
         let mut group_order: Vec<GroupKey> = Vec::new();
@@ -251,5 +210,51 @@ impl SqlExecutor {
         }
 
         Ok(aggregated_rows)
+    }
+
+    pub(crate) fn finalize_aggregation_rows(
+        &self,
+        mut aggregated_rows: Vec<AggregatedRow>,
+        order_clauses: &[OrderClause],
+        distinct_flag: bool,
+        limit_expr: Option<Expr>,
+        offset_expr: Option<Offset>,
+        result_columns: Vec<String>,
+    ) -> Result<SelectResult, SqlExecutionError> {
+        if distinct_flag {
+            let mut seen: HashSet<Vec<Option<String>>> = HashSet::new();
+            aggregated_rows.retain(|row| seen.insert(row.values.clone()));
+        }
+
+        if !order_clauses.is_empty() {
+            aggregated_rows.sort_unstable_by(|left, right| {
+                compare_order_keys(&left.order_key, &right.order_key, order_clauses)
+            });
+        }
+
+        let offset = parse_offset(offset_expr)?;
+        let limit = parse_limit(limit_expr)?;
+        let start_idx = offset.min(aggregated_rows.len());
+        let end_idx = if let Some(limit) = limit {
+            start_idx.saturating_add(limit).min(aggregated_rows.len())
+        } else {
+            aggregated_rows.len()
+        };
+
+        let final_rows: Vec<Vec<Option<String>>> = aggregated_rows[start_idx..end_idx]
+            .iter()
+            .map(|row| row.values.clone())
+            .collect();
+        let batch = rows_to_batch(final_rows);
+        let batches = if batch.num_rows == 0 {
+            Vec::new()
+        } else {
+            vec![batch]
+        };
+
+        Ok(SelectResult {
+            columns: result_columns,
+            batches,
+        })
     }
 }

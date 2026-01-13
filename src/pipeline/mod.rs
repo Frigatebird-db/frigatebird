@@ -1,4 +1,5 @@
 pub mod builder;
+pub mod operators;
 pub mod pattern_matching;
 pub mod types;
 

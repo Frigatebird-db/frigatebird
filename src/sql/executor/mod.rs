@@ -25,10 +25,9 @@ mod window_helpers;
 
 use self::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
 use executor_types::{
-    AggregatedRow, GroupByInfo, GroupKey, GroupingSetPlan, ProjectionItem, ProjectionPlan,
-    VectorAggregationOutput,
+    GroupByInfo, GroupKey, GroupingSetPlan, ProjectionItem, VectorAggregationOutput,
 };
-use executor_utils::{chunk_batch, deduplicate_batches, merge_batches, rows_to_batch};
+use executor_utils::{rows_to_batch};
 use self::spill::SpillManager;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
@@ -82,9 +81,14 @@ use helpers::{
     parse_limit, parse_offset, table_with_joins_to_name,
 };
 use ordering::{
-    MergeOperator, NullsPlacement, OrderClause, build_group_order_key,
-    compare_order_keys, sort_batch_in_memory,
+    MergeOperator, build_group_order_key, compare_order_keys,
 };
+
+pub(crate) use aggregates::AggregateProjectionPlan;
+pub(crate) use executor_types::{AggregatedRow, ProjectionPlan};
+pub(crate) use executor_utils::{chunk_batch, deduplicate_batches, merge_batches};
+pub(crate) use ordering::{NullsPlacement, OrderClause, sort_batch_in_memory};
+pub(crate) use window_helpers::{WindowFunctionPlan, WindowOperator};
 use physical_evaluator::PhysicalEvaluator;
 use projection_helpers::{build_projection, materialize_columns};
 use scan_stream::{
@@ -214,7 +218,7 @@ impl fmt::Display for SelectResult {
 
 
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
-const WINDOW_BATCH_CHUNK_SIZE: usize = 1_024;
+pub(crate) const WINDOW_BATCH_CHUNK_SIZE: usize = 1_024;
 const SORT_OUTPUT_BATCH_SIZE: usize = 1_024;
 
 static SQL_EXECUTOR_WAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -389,7 +393,7 @@ impl SqlExecutor {
 
     // select.rs and select_exec.rs provide the SELECT flow.
 
-    fn build_projection_batch(
+    pub(crate) fn build_projection_batch(
         &self,
         batch: &ColumnarBatch,
         projection_plan: &ProjectionPlan,
@@ -433,7 +437,7 @@ impl SqlExecutor {
         Ok(batch.filter_by_bitmap(&bitmap))
     }
 
-    fn apply_filter_expr(
+    pub(crate) fn apply_filter_expr(
         &self,
         batch: ColumnarBatch,
         expr: &Expr,
@@ -491,7 +495,7 @@ impl SqlExecutor {
         }
     }
 
-    fn execute_sort<I>(
+    pub(crate) fn execute_sort<I>(
         &self,
         batches: I,
         clauses: &[OrderClause],
@@ -538,7 +542,7 @@ impl SqlExecutor {
         Ok(merged_batches)
     }
 
-    fn apply_limit_offset<I>(
+    pub(crate) fn apply_limit_offset<I>(
         &self,
         batches: I,
         offset: usize,

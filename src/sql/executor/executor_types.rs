@@ -2,7 +2,7 @@ use super::ordering::OrderKey;
 use sqlparser::ast::Expr;
 use std::collections::BTreeSet;
 
-pub(super) struct ProjectionPlan {
+pub(crate) struct ProjectionPlan {
     pub(super) headers: Vec<String>,
     pub(super) items: Vec<ProjectionItem>,
     pub(super) required_ordinals: BTreeSet<usize>,
@@ -40,7 +40,7 @@ pub(super) struct GroupingSetPlan {
 }
 
 #[derive(Clone)]
-pub(super) struct AggregatedRow {
+pub(crate) struct AggregatedRow {
     pub(super) order_key: OrderKey,
     pub(super) values: Vec<Option<String>>,
 }

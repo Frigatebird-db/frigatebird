@@ -1,7 +1,8 @@
 use super::{
-    NullsPlacement, OrderClause, SelectResult, SqlExecutionError, SqlExecutor,
-    chunk_batch, deduplicate_batches, merge_batches, parse_limit, parse_offset,
+    OrderClause, SelectResult, SqlExecutionError, SqlExecutor, merge_batches,
+    parse_limit, parse_offset,
 };
+use super::batch::ColumnarBatch;
 use super::executor_types::ProjectionPlan;
 use super::scan_stream::merge_stream_to_batch;
 use super::window_helpers::{
@@ -9,6 +10,10 @@ use super::window_helpers::{
     rewrite_window_expressions,
 };
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
+use crate::pipeline::operators::{
+    DistinctOperator, FilterOperator, LimitOperator, PipelineOperator, ProjectOperator,
+    SortOperator, WindowOperator as PipelineWindowOperator,
+};
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
 use sqlparser::ast::{Expr, Offset};
@@ -46,8 +51,8 @@ impl SqlExecutor {
 
         if !selection_applied_in_scan {
             if let Some(expr) = selection_expr {
-                batch = self.apply_filter_expr(
-                    batch,
+                let mut filter = FilterOperator::new(
+                    self,
                     expr,
                     selection_physical_expr,
                     catalog,
@@ -55,7 +60,9 @@ impl SqlExecutor {
                     columns,
                     column_ordinals,
                     column_types,
-                )?;
+                );
+                let mut results = filter.execute(batch)?;
+                batch = results.pop().unwrap_or_else(ColumnarBatch::new);
             }
         }
 
@@ -67,8 +74,8 @@ impl SqlExecutor {
         }
 
         let mut processed_batch = if let Some(expr) = qualify_expr {
-            let filtered = self.apply_filter_expr(
-                batch,
+            let mut filter = FilterOperator::new(
+                self,
                 expr,
                 None,
                 catalog,
@@ -76,7 +83,9 @@ impl SqlExecutor {
                 columns,
                 column_ordinals,
                 column_types,
-            )?;
+            );
+            let mut results = filter.execute(batch)?;
+            let filtered = results.pop().unwrap_or_else(ColumnarBatch::new);
             if filtered.num_rows == 0 {
                 return Ok(SelectResult {
                     columns: result_columns,
@@ -89,27 +98,31 @@ impl SqlExecutor {
         };
 
         if !order_clauses.is_empty() {
-            let sorted_batches =
-                self.execute_sort(std::iter::once(processed_batch), order_clauses, catalog)?;
+            let mut sorter = SortOperator::new(self, order_clauses, catalog);
+            let sorted_batches = sorter.execute(processed_batch)?;
             processed_batch = merge_batches(sorted_batches);
         }
 
-        let final_batch = self.build_projection_batch(&processed_batch, projection_plan, catalog)?;
+        let mut project = ProjectOperator::new(self, projection_plan, catalog);
+        let mut results = project.execute(processed_batch)?;
+        let final_batch = results.pop().unwrap_or_else(ColumnarBatch::new);
 
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
 
         if distinct_flag {
-            let deduped = deduplicate_batches(vec![final_batch], projection_plan.items.len());
-            let limited_batches = self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
+            let mut distinct = DistinctOperator::new(projection_plan.items.len());
+            let deduped = distinct.execute(final_batch)?;
+            let mut limiter = LimitOperator::new(self, offset, limit);
+            let limited_batches = limiter.execute_batches(deduped)?;
             return Ok(SelectResult {
                 columns: result_columns,
                 batches: limited_batches,
             });
         }
 
-        let limited_batches =
-            self.apply_limit_offset(std::iter::once(final_batch), offset, limit)?;
+        let mut limiter = LimitOperator::new(self, offset, limit);
+        let limited_batches = limiter.execute_batches(vec![final_batch])?;
         Ok(SelectResult {
             columns: result_columns,
             batches: limited_batches,
@@ -186,8 +199,8 @@ impl SqlExecutor {
 
         if !selection_applied_in_scan {
             if let Some(expr) = selection_expr {
-                batch = self.apply_filter_expr(
-                    batch,
+                let mut filter = FilterOperator::new(
+                    self,
                     expr,
                     selection_physical_expr,
                     catalog,
@@ -195,7 +208,9 @@ impl SqlExecutor {
                     columns,
                     column_ordinals,
                     column_types,
-                )?;
+                );
+                let mut results = filter.execute(batch)?;
+                batch = results.pop().unwrap_or_else(ColumnarBatch::new);
                 if batch.num_rows == 0 {
                     return Ok(SelectResult {
                         columns: result_columns,
@@ -205,29 +220,9 @@ impl SqlExecutor {
             }
         }
 
-        if !partition_exprs.is_empty() {
-            let partition_clauses: Vec<OrderClause> = partition_exprs
-                .iter()
-                .map(|expr| OrderClause {
-                    expr: expr.clone(),
-                    descending: false,
-                    nulls: NullsPlacement::Default,
-                })
-                .collect();
-            batch = super::ordering::sort_batch_in_memory(&batch, &partition_clauses, catalog)?;
-        }
-
-        let chunks = chunk_batch(&batch, super::WINDOW_BATCH_CHUNK_SIZE);
-        let mut operator = super::window_helpers::WindowOperator::new(
-            chunks.into_iter(),
-            window_plans,
-            partition_exprs,
-            catalog,
-        );
-        let mut processed_batches = Vec::new();
-        while let Some(processed) = operator.next_batch()? {
-            processed_batches.push(processed);
-        }
+        let mut window_operator =
+            PipelineWindowOperator::new(window_plans, partition_exprs, catalog);
+        let processed_batches = window_operator.execute(batch)?;
         if processed_batches.is_empty() {
             return Ok(SelectResult {
                 columns: result_columns,
@@ -247,30 +242,30 @@ impl SqlExecutor {
         }
 
         if !final_order_clauses.is_empty() {
-            let sorted_batches = self.execute_sort(
-                std::iter::once(processed_batch),
-                &final_order_clauses,
-                catalog,
-            )?;
+            let mut sorter = SortOperator::new(self, &final_order_clauses, catalog);
+            let sorted_batches = sorter.execute(processed_batch)?;
             processed_batch = merge_batches(sorted_batches);
         }
 
-        let final_batch =
-            self.build_projection_batch(&processed_batch, &projection_plan, catalog)?;
+        let mut project = ProjectOperator::new(self, &projection_plan, catalog);
+        let mut results = project.execute(processed_batch)?;
+        let final_batch = results.pop().unwrap_or_else(ColumnarBatch::new);
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
 
         if distinct_flag {
-            let deduped = deduplicate_batches(vec![final_batch], projection_plan.items.len());
-            let limited_batches = self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
+            let mut distinct = DistinctOperator::new(projection_plan.items.len());
+            let deduped = distinct.execute(final_batch)?;
+            let mut limiter = LimitOperator::new(self, offset, limit);
+            let limited_batches = limiter.execute_batches(deduped)?;
             return Ok(SelectResult {
                 columns: result_columns,
                 batches: limited_batches,
             });
         }
 
-        let limited_batches =
-            self.apply_limit_offset(std::iter::once(final_batch), offset, limit)?;
+        let mut limiter = LimitOperator::new(self, offset, limit);
+        let limited_batches = limiter.execute_batches(vec![final_batch])?;
         Ok(SelectResult {
             columns: result_columns,
             batches: limited_batches,

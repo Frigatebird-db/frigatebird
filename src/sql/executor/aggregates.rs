@@ -575,7 +575,7 @@ fn numeric_value(page: &ColumnarPage, idx: usize) -> Option<f64> {
     }
 }
 
-pub(super) struct AggregateProjectionPlan {
+pub(crate) struct AggregateProjectionPlan {
     pub(super) outputs: Vec<AggregateProjection>,
     pub(super) required_ordinals: BTreeSet<usize>,
     pub(super) headers: Vec<String>,

@@ -15,15 +15,17 @@ use crate::sql::executor::helpers::{
     collect_expr_column_ordinals, column_name_from_expr, object_name_to_string, parse_limit,
     parse_offset,
 };
-use crate::sql::executor::ordering::{OrderClause, compare_order_keys};
+use crate::sql::executor::ordering::OrderClause;
 use crate::sql::executor::physical_evaluator::filter_supported;
 use crate::sql::executor::projection_helpers::build_projection;
-use crate::sql::executor::rows_to_batch;
+use crate::sql::executor::batch::ColumnarBatch;
 use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
+use crate::sql::executor::scan_stream::merge_stream_to_batch;
 use crate::sql::executor::window_helpers::{
     collect_window_function_plans, collect_window_plans_from_expr, ensure_common_partition,
     plan_order_clauses,
 };
+use crate::pipeline::operators::{AggregateOperator, FilterOperator, PipelineOperator};
 use crate::sql::planner::ExpressionPlanner;
 use crate::sql::types::DataType;
 use sqlparser::ast::{Expr, GroupByExpr, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, TableFactor, Value};
@@ -447,21 +449,43 @@ impl SqlExecutor {
             );
         }
 
+        let stream = self.build_scan_stream(
+            &table_name,
+            &columns,
+            &required_ordinals,
+            scan_selection_expr,
+            row_ids.clone(),
+        )?;
+        let mut base_batch = merge_stream_to_batch(stream)?;
+        if has_selection && !selection_applied_in_scan {
+            if let Some(expr) = selection_expr_full {
+                let mut filter = FilterOperator::new(
+                    self,
+                    expr,
+                    scan_selection_expr,
+                    &catalog,
+                    &table_name,
+                    &columns,
+                    &column_ordinals,
+                    &column_types,
+                );
+                let mut results = filter.execute(base_batch)?;
+                base_batch = results.pop().unwrap_or_else(ColumnarBatch::new);
+            }
+        }
+
         if let Some(group_exprs) = simple_group_exprs.clone() {
             let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");
             let prefer_exact_numeric = group_strategy
                 .as_ref()
                 .map_or(false, GroupByStrategy::prefer_exact_numeric);
-            return self.execute_vectorized_aggregation(
+            let aggregate_operator = AggregateOperator::new(
+                self,
                 &table_name,
                 &catalog,
                 &columns,
                 &aggregate_plan,
-                &group_exprs,
                 &required_ordinals,
-                selection_expr_full,
-                scan_selection_expr,
-                selection_applied_in_scan,
                 &column_ordinals,
                 &column_types,
                 prefer_exact_numeric,
@@ -472,8 +496,8 @@ impl SqlExecutor {
                 qualify_expr.as_ref(),
                 &order_clauses,
                 distinct_flag,
-                row_ids.clone(),
             );
+            return aggregate_operator.execute_simple_from_batch(&base_batch, &group_exprs);
         }
 
         if needs_aggregation {
@@ -481,87 +505,50 @@ impl SqlExecutor {
             let prefer_exact_numeric = group_strategy
                 .as_ref()
                 .map_or(false, GroupByStrategy::prefer_exact_numeric);
+            let aggregate_operator = AggregateOperator::new(
+                self,
+                &table_name,
+                &catalog,
+                &columns,
+                &aggregate_plan,
+                &required_ordinals,
+                &column_ordinals,
+                &column_types,
+                prefer_exact_numeric,
+                result_columns.clone(),
+                limit_expr.clone(),
+                offset_expr.clone(),
+                having.as_ref(),
+                qualify_expr.as_ref(),
+                &order_clauses,
+                distinct_flag,
+            );
             let mut aggregated_rows: Vec<AggregatedRow> = Vec::new();
 
             if let Some(group_info) = &group_by_info {
                 for grouping in &group_info.sets {
-                    aggregated_rows.extend(self.execute_grouping_set_aggregation_rows(
-                        &table_name,
-                        &catalog,
-                        &columns,
-                        &aggregate_plan,
-                        &grouping.expressions,
-                        &required_ordinals,
-                        selection_expr_full,
-                        scan_selection_expr,
-                        selection_applied_in_scan,
-                        &column_ordinals,
-                        &column_types,
-                        prefer_exact_numeric,
-                        having.as_ref(),
-                        qualify_expr.as_ref(),
-                        &order_clauses,
-                        Some(grouping.masked_exprs.as_slice()),
-                        row_ids.clone(),
-                    )?);
+                    aggregated_rows.extend(
+                        aggregate_operator.execute_grouping_set_rows_from_batch(
+                            &base_batch,
+                            &grouping.expressions,
+                            Some(grouping.masked_exprs.as_slice()),
+                        )?,
+                    );
                 }
             } else {
-                aggregated_rows.extend(self.execute_grouping_set_aggregation_rows(
-                    &table_name,
-                    &catalog,
-                    &columns,
-                    &aggregate_plan,
-                    &[],
-                    &required_ordinals,
-                    selection_expr_full,
-                    scan_selection_expr,
-                    selection_applied_in_scan,
-                    &column_ordinals,
-                    &column_types,
-                    prefer_exact_numeric,
-                    having.as_ref(),
-                    qualify_expr.as_ref(),
-                    &order_clauses,
-                    None,
-                    row_ids.clone(),
-                )?);
+                aggregated_rows.extend(
+                    aggregate_operator.execute_grouping_set_rows_from_batch(&base_batch, &[], None)?,
+                );
             }
 
-            if distinct_flag {
-                let mut seen: HashSet<Vec<Option<String>>> = HashSet::new();
-                aggregated_rows.retain(|row| seen.insert(row.values.clone()));
-            }
-
-            if !order_clauses.is_empty() {
-                aggregated_rows.sort_unstable_by(|left, right| {
-                    compare_order_keys(&left.order_key, &right.order_key, &order_clauses)
-                });
-            }
-
-            let offset = parse_offset(offset_expr)?;
-            let limit = parse_limit(limit_expr)?;
-            let start_idx = offset.min(aggregated_rows.len());
-            let end_idx = if let Some(limit) = limit {
-                start_idx.saturating_add(limit).min(aggregated_rows.len())
-            } else {
-                aggregated_rows.len()
-            };
-
-            let final_rows: Vec<Vec<Option<String>>> = aggregated_rows[start_idx..end_idx]
-                .iter()
-                .map(|row| row.values.clone())
-                .collect();
-            let batch = rows_to_batch(final_rows);
-            let batches = if batch.num_rows == 0 {
-                Vec::new()
-            } else {
-                vec![batch]
-            };
-
-            return Ok(SelectResult {
-                columns: result_columns,
-                batches,
-            });
+            return self.finalize_aggregation_rows(
+                aggregated_rows,
+                &order_clauses,
+                distinct_flag,
+                limit_expr.clone(),
+                offset_expr.clone(),
+                result_columns,
+            );
         }
 
         Err(SqlExecutionError::OperationFailed(

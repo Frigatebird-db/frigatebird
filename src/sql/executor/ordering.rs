@@ -10,14 +10,14 @@ use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub(super) struct OrderClause {
-    pub(super) expr: Expr,
-    pub(super) descending: bool,
-    pub(super) nulls: NullsPlacement,
+pub(crate) struct OrderClause {
+    pub(crate) expr: Expr,
+    pub(crate) descending: bool,
+    pub(crate) nulls: NullsPlacement,
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum NullsPlacement {
+pub(crate) enum NullsPlacement {
     Default,
     First,
     Last,
@@ -220,7 +220,7 @@ pub(super) fn build_order_keys_on_batch(
     Ok(keys)
 }
 
-pub(super) fn sort_batch_in_memory(
+pub(crate) fn sort_batch_in_memory(
     batch: &ColumnarBatch,
     clauses: &[OrderClause],
     catalog: &TableCatalog,
