@@ -10,9 +10,7 @@ use crate::sql::executor::helpers::{
     table_with_joins_to_name,
 };
 use crate::sql::executor::physical_evaluator::filter_supported;
-use crate::sql::executor::projection_helpers::materialize_columns;
 use crate::sql::executor::scan_stream::merge_stream_to_batch;
-use crate::sql::executor::{filter_rows_with_expr, refine_rows_with_vectorized_filter};
 use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
 use crate::sql::executor::values::compare_strs;
 use crate::sql::planner::ExpressionPlanner;
@@ -329,8 +327,7 @@ impl SqlExecutor {
         };
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
-        let mut selection_applied_in_scan = false;
-        let mut candidate_rows = if let Some(filters) = sort_key_filters {
+        let row_ids = if let Some(filters) = sort_key_filters {
             for column in &sort_columns {
                 let value = filters.get(&column.name).cloned().ok_or_else(|| {
                     SqlExecutionError::Unsupported(format!(
@@ -340,69 +337,56 @@ impl SqlExecutor {
                 })?;
                 key_values.push(value);
             }
-            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?
+            Some(self.locate_rows_by_sort_tuple(
+                &table_name,
+                &sort_columns,
+                &key_values,
+            )?)
         } else if let Some(prefixes) = sort_key_prefixes {
-            self.locate_rows_by_sort_prefixes(&table_name, &sort_columns, &prefixes)?
+            Some(self.locate_rows_by_sort_prefixes(
+                &table_name,
+                &sort_columns,
+                &prefixes,
+            )?)
         } else {
-            let stream = self.build_scan_stream(
-                &table_name,
-                &columns,
-                &required_ordinals,
-                if can_use_physical_filter {
-                    physical_selection_expr.as_ref()
-                } else {
-                    None
-                },
-                &column_ordinals,
-                catalog.rows_per_page_group,
-                None,
-            )?;
-            let batch = merge_stream_to_batch(stream)?;
-            selection_applied_in_scan = has_selection && can_use_physical_filter;
-            batch.row_ids
+            None
         };
-        if candidate_rows.is_empty() {
-            return Ok(());
-        }
 
-        candidate_rows.sort_unstable();
-        candidate_rows.dedup();
-
-        if has_selection && can_use_physical_filter && !selection_applied_in_scan {
-            if let Some(expr) = &physical_selection_expr {
-                candidate_rows = refine_rows_with_vectorized_filter(
-                    &self.page_handler,
-                    &table_name,
-                    &columns,
-                    expr,
-                    &column_ordinals,
-                    &candidate_rows,
-                    catalog.rows_per_page_group,
-                )?;
-            }
-        }
-        if has_selection && !can_use_physical_filter {
-            let materialized = materialize_columns(
-                &self.page_handler,
+        let has_row_ids = row_ids.is_some();
+        let vectorized_selection_expr = if can_use_physical_filter {
+            physical_selection_expr.as_ref()
+        } else {
+            None
+        };
+        let stream = self.build_scan_stream(
+            &table_name,
+            &columns,
+            &required_ordinals,
+            vectorized_selection_expr,
+            &column_ordinals,
+            catalog.rows_per_page_group,
+            row_ids,
+        )?;
+        let mut batch = merge_stream_to_batch(stream)?;
+        let selection_applied_in_scan =
+            has_selection && can_use_physical_filter && !has_row_ids;
+        if has_selection && !selection_applied_in_scan {
+            batch = self.apply_filter_expr(
+                batch,
+                &selection_expr,
+                vectorized_selection_expr,
+                &catalog,
                 &table_name,
                 &columns,
-                &required_ordinals,
-                &candidate_rows,
-            )?;
-            candidate_rows = filter_rows_with_expr(
-                &selection_expr,
-                &candidate_rows,
-                &materialized,
                 &column_ordinals,
                 &column_types,
-                false,
             )?;
         }
-        if candidate_rows.is_empty() {
+
+        let mut matching_rows = batch.row_ids;
+        if matching_rows.is_empty() {
             return Ok(());
         }
-
-        let mut matching_rows = candidate_rows;
         matching_rows.sort_unstable();
 
         for &row_idx in matching_rows.iter().rev() {
@@ -546,8 +530,7 @@ impl SqlExecutor {
         };
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
-        let mut selection_applied_in_scan = false;
-        let mut candidate_rows = if let Some(filters) = sort_key_filters {
+        let row_ids = if let Some(filters) = sort_key_filters {
             for column in &sort_columns {
                 let value = filters.get(&column.name).cloned().ok_or_else(|| {
                     SqlExecutionError::Unsupported(format!(
@@ -557,70 +540,56 @@ impl SqlExecutor {
                 })?;
                 key_values.push(value);
             }
-            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?
-        } else if let Some(prefixes) = sort_key_prefixes {
-            self.locate_rows_by_sort_prefixes(&table_name, &sort_columns, &prefixes)?
-        } else {
-            let stream = self.build_scan_stream(
+            Some(self.locate_rows_by_sort_tuple(
                 &table_name,
-                &columns,
-                &required_ordinals,
-                if can_use_physical_filter {
-                    physical_selection_expr.as_ref()
-                } else {
-                    None
-                },
-                &column_ordinals,
-                catalog.rows_per_page_group,
-                None,
-            )?;
-            let batch = merge_stream_to_batch(stream)?;
-            selection_applied_in_scan = has_selection && can_use_physical_filter;
-            batch.row_ids
+                &sort_columns,
+                &key_values,
+            )?)
+        } else if let Some(prefixes) = sort_key_prefixes {
+            Some(self.locate_rows_by_sort_prefixes(
+                &table_name,
+                &sort_columns,
+                &prefixes,
+            )?)
+        } else {
+            None
         };
 
-        if candidate_rows.is_empty() {
-            return Ok(());
-        }
-
-        candidate_rows.sort_unstable();
-        candidate_rows.dedup();
-
-        if has_selection && can_use_physical_filter && !selection_applied_in_scan {
-            if let Some(expr) = &physical_selection_expr {
-                candidate_rows = refine_rows_with_vectorized_filter(
-                    &self.page_handler,
-                    &table_name,
-                    &columns,
-                    expr,
-                    &column_ordinals,
-                    &candidate_rows,
-                    catalog.rows_per_page_group,
-                )?;
-            }
-        }
-        if has_selection && !can_use_physical_filter {
-            let materialized = materialize_columns(
-                &self.page_handler,
+        let has_row_ids = row_ids.is_some();
+        let vectorized_selection_expr = if can_use_physical_filter {
+            physical_selection_expr.as_ref()
+        } else {
+            None
+        };
+        let stream = self.build_scan_stream(
+            &table_name,
+            &columns,
+            &required_ordinals,
+            vectorized_selection_expr,
+            &column_ordinals,
+            catalog.rows_per_page_group,
+            row_ids,
+        )?;
+        let mut batch = merge_stream_to_batch(stream)?;
+        let selection_applied_in_scan =
+            has_selection && can_use_physical_filter && !has_row_ids;
+        if has_selection && !selection_applied_in_scan {
+            batch = self.apply_filter_expr(
+                batch,
+                &selection_expr,
+                vectorized_selection_expr,
+                &catalog,
                 &table_name,
                 &columns,
-                &required_ordinals,
-                &candidate_rows,
-            )?;
-            candidate_rows = filter_rows_with_expr(
-                &selection_expr,
-                &candidate_rows,
-                &materialized,
                 &column_ordinals,
                 &column_types,
-                false,
             )?;
         }
-        if candidate_rows.is_empty() {
+
+        let mut matching_rows = batch.row_ids;
+        if matching_rows.is_empty() {
             return Ok(());
         }
-
-        let mut matching_rows = candidate_rows;
         matching_rows.sort_unstable();
         matching_rows.dedup();
         for row_idx in matching_rows.into_iter().rev() {

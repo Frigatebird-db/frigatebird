@@ -1,4 +1,5 @@
 mod aggregates;
+mod aggregation_exec;
 pub mod batch;
 mod expressions;
 mod grouping_helpers;
@@ -1534,6 +1535,83 @@ impl SqlExecutor {
         distinct_flag: bool,
         row_ids: Option<Vec<u64>>,
     ) -> Result<SelectResult, SqlExecutionError> {
+        let mut aggregated_rows = self.execute_grouping_set_aggregation_rows(
+            table,
+            catalog,
+            columns,
+            aggregate_plan,
+            group_exprs,
+            required_ordinals,
+            selection_expr,
+            selection_physical_expr,
+            selection_applied_in_scan,
+            column_ordinals,
+            column_types,
+            prefer_exact_numeric,
+            having,
+            qualify_expr,
+            order_clauses,
+            None,
+            row_ids,
+        )?;
+
+        if distinct_flag {
+            let mut seen: HashSet<Vec<Option<String>>> = HashSet::new();
+            aggregated_rows.retain(|row| seen.insert(row.values.clone()));
+        }
+
+        if !order_clauses.is_empty() {
+            aggregated_rows.sort_unstable_by(|left, right| {
+                compare_order_keys(&left.order_key, &right.order_key, order_clauses)
+            });
+        }
+
+        let offset = parse_offset(offset_expr)?;
+        let limit = parse_limit(limit_expr)?;
+        let start_idx = offset.min(aggregated_rows.len());
+        let end_idx = if let Some(limit) = limit {
+            start_idx.saturating_add(limit).min(aggregated_rows.len())
+        } else {
+            aggregated_rows.len()
+        };
+
+        let final_rows: Vec<Vec<Option<String>>> = aggregated_rows[start_idx..end_idx]
+            .iter()
+            .map(|row| row.values.clone())
+            .collect();
+        let batch = rows_to_batch(final_rows);
+        let batches = if batch.num_rows == 0 {
+            Vec::new()
+        } else {
+            vec![batch]
+        };
+
+        return Ok(SelectResult {
+            columns: result_columns,
+            batches,
+        });
+    }
+
+    fn execute_grouping_set_aggregation_rows(
+        &self,
+        table: &str,
+        catalog: &TableCatalog,
+        columns: &[ColumnCatalog],
+        aggregate_plan: &AggregateProjectionPlan,
+        group_exprs: &[Expr],
+        required_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&Expr>,
+        selection_physical_expr: Option<&PhysicalExpr>,
+        selection_applied_in_scan: bool,
+        column_ordinals: &HashMap<String, usize>,
+        column_types: &HashMap<String, DataType>,
+        prefer_exact_numeric: bool,
+        having: Option<&Expr>,
+        qualify_expr: Option<&Expr>,
+        order_clauses: &[OrderClause],
+        masked_exprs: Option<&[Expr]>,
+        row_ids: Option<Vec<u64>>,
+    ) -> Result<Vec<AggregatedRow>, SqlExecutionError> {
         let stream = self.build_scan_stream(
             table,
             columns,
@@ -1573,6 +1651,27 @@ impl SqlExecutor {
         let mut group_expr_lookup: HashMap<String, usize> = HashMap::new();
         for (idx, expr) in group_exprs.iter().enumerate() {
             group_expr_lookup.insert(expr.to_string(), idx);
+        }
+
+        let row_ids = batch.row_ids.clone();
+        let materialized = materialize_columns(
+            &self.page_handler,
+            table,
+            columns,
+            required_ordinals,
+            &row_ids,
+        )?;
+        let mut group_rows: HashMap<GroupKey, Vec<u64>> = HashMap::new();
+        for (idx, key) in group_keys.iter().enumerate() {
+            let row_id = *row_ids.get(idx).ok_or_else(|| {
+                SqlExecutionError::OperationFailed("missing row id".into())
+            })?;
+            group_rows.entry(key.clone()).or_default().push(row_id);
+        }
+        if group_exprs.is_empty() && group_order.is_empty() {
+            let key = GroupKey::empty();
+            group_rows.insert(key.clone(), Vec::new());
+            group_order.push(key);
         }
 
         let mut aggregate_plans: Vec<AggregateFunctionPlan> = Vec::new();
@@ -1615,697 +1714,43 @@ impl SqlExecutor {
             });
         }
 
-        if let Some(expr) = having {
-            ensure_having_aggregate_plans(expr, &mut aggregate_plans, &mut aggregate_expr_lookup)?;
-        }
+        let mut aggregated_rows: Vec<AggregatedRow> = Vec::new();
+        let having_expr = having.cloned();
+        for key in group_order {
+            let rows = group_rows.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            let dataset = AggregateDataset {
+                rows,
+                materialized: &materialized,
+                column_ordinals,
+                column_types,
+                masked_exprs,
+                prefer_exact_numeric,
+            };
 
-        let state_template: Vec<AggregateState> = aggregate_plans
-            .iter()
-            .map(|plan| plan.initial_state())
-            .collect();
-        let mut hash_table: AggregationHashTable = HashMap::new();
-        let mut materialized_opt: Option<MaterializedColumns> = None;
-        let mut group_rows_opt: Option<HashMap<GroupKey, Vec<u64>>> = None;
-
-        if batch.num_rows > 0 {
-            if group_keys.len() != batch.num_rows {
-                return Err(SqlExecutionError::OperationFailed(
-                    "group key evaluation mismatch".into(),
-                ));
+            if !evaluate_having(&having_expr, &dataset)? {
+                continue;
             }
-
-            if !aggregate_plans.is_empty() {
-                for key in &group_keys {
-                    hash_table
-                        .entry(key.clone())
-                        .or_insert_with(|| state_template.clone());
-                }
-            }
-
-            if aggregate_plans.is_empty() {
-                for key in &group_keys {
-                    hash_table
-                        .entry(key.clone())
-                        .or_insert_with(|| state_template.clone());
-                }
-            } else {
-                for (slot_index, plan) in aggregate_plans.iter().enumerate() {
-                    match plan.kind {
-                        AggregateFunctionKind::CountStar => {
-                            vectorized_count_star_update(
-                                &mut hash_table,
-                                slot_index,
-                                &group_keys,
-                                &state_template,
-                            );
-                        }
-                        AggregateFunctionKind::CountExpr => {
-                            let expr = plan.arg.as_ref().ok_or_else(|| {
-                                SqlExecutionError::OperationFailed(
-                                    "COUNT expression missing argument".into(),
-                                )
-                            })?;
-                            match evaluate_expression_on_batch(expr, &batch, catalog) {
-                                Ok(values_page) => {
-                                    vectorized_count_value_update(
-                                        &mut hash_table,
-                                        slot_index,
-                                        &group_keys,
-                                        &values_page,
-                                        &state_template,
-                                    );
-                                }
-                                Err(SqlExecutionError::Unsupported(_)) => {
-                                    if materialized_opt.is_none() {
-                                        let materialized = materialize_columns(
-                                            &self.page_handler,
-                                            table,
-                                            columns,
-                                            required_ordinals,
-                                            &batch.row_ids,
-                                        )?;
-                                        materialized_opt = Some(materialized);
-                                    }
-                                    let materialized = materialized_opt.as_ref().ok_or_else(|| {
-                                        SqlExecutionError::OperationFailed(
-                                            "missing materialized columns".into(),
-                                        )
-                                    })?;
-                                    let dataset = AggregateDataset {
-                                        rows: &batch.row_ids,
-                                        materialized,
-                                        column_ordinals,
-                                        column_types,
-                                        masked_exprs: None,
-                                        prefer_exact_numeric,
-                                    };
-                                    for (idx, key) in group_keys.iter().enumerate() {
-                                        let row_id =
-                                            *batch.row_ids.get(idx).ok_or_else(|| {
-                                                SqlExecutionError::OperationFailed(
-                                                    "missing row id".into(),
-                                                )
-                                            })?;
-                                        let value = evaluate_row_expr(expr, row_id, &dataset)?;
-                                        if value.is_null() {
-                                            continue;
-                                        }
-                                        if let Some(AggregateState::Count(count)) =
-                                            ensure_state_vec(&mut hash_table, key, &state_template)
-                                                .get_mut(slot_index)
-                                        {
-                                            *count += 1;
-                                        }
-                                    }
-                                }
-                                Err(err) => return Err(err),
-                            }
-                        }
-                        AggregateFunctionKind::CountDistinct => {
-                            let expr = plan.arg.as_ref().ok_or_else(|| {
-                                SqlExecutionError::OperationFailed(
-                                    "COUNT DISTINCT expression missing argument".into(),
-                                )
-                            })?;
-                            match evaluate_expression_on_batch(expr, &batch, catalog) {
-                                Ok(values_page) => {
-                                    vectorized_count_distinct_update(
-                                        &mut hash_table,
-                                        slot_index,
-                                        &group_keys,
-                                        &values_page,
-                                        &state_template,
-                                    );
-                                }
-                                Err(SqlExecutionError::Unsupported(_)) => {
-                                    if materialized_opt.is_none() {
-                                        let materialized = materialize_columns(
-                                            &self.page_handler,
-                                            table,
-                                            columns,
-                                            required_ordinals,
-                                            &batch.row_ids,
-                                        )?;
-                                        materialized_opt = Some(materialized);
-                                    }
-                                    let materialized = materialized_opt.as_ref().ok_or_else(|| {
-                                        SqlExecutionError::OperationFailed(
-                                            "missing materialized columns".into(),
-                                        )
-                                    })?;
-                                    let dataset = AggregateDataset {
-                                        rows: &batch.row_ids,
-                                        materialized,
-                                        column_ordinals,
-                                        column_types,
-                                        masked_exprs: None,
-                                        prefer_exact_numeric,
-                                    };
-                                    for (idx, key) in group_keys.iter().enumerate() {
-                                        let row_id =
-                                            *batch.row_ids.get(idx).ok_or_else(|| {
-                                                SqlExecutionError::OperationFailed(
-                                                    "missing row id".into(),
-                                                )
-                                            })?;
-                                        let value = evaluate_row_expr(expr, row_id, &dataset)?;
-                                        if let Some(text) = value.into_option_string() {
-                                            if let Some(AggregateState::CountDistinct(values)) =
-                                                ensure_state_vec(
-                                                    &mut hash_table,
-                                                    key,
-                                                    &state_template,
-                                                )
-                                                .get_mut(slot_index)
-                                            {
-                                                values.insert(text);
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(err) => return Err(err),
-                            }
-                        }
-                        AggregateFunctionKind::Sum => {
-                            let expr = plan.arg.as_ref().ok_or_else(|| {
-                                SqlExecutionError::OperationFailed(
-                                    "SUM expression missing argument".into(),
-                                )
-                            })?;
-                            match evaluate_expression_on_batch(expr, &batch, catalog) {
-                                Ok(values_page) => {
-                                    vectorized_sum_update(
-                                        &mut hash_table,
-                                        slot_index,
-                                        &group_keys,
-                                        &values_page,
-                                        &state_template,
-                                    );
-                                }
-                                Err(SqlExecutionError::Unsupported(_)) => {
-                                    if materialized_opt.is_none() {
-                                        let materialized = materialize_columns(
-                                            &self.page_handler,
-                                            table,
-                                            columns,
-                                            required_ordinals,
-                                            &batch.row_ids,
-                                        )?;
-                                        materialized_opt = Some(materialized);
-                                    }
-                                    let materialized = materialized_opt.as_ref().ok_or_else(|| {
-                                        SqlExecutionError::OperationFailed(
-                                            "missing materialized columns".into(),
-                                        )
-                                    })?;
-                                    let dataset = AggregateDataset {
-                                        rows: &batch.row_ids,
-                                        materialized,
-                                        column_ordinals,
-                                        column_types,
-                                        masked_exprs: None,
-                                        prefer_exact_numeric,
-                                    };
-                                    for (idx, key) in group_keys.iter().enumerate() {
-                                        let row_id =
-                                            *batch.row_ids.get(idx).ok_or_else(|| {
-                                                SqlExecutionError::OperationFailed(
-                                                    "missing row id".into(),
-                                                )
-                                            })?;
-                                        let value = evaluate_row_expr(expr, row_id, &dataset)?;
-                                        let Some(num) = value.as_f64() else {
-                                            continue;
-                                        };
-                                        if let Some(AggregateState::Sum { total, seen }) =
-                                            ensure_state_vec(&mut hash_table, key, &state_template)
-                                                .get_mut(slot_index)
-                                        {
-                                            *total += num;
-                                            *seen = true;
-                                        }
-                                    }
-                                }
-                                Err(err) => return Err(err),
-                            }
-                        }
-                        AggregateFunctionKind::Average => {
-                            let expr = plan.arg.as_ref().ok_or_else(|| {
-                                SqlExecutionError::OperationFailed(
-                                    "AVG expression missing argument".into(),
-                                )
-                            })?;
-                            match evaluate_expression_on_batch(expr, &batch, catalog) {
-                                Ok(values_page) => {
-                                    vectorized_average_update(
-                                        &mut hash_table,
-                                        slot_index,
-                                        &group_keys,
-                                        &values_page,
-                                        &state_template,
-                                    );
-                                }
-                                Err(SqlExecutionError::Unsupported(_)) => {
-                                    if materialized_opt.is_none() {
-                                        let materialized = materialize_columns(
-                                            &self.page_handler,
-                                            table,
-                                            columns,
-                                            required_ordinals,
-                                            &batch.row_ids,
-                                        )?;
-                                        materialized_opt = Some(materialized);
-                                    }
-                                    let materialized = materialized_opt.as_ref().ok_or_else(|| {
-                                        SqlExecutionError::OperationFailed(
-                                            "missing materialized columns".into(),
-                                        )
-                                    })?;
-                                    let dataset = AggregateDataset {
-                                        rows: &batch.row_ids,
-                                        materialized,
-                                        column_ordinals,
-                                        column_types,
-                                        masked_exprs: None,
-                                        prefer_exact_numeric,
-                                    };
-                                    for (idx, key) in group_keys.iter().enumerate() {
-                                        let row_id =
-                                            *batch.row_ids.get(idx).ok_or_else(|| {
-                                                SqlExecutionError::OperationFailed(
-                                                    "missing row id".into(),
-                                                )
-                                            })?;
-                                        let value = evaluate_row_expr(expr, row_id, &dataset)?;
-                                        let Some(num) = value.as_f64() else {
-                                            continue;
-                                        };
-                                        if let Some(AggregateState::Average { sum, count }) =
-                                            ensure_state_vec(&mut hash_table, key, &state_template)
-                                                .get_mut(slot_index)
-                                        {
-                                            *sum += num;
-                                            *count += 1;
-                                        }
-                                    }
-                                }
-                                Err(err) => return Err(err),
-                            }
-                        }
-                        AggregateFunctionKind::Min => {
-                            let expr = plan.arg.as_ref().ok_or_else(|| {
-                                SqlExecutionError::OperationFailed(
-                                    "MIN expression missing argument".into(),
-                                )
-                            })?;
-                            match evaluate_expression_on_batch(expr, &batch, catalog) {
-                                Ok(values_page) => {
-                                    vectorized_min_update(
-                                        &mut hash_table,
-                                        slot_index,
-                                        &group_keys,
-                                        &values_page,
-                                        &state_template,
-                                    );
-                                }
-                                Err(SqlExecutionError::Unsupported(_)) => {
-                                    if materialized_opt.is_none() {
-                                        let materialized = materialize_columns(
-                                            &self.page_handler,
-                                            table,
-                                            columns,
-                                            required_ordinals,
-                                            &batch.row_ids,
-                                        )?;
-                                        materialized_opt = Some(materialized);
-                                    }
-                                    let materialized = materialized_opt.as_ref().ok_or_else(|| {
-                                        SqlExecutionError::OperationFailed(
-                                            "missing materialized columns".into(),
-                                        )
-                                    })?;
-                                    let dataset = AggregateDataset {
-                                        rows: &batch.row_ids,
-                                        materialized,
-                                        column_ordinals,
-                                        column_types,
-                                        masked_exprs: None,
-                                        prefer_exact_numeric,
-                                    };
-                                    for (idx, key) in group_keys.iter().enumerate() {
-                                        let row_id =
-                                            *batch.row_ids.get(idx).ok_or_else(|| {
-                                                SqlExecutionError::OperationFailed(
-                                                    "missing row id".into(),
-                                                )
-                                            })?;
-                                        let value = evaluate_row_expr(expr, row_id, &dataset)?;
-                                        let Some(num) = value.as_f64() else {
-                                            continue;
-                                        };
-                                        if let Some(AggregateState::Min { value: min_value }) =
-                                            ensure_state_vec(&mut hash_table, key, &state_template)
-                                                .get_mut(slot_index)
-                                        {
-                                            *min_value = Some(
-                                                min_value.map(|current| current.min(num)).unwrap_or(num),
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(err) => return Err(err),
-                            }
-                        }
-                        AggregateFunctionKind::Max => {
-                            let expr = plan.arg.as_ref().ok_or_else(|| {
-                                SqlExecutionError::OperationFailed(
-                                    "MAX expression missing argument".into(),
-                                )
-                            })?;
-                            match evaluate_expression_on_batch(expr, &batch, catalog) {
-                                Ok(values_page) => {
-                                    vectorized_max_update(
-                                        &mut hash_table,
-                                        slot_index,
-                                        &group_keys,
-                                        &values_page,
-                                        &state_template,
-                                    );
-                                }
-                                Err(SqlExecutionError::Unsupported(_)) => {
-                                    if materialized_opt.is_none() {
-                                        let materialized = materialize_columns(
-                                            &self.page_handler,
-                                            table,
-                                            columns,
-                                            required_ordinals,
-                                            &batch.row_ids,
-                                        )?;
-                                        materialized_opt = Some(materialized);
-                                    }
-                                    let materialized = materialized_opt.as_ref().ok_or_else(|| {
-                                        SqlExecutionError::OperationFailed(
-                                            "missing materialized columns".into(),
-                                        )
-                                    })?;
-                                    let dataset = AggregateDataset {
-                                        rows: &batch.row_ids,
-                                        materialized,
-                                        column_ordinals,
-                                        column_types,
-                                        masked_exprs: None,
-                                        prefer_exact_numeric,
-                                    };
-                                    for (idx, key) in group_keys.iter().enumerate() {
-                                        let row_id =
-                                            *batch.row_ids.get(idx).ok_or_else(|| {
-                                                SqlExecutionError::OperationFailed(
-                                                    "missing row id".into(),
-                                                )
-                                            })?;
-                                        let value = evaluate_row_expr(expr, row_id, &dataset)?;
-                                        let Some(num) = value.as_f64() else {
-                                            continue;
-                                        };
-                                        if let Some(AggregateState::Max { value: max_value }) =
-                                            ensure_state_vec(&mut hash_table, key, &state_template)
-                                                .get_mut(slot_index)
-                                        {
-                                            *max_value = Some(
-                                                max_value.map(|current| current.max(num)).unwrap_or(num),
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(err) => return Err(err),
-                            }
-                        }
-                        AggregateFunctionKind::VariancePop
-                        | AggregateFunctionKind::VarianceSample
-                        | AggregateFunctionKind::StddevPop
-                        | AggregateFunctionKind::StddevSample => {
-                            let expr = plan.arg.as_ref().ok_or_else(|| {
-                                SqlExecutionError::OperationFailed(
-                                    "variance expression missing argument".into(),
-                                )
-                            })?;
-                            match evaluate_expression_on_batch(expr, &batch, catalog) {
-                                Ok(values_page) => {
-                                    vectorized_variance_update(
-                                        &mut hash_table,
-                                        slot_index,
-                                        &group_keys,
-                                        &values_page,
-                                        &state_template,
-                                    );
-                                }
-                                Err(SqlExecutionError::Unsupported(_)) => {
-                                    if materialized_opt.is_none() {
-                                        let materialized = materialize_columns(
-                                            &self.page_handler,
-                                            table,
-                                            columns,
-                                            required_ordinals,
-                                            &batch.row_ids,
-                                        )?;
-                                        materialized_opt = Some(materialized);
-                                    }
-                                    let materialized = materialized_opt.as_ref().ok_or_else(|| {
-                                        SqlExecutionError::OperationFailed(
-                                            "missing materialized columns".into(),
-                                        )
-                                    })?;
-                                    let dataset = AggregateDataset {
-                                        rows: &batch.row_ids,
-                                        materialized,
-                                        column_ordinals,
-                                        column_types,
-                                        masked_exprs: None,
-                                        prefer_exact_numeric,
-                                    };
-                                    for (idx, key) in group_keys.iter().enumerate() {
-                                        let row_id =
-                                            *batch.row_ids.get(idx).ok_or_else(|| {
-                                                SqlExecutionError::OperationFailed(
-                                                    "missing row id".into(),
-                                                )
-                                            })?;
-                                        let value = evaluate_row_expr(expr, row_id, &dataset)?;
-                                        let Some(num) = value.as_f64() else {
-                                            continue;
-                                        };
-                                        if let Some(AggregateState::Variance { count, mean, m2 }) =
-                                            ensure_state_vec(&mut hash_table, key, &state_template)
-                                                .get_mut(slot_index)
-                                        {
-                                            *count += 1;
-                                            let delta = num - *mean;
-                                            *mean += delta / *count as f64;
-                                            let delta2 = num - *mean;
-                                            *m2 += delta * delta2;
-                                        }
-                                    }
-                                }
-                                Err(err) => return Err(err),
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if hash_table.is_empty() && group_exprs.is_empty() {
-            let key = GroupKey::empty();
-            hash_table.insert(key.clone(), state_template.clone());
-            if seen_group_order.insert(key.clone()) {
-                group_order.push(key);
-            }
-        }
-
-        if group_order.is_empty() {
-            group_order.extend(hash_table.keys().cloned());
-        }
-
-        if let Some(expr) = having {
-            let mut filtered_order = Vec::with_capacity(group_order.len());
-            for key in group_order {
-                let states = hash_table.get(&key).ok_or_else(|| {
-                    SqlExecutionError::OperationFailed("missing aggregate state for group".into())
-                })?;
-                let ctx = HavingEvalContext {
-                    aggregate_plans: &aggregate_plans,
-                    aggregate_lookup: &aggregate_expr_lookup,
-                    group_expr_lookup: &group_expr_lookup,
-                    group_key: &key,
-                    states,
-                };
-                let predicate = evaluate_having_expression(expr, &ctx)?;
-                if predicate.as_bool().unwrap_or(false) {
-                    filtered_order.push(key);
-                }
-            }
-            group_order = filtered_order;
-        }
-
-        let mut ordered_keys = group_order;
-        let needs_scalar_eval = output_kinds
-            .iter()
-            .any(|kind| matches!(kind, VectorAggregationOutput::ScalarExpr { .. }));
-        let needs_materialized =
-            needs_scalar_eval || qualify_expr.is_some() || !order_clauses.is_empty();
-
-        if needs_materialized {
-            let row_ids = batch.row_ids.clone();
-            let materialized = materialize_columns(
-                &self.page_handler,
-                table,
-                columns,
-                required_ordinals,
-                &row_ids,
-            )?;
-            let mut group_rows: HashMap<GroupKey, Vec<u64>> = HashMap::new();
-            for (idx, key) in group_keys.iter().enumerate() {
-                let row_id = *row_ids.get(idx).ok_or_else(|| {
-                    SqlExecutionError::OperationFailed("missing row id".into())
-                })?;
-                group_rows.entry(key.clone()).or_default().push(row_id);
-            }
-            materialized_opt = Some(materialized);
-            group_rows_opt = Some(group_rows);
-        }
-
-        if qualify_expr.is_some() || !order_clauses.is_empty() {
-            let materialized = materialized_opt.as_ref().ok_or_else(|| {
-                SqlExecutionError::OperationFailed("missing materialized columns".into())
-            })?;
-            let group_rows = group_rows_opt.as_ref().ok_or_else(|| {
-                SqlExecutionError::OperationFailed("missing group rows".into())
-            })?;
-
             if let Some(expr) = qualify_expr {
-                let mut filtered = Vec::with_capacity(ordered_keys.len());
-                for key in ordered_keys {
-                    let rows = group_rows.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-                    let dataset = AggregateDataset {
-                        rows,
-                        materialized,
-                        column_ordinals,
-                        column_types,
-                        masked_exprs: None,
-                        prefer_exact_numeric,
-                    };
-                    let qualifies = evaluate_scalar_expression(expr, &dataset)?
-                        .as_bool()
-                        .unwrap_or(false);
-                    if qualifies {
-                        filtered.push(key);
-                    }
+                let qualifies = evaluate_scalar_expression(expr, &dataset)?;
+                if !qualifies.as_bool().unwrap_or(false) {
+                    continue;
                 }
-                ordered_keys = filtered;
             }
 
-            if !order_clauses.is_empty() {
-                let mut keyed: Vec<(OrderKey, GroupKey)> =
-                    Vec::with_capacity(ordered_keys.len());
-                for key in ordered_keys {
-                    let rows = group_rows.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-                    let dataset = AggregateDataset {
-                        rows,
-                        materialized,
-                        column_ordinals,
-                        column_types,
-                        masked_exprs: None,
-                        prefer_exact_numeric,
-                    };
-                    let order_key = build_group_order_key(order_clauses, &dataset)?;
-                    keyed.push((order_key, key));
-                }
-                keyed.sort_unstable_by(|left, right| {
-                    compare_order_keys(&left.0, &right.0, order_clauses)
-                });
-                ordered_keys = keyed.into_iter().map(|(_, key)| key).collect();
-            }
+            let order_key = if order_clauses.is_empty() {
+                OrderKey { values: Vec::new() }
+            } else {
+                build_group_order_key(order_clauses, &dataset)?
+            };
+
+            let output_row = evaluate_aggregate_outputs(aggregate_plan, &dataset)?;
+            aggregated_rows.push(AggregatedRow {
+                order_key,
+                values: output_row,
+            });
         }
 
-        let mut column_values: Vec<Vec<Option<String>>> =
-            vec![Vec::with_capacity(ordered_keys.len()); output_kinds.len()];
-        for key in ordered_keys {
-            let states = hash_table.get(&key).ok_or_else(|| {
-                SqlExecutionError::OperationFailed("missing aggregate state for group".into())
-            })?;
-            for (idx, kind) in output_kinds.iter().enumerate() {
-                let value = match kind {
-                    VectorAggregationOutput::Aggregate { slot_index } => {
-                        let state = states.get(*slot_index).ok_or_else(|| {
-                            SqlExecutionError::OperationFailed(
-                                "missing aggregate state for group".into(),
-                            )
-                        })?;
-                        aggregate_plans[*slot_index].finalize_value(state)
-                    }
-                    VectorAggregationOutput::GroupExpr { group_index } => {
-                        key.value_at(*group_index).unwrap_or(None)
-                    }
-                    VectorAggregationOutput::Literal { value } => value.clone(),
-                    VectorAggregationOutput::ScalarExpr { expr } => {
-                        let materialized = materialized_opt.as_ref().ok_or_else(|| {
-                            SqlExecutionError::OperationFailed(
-                                "missing materialized columns for aggregate expression".into(),
-                            )
-                        })?;
-                        let group_rows = group_rows_opt.as_ref().ok_or_else(|| {
-                            SqlExecutionError::OperationFailed(
-                                "missing group rows for aggregate expression".into(),
-                            )
-                        })?;
-                        let rows = group_rows.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-                        let dataset = AggregateDataset {
-                            rows,
-                            materialized,
-                            column_ordinals,
-                            column_types,
-                            masked_exprs: None,
-                            prefer_exact_numeric,
-                        };
-                        evaluate_scalar_expression(expr, &dataset)?.into_option_string()
-                    }
-                };
-                column_values[idx].push(value);
-            }
-        }
-
-        let mut result_batch = ColumnarBatch::with_capacity(column_values.len());
-        let num_rows = column_values
-            .first()
-            .map(|values| values.len())
-            .unwrap_or(0);
-        result_batch.num_rows = num_rows;
-        if num_rows > 0 {
-            result_batch.row_ids = (0..num_rows as u64).collect();
-        }
-        for (idx, values) in column_values.into_iter().enumerate() {
-            result_batch
-                .columns
-                .insert(idx, strings_to_text_column(values));
-        }
-
-        let mut batches = if num_rows == 0 {
-            Vec::new()
-        } else {
-            vec![result_batch]
-        };
-
-        let offset = parse_offset(offset_expr)?;
-        let limit = parse_limit(limit_expr)?;
-        if distinct_flag {
-            batches = deduplicate_batches(batches, result_columns.len());
-        }
-        let limited_batches = self.apply_limit_offset(batches.into_iter(), offset, limit)?;
-
-        Ok(SelectResult {
-            columns: result_columns,
-            batches: limited_batches,
-        })
+        Ok(aggregated_rows)
     }
 
     fn execute_create(&self, statement: Statement) -> Result<(), SqlExecutionError> {

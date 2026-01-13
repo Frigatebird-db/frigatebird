@@ -1,23 +1,23 @@
 use super::{
-    AggregatedRow, GroupByStrategy, GroupKey, ProjectionItem, ProjectionPlan, SqlExecutionError,
-    SqlExecutor, build_aggregate_alias_map, build_projection_alias_map,
+    AggregatedRow, GroupByStrategy, ProjectionItem, ProjectionPlan, SqlExecutionError, SqlExecutor,
+    build_aggregate_alias_map, build_projection_alias_map,
     determine_group_by_strategy, projection_expressions_from_plan, resolve_group_by_exprs,
     resolve_order_by_exprs, rewrite_aliases_in_expr, SelectResult,
 };
 use crate::metadata_store::ColumnCatalog;
 use crate::sql::PlannerError;
 use crate::sql::executor::aggregates::{
-    AggregateDataset, AggregateProjectionPlan, evaluate_aggregate_outputs,
-    plan_aggregate_projection, select_item_contains_aggregate,
+    AggregateDataset, AggregateProjectionPlan, plan_aggregate_projection,
+    select_item_contains_aggregate,
 };
 use crate::sql::executor::expressions::{evaluate_row_expr, evaluate_scalar_expression};
-use crate::sql::executor::grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
+use crate::sql::executor::grouping_helpers::validate_group_by;
 use crate::sql::executor::helpers::{collect_expr_column_ordinals, object_name_to_string, parse_limit, parse_offset};
-use crate::sql::executor::ordering::{OrderClause, OrderKey, build_group_order_key, compare_order_keys, sort_rows_logical};
+use crate::sql::executor::ordering::{OrderClause, compare_order_keys, sort_rows_logical};
 use crate::sql::executor::physical_evaluator::filter_supported;
 use crate::sql::executor::projection_helpers::build_projection;
 use crate::sql::executor::scan_stream::merge_stream_to_batch;
-use crate::sql::executor::{deduplicate_batches, filter_rows_with_expr, materialize_columns, refine_rows_with_vectorized_filter, rows_to_batch};
+use crate::sql::executor::{deduplicate_batches, filter_rows_with_expr, materialize_columns, rows_to_batch};
 use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
 use crate::sql::executor::values::{CachedValue, cached_to_scalar_with_type};
 use crate::sql::executor::window_helpers::{
@@ -539,104 +539,53 @@ impl SqlExecutor {
 
         if needs_aggregation {
             let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");
-            let mut aggregated_rows: Vec<AggregatedRow> = Vec::new();
             let prefer_exact_numeric = group_strategy
                 .as_ref()
                 .map_or(false, GroupByStrategy::prefer_exact_numeric);
-
-            let full_dataset = AggregateDataset {
-                rows: matching_rows.as_slice(),
-                materialized: &materialized,
-                column_ordinals: &column_ordinals,
-                column_types: &column_types,
-                masked_exprs: None,
-                prefer_exact_numeric,
-            };
+            let mut aggregated_rows: Vec<AggregatedRow> = Vec::new();
 
             if let Some(group_info) = &group_by_info {
                 for grouping in &group_info.sets {
-                    let mut groups: HashMap<GroupKey, Vec<u64>> = HashMap::new();
-                    let mut key_order: Vec<GroupKey> = Vec::new();
-
-                    for &row_idx in &matching_rows {
-                        let key =
-                            evaluate_group_key(&grouping.expressions, row_idx, &full_dataset)?;
-                        match groups.entry(key.clone()) {
-                            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                                entry.get_mut().push(row_idx);
-                            }
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                entry.insert(vec![row_idx]);
-                                key_order.push(key);
-                            }
-                        }
-                    }
-
-                    for key in key_order {
-                        let rows = groups.get(&key).expect("group rows must exist");
-                        let dataset = AggregateDataset {
-                            rows: rows.as_slice(),
-                            materialized: &materialized,
-                            column_ordinals: &column_ordinals,
-                            column_types: &column_types,
-                            masked_exprs: Some(grouping.masked_exprs.as_slice()),
-                            prefer_exact_numeric,
-                        };
-
-                        if !evaluate_having(&having, &dataset)? {
-                            continue;
-                        }
-                        if let Some(expr) = &qualify_expr {
-                            let qualifies = evaluate_scalar_expression(expr, &dataset)?;
-                            if !qualifies.as_bool().unwrap_or(false) {
-                                continue;
-                            }
-                        }
-
-                        let order_key = if order_clauses.is_empty() {
-                            OrderKey { values: Vec::new() }
-                        } else {
-                            build_group_order_key(&order_clauses, &dataset)?
-                        };
-
-                        let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
-                        aggregated_rows.push(AggregatedRow {
-                            order_key,
-                            values: output_row,
-                        });
-                    }
+                    aggregated_rows.extend(self.execute_grouping_set_aggregation_rows(
+                        &table_name,
+                        &catalog,
+                        &columns,
+                        &aggregate_plan,
+                        &grouping.expressions,
+                        &required_ordinals,
+                        selection_expr_full,
+                        scan_selection_expr,
+                        selection_applied_in_scan,
+                        &column_ordinals,
+                        &column_types,
+                        prefer_exact_numeric,
+                        having.as_ref(),
+                        qualify_expr.as_ref(),
+                        &order_clauses,
+                        Some(grouping.masked_exprs.as_slice()),
+                        row_ids.clone(),
+                    )?);
                 }
             } else {
-                let dataset = AggregateDataset {
-                    rows: matching_rows.as_slice(),
-                    materialized: &materialized,
-                    column_ordinals: &column_ordinals,
-                    column_types: &column_types,
-                    masked_exprs: None,
+                aggregated_rows.extend(self.execute_grouping_set_aggregation_rows(
+                    &table_name,
+                    &catalog,
+                    &columns,
+                    &aggregate_plan,
+                    &[],
+                    &required_ordinals,
+                    selection_expr_full,
+                    scan_selection_expr,
+                    selection_applied_in_scan,
+                    &column_ordinals,
+                    &column_types,
                     prefer_exact_numeric,
-                };
-
-                if evaluate_having(&having, &dataset)? {
-                    let qualifies = if let Some(expr) = &qualify_expr {
-                        evaluate_scalar_expression(expr, &dataset)?
-                            .as_bool()
-                            .unwrap_or(false)
-                    } else {
-                        true
-                    };
-                    if qualifies {
-                        let order_key = if order_clauses.is_empty() {
-                            OrderKey { values: Vec::new() }
-                        } else {
-                            build_group_order_key(&order_clauses, &dataset)?
-                        };
-                        let output_row = evaluate_aggregate_outputs(&aggregate_plan, &dataset)?;
-                        aggregated_rows.push(AggregatedRow {
-                            order_key,
-                            values: output_row,
-                        });
-                    }
-                }
+                    having.as_ref(),
+                    qualify_expr.as_ref(),
+                    &order_clauses,
+                    None,
+                    row_ids.clone(),
+                )?);
             }
 
             if distinct_flag {
