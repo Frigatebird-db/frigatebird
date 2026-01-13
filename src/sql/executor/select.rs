@@ -1,14 +1,13 @@
 use super::{
     AggregatedRow, GroupByStrategy, GroupKey, ProjectionItem, ProjectionPlan, SqlExecutionError,
-    SqlExecutor, build_aggregate_alias_map, build_group_exprs_for_distinct,
-    build_projection_alias_map, determine_group_by_strategy, projection_expressions_from_plan,
-    projection_item_expr, resolve_group_by_exprs, resolve_order_by_exprs, rewrite_aliases_in_expr,
-    SelectResult,
+    SqlExecutor, build_aggregate_alias_map, build_projection_alias_map,
+    determine_group_by_strategy, projection_expressions_from_plan, resolve_group_by_exprs,
+    resolve_order_by_exprs, rewrite_aliases_in_expr, SelectResult,
 };
 use crate::metadata_store::ColumnCatalog;
 use crate::sql::PlannerError;
 use crate::sql::executor::aggregates::{
-    AggregateDataset, AggregateProjection, AggregateProjectionPlan, evaluate_aggregate_outputs,
+    AggregateDataset, AggregateProjectionPlan, evaluate_aggregate_outputs,
     plan_aggregate_projection, select_item_contains_aggregate,
 };
 use crate::sql::executor::expressions::{evaluate_row_expr, evaluate_scalar_expression};
@@ -324,6 +323,11 @@ impl SqlExecutor {
                 None
             };
         let mut selection_applied_in_scan = scan_selection_expr.is_some();
+        let selection_expr_full = if has_selection {
+            Some(&selection_expr)
+        } else {
+            None
+        };
 
         if !window_plans.is_empty() {
             if has_selection && !can_use_physical_filter {
@@ -351,8 +355,11 @@ impl SqlExecutor {
                 window_plans_vec,
                 partition_exprs,
                 &required_ordinals,
+                selection_expr_full,
                 vectorized_selection_expr,
+                selection_applied_in_scan,
                 &column_ordinals,
+                &column_types,
                 &order_clauses,
                 result_columns.clone(),
                 limit_expr.clone(),
@@ -361,38 +368,6 @@ impl SqlExecutor {
                 qualify.clone(),
                 None,
             );
-        }
-
-        let can_run_pipeline_projection = !needs_aggregation
-            && window_plans.is_empty()
-            && sort_key_filters.is_none()
-            && sort_key_prefixes.is_none()
-            && projection_plan_opt.is_some()
-            && (!has_selection || can_use_physical_filter);
-
-        if can_run_pipeline_projection {
-            if let Some(projection_plan) = &projection_plan_opt {
-                match self.execute_vectorized_projection(
-                    &table_name,
-                    &catalog,
-                    &columns,
-                    projection_plan,
-                    &required_ordinals,
-                    scan_selection_expr,
-                    &column_ordinals,
-                    &order_clauses,
-                    result_columns.clone(),
-                    limit_expr.clone(),
-                    offset_expr.clone(),
-                    distinct_flag,
-                    qualify_expr.as_ref(),
-                    None,
-                ) {
-                    Ok(result) => return Ok(result),
-                    Err(SqlExecutionError::Unsupported(_)) => {}
-                    Err(err) => return Err(err),
-                }
-            }
         }
 
         let simple_group_exprs = if let Some(info) = &group_by_info {
@@ -405,94 +380,8 @@ impl SqlExecutor {
             Some(Vec::new())
         };
 
-        let can_run_pipeline_aggregation = needs_aggregation
-            && !distinct_flag
-            && order_clauses.is_empty()
-            && sort_key_filters.is_none()
-            && sort_key_prefixes.is_none()
-            && !apply_selection_late
-            && window_plans.is_empty()
-            && aggregate_plan_opt.is_some()
-            && simple_group_exprs.is_some()
-            && (!has_selection || can_use_physical_filter);
-
-        if can_run_pipeline_aggregation {
-            if let Some(aggregate_plan) = &aggregate_plan_opt {
-                let group_exprs = simple_group_exprs
-                    .clone()
-                    .expect("group expressions checked above");
-                match self.execute_vectorized_aggregation(
-                    &table_name,
-                    &catalog,
-                    &columns,
-                    aggregate_plan,
-                    &group_exprs,
-                    &required_ordinals,
-                    scan_selection_expr,
-                    &column_ordinals,
-                    result_columns.clone(),
-                    limit_expr.clone(),
-                    offset_expr.clone(),
-                    having.as_ref(),
-                    None,
-                ) {
-                    Ok(result) => return Ok(result),
-                    Err(SqlExecutionError::Unsupported(_)) => {}
-                    Err(err) => return Err(err),
-                }
-            }
-        }
-
-        if distinct_flag
-            && !needs_aggregation
-            && projection_plan_opt.is_some()
-            && order_clauses.is_empty()
-            && window_plans.is_empty()
-            && qualify.is_none()
-            && sort_key_prefixes.is_none()
-            && sort_key_filters.is_none()
-        {
-            if let Some(projection_plan) = &projection_plan_opt {
-                let group_exprs = build_group_exprs_for_distinct(projection_plan, &columns)?;
-                let outputs: Vec<AggregateProjection> = projection_plan
-                    .items
-                    .iter()
-                    .map(|item| {
-                        Ok(AggregateProjection {
-                            expr: projection_item_expr(item, &columns)?,
-                        })
-                    })
-                    .collect::<Result<_, SqlExecutionError>>()?;
-                let synthetic_plan = AggregateProjectionPlan {
-                    outputs,
-                    required_ordinals: projection_plan.required_ordinals.clone(),
-                    headers: projection_plan.headers.clone(),
-                };
-
-                match self.execute_vectorized_aggregation(
-                    &table_name,
-                    &catalog,
-                    &columns,
-                    &synthetic_plan,
-                    &group_exprs,
-                    &required_ordinals,
-                    scan_selection_expr,
-                    &column_ordinals,
-                    result_columns.clone(),
-                    limit_expr.clone(),
-                    offset_expr.clone(),
-                    None,
-                    None,
-                ) {
-                    Ok(result) => return Ok(result),
-                    Err(SqlExecutionError::Unsupported(_)) => {}
-                    Err(err) => return Err(err),
-                }
-            }
-        }
-
         let used_index = sort_key_filters.is_some() || sort_key_prefixes.is_some();
-        let mut candidate_rows = if let Some(sort_key_filters) = sort_key_filters.as_ref() {
+        let mut row_ids = if let Some(sort_key_filters) = sort_key_filters.as_ref() {
             for column in &sort_columns {
                 key_values.push(sort_key_filters.get(&column.name).cloned().ok_or_else(|| {
                     SqlExecutionError::Unsupported(format!(
@@ -501,10 +390,91 @@ impl SqlExecutor {
                     ))
                 })?);
             }
-
-            self.locate_rows_by_sort_tuple(&table_name, &sort_columns, &key_values)?
+            Some(self.locate_rows_by_sort_tuple(
+                &table_name,
+                &sort_columns,
+                &key_values,
+            )?)
         } else if let Some(prefixes) = sort_key_prefixes.as_ref() {
-            self.locate_rows_by_sort_prefixes(&table_name, &sort_columns, &prefixes)?
+            Some(self.locate_rows_by_sort_prefixes(
+                &table_name,
+                &sort_columns,
+                &prefixes,
+            )?)
+        } else {
+            None
+        };
+
+        if used_index {
+            selection_applied_in_scan = false;
+        }
+
+        if let Some(rows) = row_ids.as_mut() {
+            rows.sort_unstable();
+            rows.dedup();
+            if rows.is_empty() && !needs_aggregation {
+                return Ok(SelectResult {
+                    columns: result_columns,
+                    batches: Vec::new(),
+                });
+            }
+        }
+
+
+        if !needs_aggregation {
+            let projection_plan = projection_plan_opt.expect("projection plan required");
+            return self.execute_vectorized_projection(
+                &table_name,
+                &catalog,
+                &columns,
+                &projection_plan,
+                &required_ordinals,
+                selection_expr_full,
+                scan_selection_expr,
+                selection_applied_in_scan,
+                &column_ordinals,
+                &column_types,
+                &order_clauses,
+                result_columns.clone(),
+                limit_expr.clone(),
+                offset_expr.clone(),
+                distinct_flag,
+                qualify_expr.as_ref(),
+                row_ids.clone(),
+            );
+        }
+
+        if let Some(group_exprs) = simple_group_exprs.clone() {
+            let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");
+            let prefer_exact_numeric = group_strategy
+                .as_ref()
+                .map_or(false, GroupByStrategy::prefer_exact_numeric);
+            return self.execute_vectorized_aggregation(
+                &table_name,
+                &catalog,
+                &columns,
+                &aggregate_plan,
+                &group_exprs,
+                &required_ordinals,
+                selection_expr_full,
+                scan_selection_expr,
+                selection_applied_in_scan,
+                &column_ordinals,
+                &column_types,
+                prefer_exact_numeric,
+                result_columns.clone(),
+                limit_expr.clone(),
+                offset_expr.clone(),
+                having.as_ref(),
+                qualify_expr.as_ref(),
+                &order_clauses,
+                distinct_flag,
+                row_ids.clone(),
+            );
+        }
+
+        let candidate_rows = if let Some(rows) = row_ids.clone() {
+            rows
         } else {
             let stream = self.build_scan_stream(
                 &table_name,
@@ -518,146 +488,6 @@ impl SqlExecutor {
             let batch = merge_stream_to_batch(stream)?;
             batch.row_ids
         };
-        if used_index {
-            selection_applied_in_scan = false;
-        }
-        if candidate_rows.is_empty() && !needs_aggregation {
-            return Ok(SelectResult {
-                columns: result_columns,
-                batches: Vec::new(),
-            });
-        }
-
-        candidate_rows.sort_unstable();
-        candidate_rows.dedup();
-
-        if !selection_applied_in_scan && can_use_physical_filter {
-            if let Some(expr) = &physical_selection_expr {
-                candidate_rows = refine_rows_with_vectorized_filter(
-                    &self.page_handler,
-                    &table_name,
-                    &columns,
-                    expr,
-                    &column_ordinals,
-                    &candidate_rows,
-                    catalog.rows_per_page_group,
-                )?;
-                selection_applied_in_scan = true;
-            }
-        }
-
-        let can_run_pipeline_projection_with_rows = used_index
-            && !needs_aggregation
-            && projection_plan_opt.is_some()
-            && (!has_selection || selection_applied_in_scan);
-        if can_run_pipeline_projection_with_rows {
-            if let Some(projection_plan) = &projection_plan_opt {
-                return self.execute_vectorized_projection(
-                    &table_name,
-                    &catalog,
-                    &columns,
-                    projection_plan,
-                    &required_ordinals,
-                    scan_selection_expr,
-                    &column_ordinals,
-                    &order_clauses,
-                    result_columns.clone(),
-                    limit_expr.clone(),
-                    offset_expr.clone(),
-                    distinct_flag,
-                    qualify_expr.as_ref(),
-                    Some(candidate_rows.clone()),
-                );
-            }
-        }
-
-        let can_run_pipeline_aggregation_with_rows = used_index
-            && needs_aggregation
-            && !distinct_flag
-            && order_clauses.is_empty()
-            && sort_key_filters.is_none()
-            && sort_key_prefixes.is_none()
-            && !apply_selection_late
-            && window_plans.is_empty()
-            && aggregate_plan_opt.is_some()
-            && simple_group_exprs.is_some()
-            && (!has_selection || selection_applied_in_scan);
-        if can_run_pipeline_aggregation_with_rows {
-            if let Some(aggregate_plan) = &aggregate_plan_opt {
-                let group_exprs = simple_group_exprs
-                    .clone()
-                    .expect("group expressions checked above");
-                match self.execute_vectorized_aggregation(
-                    &table_name,
-                    &catalog,
-                    &columns,
-                    aggregate_plan,
-                    &group_exprs,
-                    &required_ordinals,
-                    scan_selection_expr,
-                    &column_ordinals,
-                    result_columns.clone(),
-                    limit_expr.clone(),
-                    offset_expr.clone(),
-                    having.as_ref(),
-                    Some(candidate_rows.clone()),
-                ) {
-                    Ok(result) => return Ok(result),
-                    Err(SqlExecutionError::Unsupported(_)) => {}
-                    Err(err) => return Err(err),
-                }
-            }
-        }
-
-        if distinct_flag
-            && used_index
-            && !needs_aggregation
-            && projection_plan_opt.is_some()
-            && order_clauses.is_empty()
-            && window_plans.is_empty()
-            && qualify.is_none()
-            && sort_key_prefixes.is_none()
-            && sort_key_filters.is_none()
-            && (!has_selection || selection_applied_in_scan)
-        {
-            if let Some(projection_plan) = &projection_plan_opt {
-                let group_exprs = build_group_exprs_for_distinct(projection_plan, &columns)?;
-                let outputs: Vec<AggregateProjection> = projection_plan
-                    .items
-                    .iter()
-                    .map(|item| {
-                        Ok(AggregateProjection {
-                            expr: projection_item_expr(item, &columns)?,
-                        })
-                    })
-                    .collect::<Result<_, SqlExecutionError>>()?;
-                let synthetic_plan = AggregateProjectionPlan {
-                    outputs,
-                    required_ordinals: projection_plan.required_ordinals.clone(),
-                    headers: projection_plan.headers.clone(),
-                };
-
-                match self.execute_vectorized_aggregation(
-                    &table_name,
-                    &catalog,
-                    &columns,
-                    &synthetic_plan,
-                    &group_exprs,
-                    &required_ordinals,
-                    scan_selection_expr,
-                    &column_ordinals,
-                    result_columns.clone(),
-                    limit_expr.clone(),
-                    offset_expr.clone(),
-                    None,
-                    Some(candidate_rows.clone()),
-                ) {
-                    Ok(result) => return Ok(result),
-                    Err(SqlExecutionError::Unsupported(_)) => {}
-                    Err(err) => return Err(err),
-                }
-            }
-        }
 
         let materialized = materialize_columns(
             &self.page_handler,

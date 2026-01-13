@@ -15,16 +15,27 @@ pub(super) type AggregationHashTable = HashMap<GroupKey, Vec<AggregateState>>;
 #[derive(Debug, Clone)]
 pub(super) enum AggregateState {
     Count(u64),
+    CountDistinct(HashSet<String>),
     Sum { total: f64, seen: bool },
     Average { sum: f64, count: u64 },
+    Min { value: Option<f64> },
+    Max { value: Option<f64> },
+    Variance { count: u64, mean: f64, m2: f64 },
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum AggregateFunctionKind {
     CountStar,
     CountExpr,
+    CountDistinct,
     Sum,
     Average,
+    Min,
+    Max,
+    VariancePop,
+    VarianceSample,
+    StddevPop,
+    StddevSample,
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +57,6 @@ impl AggregateFunctionPlan {
         if function.over.is_some()
             || !function.order_by.is_empty()
             || function.filter.is_some()
-            || function.distinct
         {
             return Err(SqlExecutionError::Unsupported(
                 "vectorized aggregation does not support advanced aggregate modifiers".into(),
@@ -63,6 +73,11 @@ impl AggregateFunctionPlan {
         match name.as_str() {
             "COUNT" => {
                 if function.args.is_empty() {
+                    if function.distinct {
+                        return Err(SqlExecutionError::Unsupported(
+                            "COUNT(DISTINCT *) is not supported".into(),
+                        ));
+                    }
                     return Ok(Self {
                         kind: AggregateFunctionKind::CountStar,
                         arg: None,
@@ -71,12 +86,24 @@ impl AggregateFunctionPlan {
                 if function.args.len() == 1 {
                     match &function.args[0] {
                         FunctionArg::Unnamed(arg) | FunctionArg::Named { arg, .. } => match arg {
-                            FunctionArgExpr::Wildcard => Ok(Self {
-                                kind: AggregateFunctionKind::CountStar,
-                                arg: None,
-                            }),
+                            FunctionArgExpr::Wildcard => {
+                                if function.distinct {
+                                    Err(SqlExecutionError::Unsupported(
+                                        "COUNT(DISTINCT *) is not supported".into(),
+                                    ))
+                                } else {
+                                    Ok(Self {
+                                        kind: AggregateFunctionKind::CountStar,
+                                        arg: None,
+                                    })
+                                }
+                            }
                             FunctionArgExpr::Expr(expr) => Ok(Self {
-                                kind: AggregateFunctionKind::CountExpr,
+                                kind: if function.distinct {
+                                    AggregateFunctionKind::CountDistinct
+                                } else {
+                                    AggregateFunctionKind::CountExpr
+                                },
                                 arg: Some(expr.clone()),
                             }),
                             FunctionArgExpr::QualifiedWildcard(_) => {
@@ -93,6 +120,11 @@ impl AggregateFunctionPlan {
                 }
             }
             "SUM" => {
+                if function.distinct {
+                    return Err(SqlExecutionError::Unsupported(
+                        "vectorized SUM does not support DISTINCT".into(),
+                    ));
+                }
                 let expr = extract_single_arg(function)?;
                 Ok(Self {
                     kind: AggregateFunctionKind::Sum,
@@ -100,9 +132,86 @@ impl AggregateFunctionPlan {
                 })
             }
             "AVG" => {
+                if function.distinct {
+                    return Err(SqlExecutionError::Unsupported(
+                        "vectorized AVG does not support DISTINCT".into(),
+                    ));
+                }
                 let expr = extract_single_arg(function)?;
                 Ok(Self {
                     kind: AggregateFunctionKind::Average,
+                    arg: Some(expr),
+                })
+            }
+            "MIN" => {
+                if function.distinct {
+                    return Err(SqlExecutionError::Unsupported(
+                        "vectorized MIN does not support DISTINCT".into(),
+                    ));
+                }
+                let expr = extract_single_arg(function)?;
+                Ok(Self {
+                    kind: AggregateFunctionKind::Min,
+                    arg: Some(expr),
+                })
+            }
+            "MAX" => {
+                if function.distinct {
+                    return Err(SqlExecutionError::Unsupported(
+                        "vectorized MAX does not support DISTINCT".into(),
+                    ));
+                }
+                let expr = extract_single_arg(function)?;
+                Ok(Self {
+                    kind: AggregateFunctionKind::Max,
+                    arg: Some(expr),
+                })
+            }
+            "VARIANCE" | "VAR_POP" | "VARIANCE_POP" => {
+                if function.distinct {
+                    return Err(SqlExecutionError::Unsupported(
+                        "vectorized VARIANCE does not support DISTINCT".into(),
+                    ));
+                }
+                let expr = extract_single_arg(function)?;
+                Ok(Self {
+                    kind: AggregateFunctionKind::VariancePop,
+                    arg: Some(expr),
+                })
+            }
+            "VAR_SAMP" | "VARIANCE_SAMP" => {
+                if function.distinct {
+                    return Err(SqlExecutionError::Unsupported(
+                        "vectorized VARIANCE_SAMP does not support DISTINCT".into(),
+                    ));
+                }
+                let expr = extract_single_arg(function)?;
+                Ok(Self {
+                    kind: AggregateFunctionKind::VarianceSample,
+                    arg: Some(expr),
+                })
+            }
+            "STDDEV" | "STDDEV_POP" => {
+                if function.distinct {
+                    return Err(SqlExecutionError::Unsupported(
+                        "vectorized STDDEV does not support DISTINCT".into(),
+                    ));
+                }
+                let expr = extract_single_arg(function)?;
+                Ok(Self {
+                    kind: AggregateFunctionKind::StddevPop,
+                    arg: Some(expr),
+                })
+            }
+            "STDDEV_SAMP" => {
+                if function.distinct {
+                    return Err(SqlExecutionError::Unsupported(
+                        "vectorized STDDEV_SAMP does not support DISTINCT".into(),
+                    ));
+                }
+                let expr = extract_single_arg(function)?;
+                Ok(Self {
+                    kind: AggregateFunctionKind::StddevSample,
                     arg: Some(expr),
                 })
             }
@@ -118,11 +227,24 @@ impl AggregateFunctionPlan {
             AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr => {
                 AggregateState::Count(0)
             }
+            AggregateFunctionKind::CountDistinct => {
+                AggregateState::CountDistinct(HashSet::new())
+            }
             AggregateFunctionKind::Sum => AggregateState::Sum {
                 total: 0.0,
                 seen: false,
             },
             AggregateFunctionKind::Average => AggregateState::Average { sum: 0.0, count: 0 },
+            AggregateFunctionKind::Min => AggregateState::Min { value: None },
+            AggregateFunctionKind::Max => AggregateState::Max { value: None },
+            AggregateFunctionKind::VariancePop
+            | AggregateFunctionKind::VarianceSample
+            | AggregateFunctionKind::StddevPop
+            | AggregateFunctionKind::StddevSample => AggregateState::Variance {
+                count: 0,
+                mean: 0.0,
+                m2: 0.0,
+            },
         }
     }
 
@@ -132,6 +254,9 @@ impl AggregateFunctionPlan {
                 AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr,
                 AggregateState::Count(count),
             ) => Some(count.to_string()),
+            (AggregateFunctionKind::CountDistinct, AggregateState::CountDistinct(values)) => {
+                Some(values.len().to_string())
+            }
             (AggregateFunctionKind::Sum, AggregateState::Sum { total, seen }) => {
                 if *seen {
                     Some(format_float(*total))
@@ -146,6 +271,42 @@ impl AggregateFunctionPlan {
                     Some(format_float(*sum / *count as f64))
                 }
             }
+            (AggregateFunctionKind::Min, AggregateState::Min { value }) => {
+                value.map(format_float)
+            }
+            (AggregateFunctionKind::Max, AggregateState::Max { value }) => {
+                value.map(format_float)
+            }
+            (
+                AggregateFunctionKind::VariancePop | AggregateFunctionKind::StddevPop,
+                AggregateState::Variance { count, mean: _, m2 },
+            ) => {
+                if *count == 0 {
+                    None
+                } else {
+                    let variance = *m2 / *count as f64;
+                    if matches!(self.kind, AggregateFunctionKind::StddevPop) {
+                        Some(format_float(variance.sqrt()))
+                    } else {
+                        Some(format_float(variance))
+                    }
+                }
+            }
+            (
+                AggregateFunctionKind::VarianceSample | AggregateFunctionKind::StddevSample,
+                AggregateState::Variance { count, mean: _, m2 },
+            ) => {
+                if *count <= 1 {
+                    None
+                } else {
+                    let variance = *m2 / (*count as f64 - 1.0);
+                    if matches!(self.kind, AggregateFunctionKind::StddevSample) {
+                        Some(format_float(variance.sqrt()))
+                    } else {
+                        Some(format_float(variance))
+                    }
+                }
+            }
             _ => None,
         }
     }
@@ -156,6 +317,9 @@ impl AggregateFunctionPlan {
                 AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr,
                 AggregateState::Count(count),
             ) => Some(ScalarValue::Int64(*count as i64)),
+            (AggregateFunctionKind::CountDistinct, AggregateState::CountDistinct(values)) => {
+                Some(ScalarValue::Int64(values.len() as i64))
+            }
             (AggregateFunctionKind::Sum, AggregateState::Sum { total, seen }) => {
                 if *seen {
                     Some(ScalarValue::Float64(*total))
@@ -168,6 +332,42 @@ impl AggregateFunctionPlan {
                     None
                 } else {
                     Some(ScalarValue::Float64(*sum / *count as f64))
+                }
+            }
+            (AggregateFunctionKind::Min, AggregateState::Min { value }) => {
+                value.map(ScalarValue::Float64)
+            }
+            (AggregateFunctionKind::Max, AggregateState::Max { value }) => {
+                value.map(ScalarValue::Float64)
+            }
+            (
+                AggregateFunctionKind::VariancePop | AggregateFunctionKind::StddevPop,
+                AggregateState::Variance { count, mean: _, m2 },
+            ) => {
+                if *count == 0 {
+                    None
+                } else {
+                    let variance = *m2 / *count as f64;
+                    if matches!(self.kind, AggregateFunctionKind::StddevPop) {
+                        Some(ScalarValue::Float64(variance.sqrt()))
+                    } else {
+                        Some(ScalarValue::Float64(variance))
+                    }
+                }
+            }
+            (
+                AggregateFunctionKind::VarianceSample | AggregateFunctionKind::StddevSample,
+                AggregateState::Variance { count, mean: _, m2 },
+            ) => {
+                if *count <= 1 {
+                    None
+                } else {
+                    let variance = *m2 / (*count as f64 - 1.0);
+                    if matches!(self.kind, AggregateFunctionKind::StddevSample) {
+                        Some(ScalarValue::Float64(variance.sqrt()))
+                    } else {
+                        Some(ScalarValue::Float64(variance))
+                    }
                 }
             }
             _ => None,
@@ -191,7 +391,7 @@ fn extract_single_arg(function: &Function) -> Result<Expr, SqlExecutionError> {
     }
 }
 
-fn ensure_state_vec<'a>(
+pub(super) fn ensure_state_vec<'a>(
     hash_table: &'a mut AggregationHashTable,
     key: &GroupKey,
     template: &[AggregateState],
@@ -231,6 +431,25 @@ pub(super) fn vectorized_count_value_update(
             ensure_state_vec(hash_table, key, template).get_mut(agg_index)
         {
             *value += 1;
+        }
+    }
+}
+
+pub(super) fn vectorized_count_distinct_update(
+    hash_table: &mut AggregationHashTable,
+    agg_index: usize,
+    group_keys: &[GroupKey],
+    values_page: &ColumnarPage,
+    template: &[AggregateState],
+) {
+    for (row_idx, key) in group_keys.iter().enumerate() {
+        if values_page.null_bitmap.is_set(row_idx) {
+            continue;
+        }
+        if let Some(AggregateState::CountDistinct(values)) =
+            ensure_state_vec(hash_table, key, template).get_mut(agg_index)
+        {
+            values.insert(values_page.data.get_as_string(row_idx));
         }
     }
 }
@@ -279,10 +498,79 @@ pub(super) fn vectorized_average_update(
     }
 }
 
+pub(super) fn vectorized_min_update(
+    hash_table: &mut AggregationHashTable,
+    agg_index: usize,
+    group_keys: &[GroupKey],
+    values_page: &ColumnarPage,
+    template: &[AggregateState],
+) {
+    for (row_idx, key) in group_keys.iter().enumerate() {
+        if values_page.null_bitmap.is_set(row_idx) {
+            continue;
+        }
+        if let Some(value) = numeric_value(values_page, row_idx) {
+            if let Some(AggregateState::Min { value: min_value }) =
+                ensure_state_vec(hash_table, key, template).get_mut(agg_index)
+            {
+                *min_value = Some(min_value.map(|current| current.min(value)).unwrap_or(value));
+            }
+        }
+    }
+}
+
+pub(super) fn vectorized_max_update(
+    hash_table: &mut AggregationHashTable,
+    agg_index: usize,
+    group_keys: &[GroupKey],
+    values_page: &ColumnarPage,
+    template: &[AggregateState],
+) {
+    for (row_idx, key) in group_keys.iter().enumerate() {
+        if values_page.null_bitmap.is_set(row_idx) {
+            continue;
+        }
+        if let Some(value) = numeric_value(values_page, row_idx) {
+            if let Some(AggregateState::Max { value: max_value }) =
+                ensure_state_vec(hash_table, key, template).get_mut(agg_index)
+            {
+                *max_value = Some(max_value.map(|current| current.max(value)).unwrap_or(value));
+            }
+        }
+    }
+}
+
+pub(super) fn vectorized_variance_update(
+    hash_table: &mut AggregationHashTable,
+    agg_index: usize,
+    group_keys: &[GroupKey],
+    values_page: &ColumnarPage,
+    template: &[AggregateState],
+) {
+    for (row_idx, key) in group_keys.iter().enumerate() {
+        if values_page.null_bitmap.is_set(row_idx) {
+            continue;
+        }
+        if let Some(value) = numeric_value(values_page, row_idx) {
+            if let Some(AggregateState::Variance { count, mean, m2 }) =
+                ensure_state_vec(hash_table, key, template).get_mut(agg_index)
+            {
+                *count += 1;
+                let delta = value - *mean;
+                *mean += delta / *count as f64;
+                let delta2 = value - *mean;
+                *m2 += delta * delta2;
+            }
+        }
+    }
+}
+
 fn numeric_value(page: &ColumnarPage, idx: usize) -> Option<f64> {
     match &page.data {
         ColumnData::Int64(values) => values.get(idx).copied().map(|value| value as f64),
         ColumnData::Float64(values) => values.get(idx).copied(),
+        ColumnData::Text(values) => values.get_string(idx).parse::<f64>().ok(),
+        ColumnData::Dictionary(values) => values.get_string(idx).parse::<f64>().ok(),
         _ => None,
     }
 }

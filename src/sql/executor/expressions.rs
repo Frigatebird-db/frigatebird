@@ -761,6 +761,32 @@ pub(super) fn evaluate_expression_on_batch(
                 ))),
             }
         }
+        Expr::IsNull(inner) => {
+            let page = evaluate_expression_on_batch(inner, batch, catalog)?;
+            let mut values = Vec::with_capacity(page.num_rows);
+            for idx in 0..page.num_rows {
+                values.push(page.null_bitmap.is_set(idx));
+            }
+            Ok(ColumnarPage {
+                page_metadata: String::new(),
+                data: ColumnData::Boolean(values),
+                null_bitmap: Bitmap::new(page.num_rows),
+                num_rows: page.num_rows,
+            })
+        }
+        Expr::IsNotNull(inner) => {
+            let page = evaluate_expression_on_batch(inner, batch, catalog)?;
+            let mut values = Vec::with_capacity(page.num_rows);
+            for idx in 0..page.num_rows {
+                values.push(!page.null_bitmap.is_set(idx));
+            }
+            Ok(ColumnarPage {
+                page_metadata: String::new(),
+                data: ColumnData::Boolean(values),
+                null_bitmap: Bitmap::new(page.num_rows),
+                num_rows: page.num_rows,
+            })
+        }
         Expr::Nested(inner) => evaluate_expression_on_batch(inner, batch, catalog),
         Expr::Case {
             operand,
@@ -1252,6 +1278,22 @@ fn numeric_value_at(page: &ColumnarPage, idx: usize) -> Result<f64, SqlExecution
         ColumnData::Float64(values) => values.get(idx).copied().ok_or_else(|| {
             SqlExecutionError::OperationFailed("vectorized expression index out of bounds".into())
         }),
+        ColumnData::Text(values) => values
+            .get_string(idx)
+            .parse::<f64>()
+            .map_err(|_| {
+                SqlExecutionError::Unsupported(
+                    "vectorized expression requires numeric operands".into(),
+                )
+            }),
+        ColumnData::Dictionary(values) => values
+            .get_string(idx)
+            .parse::<f64>()
+            .map_err(|_| {
+                SqlExecutionError::Unsupported(
+                    "vectorized expression requires numeric operands".into(),
+                )
+            }),
         _ => Err(SqlExecutionError::Unsupported(
             "vectorized expression requires numeric operands".into(),
         )),
