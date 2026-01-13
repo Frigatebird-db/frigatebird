@@ -6,6 +6,7 @@ pub(crate) mod helpers;
 mod ordering;
 pub(crate) mod physical_evaluator;
 mod projection_helpers;
+mod scan_stream;
 mod row_functions;
 mod scalar_functions;
 mod scan_helpers;
@@ -26,6 +27,8 @@ use crate::ops_handler::{
 };
 use crate::page::Page;
 use crate::page_handler::PageHandler;
+use crate::pipeline::{Job, PipelineBatch, PipelineStep};
+use crate::sql::FilterExpr;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::planner::ExpressionPlanner;
 use crate::sql::{CreateTablePlan, PlannerError, plan_create_table_statement};
@@ -69,6 +72,9 @@ use ordering::{
 };
 use physical_evaluator::{PhysicalEvaluator, filter_supported};
 use projection_helpers::{build_projection, materialize_columns};
+use scan_stream::{
+    BatchStream, PipelineBatchStream, RowIdBatchStream, SingleBatchStream, merge_stream_to_batch,
+};
 use scan_helpers::{SortKeyPrefix, collect_sort_key_filters, collect_sort_key_prefixes};
 use values::{
     CachedValue, ScalarValue, cached_to_scalar_with_type, combine_numeric, compare_scalar_values,
@@ -81,6 +87,7 @@ use window_helpers::{
 
 const ENABLE_VECTORIZED_PROJECTION: bool = false;
 const ENABLE_VECTORIZED_AGGREGATION: bool = false;
+// const ENABLE_PIPELINE_SCAN: bool = false;
 
 #[derive(Debug)]
 pub enum SqlExecutionError {
@@ -1372,6 +1379,7 @@ impl SqlExecutor {
                 offset_expr.clone(),
                 distinct_flag,
                 qualify.clone(),
+                None,
             );
         }
 
@@ -1400,6 +1408,7 @@ impl SqlExecutor {
                     limit_expr.clone(),
                     offset_expr.clone(),
                     distinct_flag,
+                    None,
                 ) {
                     Ok(result) => return Ok(result),
                     Err(SqlExecutionError::Unsupported(_)) => {}
@@ -1448,6 +1457,7 @@ impl SqlExecutor {
                     limit_expr.clone(),
                     offset_expr.clone(),
                     having.as_ref(),
+                    None,
                 ) {
                     Ok(result) => return Ok(result),
                     Err(SqlExecutionError::Unsupported(_)) => {}
@@ -1494,6 +1504,7 @@ impl SqlExecutor {
                     result_columns,
                     limit_expr,
                     offset_expr,
+                    None,
                     None,
                 );
             }
@@ -1548,6 +1559,114 @@ impl SqlExecutor {
                     catalog.rows_per_page_group,
                 )?;
                 selection_applied_in_scan = true;
+            }
+        }
+
+        let can_run_vectorized_projection_with_rows = ENABLE_VECTORIZED_PROJECTION
+            && used_index
+            && !needs_aggregation
+            && qualify.is_none()
+            && projection_plan_opt.is_some()
+            && (order_clauses.is_empty() || !distinct_flag)
+            && (!has_selection || selection_applied_in_scan);
+        if can_run_vectorized_projection_with_rows {
+            if let Some(projection_plan) = &projection_plan_opt {
+                return self.execute_vectorized_projection(
+                    &table_name,
+                    &catalog,
+                    &columns,
+                    projection_plan,
+                    &required_ordinals,
+                    scan_selection_expr,
+                    &column_ordinals,
+                    &order_clauses,
+                    result_columns.clone(),
+                    limit_expr.clone(),
+                    offset_expr.clone(),
+                    distinct_flag,
+                    Some(candidate_rows.clone()),
+                );
+            }
+        }
+
+        let can_run_vectorized_aggregation_with_rows = ENABLE_VECTORIZED_AGGREGATION
+            && used_index
+            && needs_aggregation
+            && !distinct_flag
+            && order_clauses.is_empty()
+            && sort_key_filters.is_none()
+            && sort_key_prefixes.is_none()
+            && !apply_selection_late
+            && window_plans.is_empty()
+            && aggregate_plan_opt.is_some()
+            && simple_group_exprs.is_some()
+            && (!has_selection || selection_applied_in_scan);
+        if can_run_vectorized_aggregation_with_rows {
+            if let Some(aggregate_plan) = &aggregate_plan_opt {
+                let group_exprs = simple_group_exprs
+                    .clone()
+                    .expect("group expressions checked above");
+                return self.execute_vectorized_aggregation(
+                    &table_name,
+                    &catalog,
+                    &columns,
+                    aggregate_plan,
+                    &group_exprs,
+                    &required_ordinals,
+                    scan_selection_expr,
+                    &column_ordinals,
+                    result_columns.clone(),
+                    limit_expr.clone(),
+                    offset_expr.clone(),
+                    having.as_ref(),
+                    Some(candidate_rows.clone()),
+                );
+            }
+        }
+
+        if distinct_flag
+            && used_index
+            && !needs_aggregation
+            && projection_plan_opt.is_some()
+            && order_clauses.is_empty()
+            && window_plans.is_empty()
+            && qualify.is_none()
+            && sort_key_prefixes.is_none()
+            && sort_key_filters.is_none()
+            && (!has_selection || selection_applied_in_scan)
+        {
+            if let Some(projection_plan) = &projection_plan_opt {
+                let group_exprs = build_group_exprs_for_distinct(projection_plan, &columns)?;
+                let outputs: Vec<AggregateProjection> = projection_plan
+                    .items
+                    .iter()
+                    .map(|item| {
+                        Ok(AggregateProjection {
+                            expr: projection_item_expr(item, &columns)?,
+                        })
+                    })
+                    .collect::<Result<_, SqlExecutionError>>()?;
+                let synthetic_plan = AggregateProjectionPlan {
+                    outputs,
+                    required_ordinals: projection_plan.required_ordinals.clone(),
+                    headers: projection_plan.headers.clone(),
+                };
+
+                return self.execute_vectorized_aggregation(
+                    &table_name,
+                    &catalog,
+                    &columns,
+                    &synthetic_plan,
+                    &group_exprs,
+                    &required_ordinals,
+                    scan_selection_expr,
+                    &column_ordinals,
+                    result_columns.clone(),
+                    limit_expr.clone(),
+                    offset_expr.clone(),
+                    None,
+                    Some(candidate_rows.clone()),
+                );
             }
         }
 
@@ -1841,15 +1960,18 @@ impl SqlExecutor {
         limit_expr: Option<Expr>,
         offset_expr: Option<Offset>,
         distinct_flag: bool,
+        row_ids: Option<Vec<u64>>,
     ) -> Result<SelectResult, SqlExecutionError> {
-        let batch = self.scan_and_filter_vectorized(
+        let stream = self.build_scan_stream(
             table,
             columns,
             required_ordinals,
             selection_expr,
             column_ordinals,
             catalog.rows_per_page_group,
+            row_ids,
         )?;
+        let batch = merge_stream_to_batch(stream)?;
 
         if batch.num_rows == 0 || batch.columns.is_empty() {
             return Ok(SelectResult {
@@ -1904,6 +2026,7 @@ impl SqlExecutor {
         offset_expr: Option<Offset>,
         distinct_flag: bool,
         mut qualify_expr: Option<Expr>,
+        row_ids: Option<Vec<u64>>,
     ) -> Result<SelectResult, SqlExecutionError> {
         if projection_plan.items.is_empty() {
             return Err(SqlExecutionError::Unsupported(
@@ -1936,14 +2059,16 @@ impl SqlExecutor {
             rewrite_window_expressions(&mut clause.expr, &alias_map)?;
         }
 
-        let mut batch = self.scan_and_filter_vectorized(
+        let stream = self.build_scan_stream(
             table,
             columns,
             required_ordinals,
             selection_expr,
             column_ordinals,
             catalog.rows_per_page_group,
+            row_ids,
         )?;
+        let mut batch = merge_stream_to_batch(stream)?;
         if batch.num_rows == 0 {
             return Ok(SelectResult {
                 columns: result_columns,
@@ -2190,15 +2315,18 @@ impl SqlExecutor {
         limit_expr: Option<Expr>,
         offset_expr: Option<Offset>,
         having: Option<&Expr>,
+        row_ids: Option<Vec<u64>>,
     ) -> Result<SelectResult, SqlExecutionError> {
-        let batch = self.scan_and_filter_vectorized(
+        let stream = self.build_scan_stream(
             table,
             columns,
             required_ordinals,
             selection_expr,
             column_ordinals,
             catalog.rows_per_page_group,
+            row_ids,
         )?;
+        let batch = merge_stream_to_batch(stream)?;
 
         let group_keys = evaluate_group_keys_on_batch(group_exprs, &batch, catalog)?;
 
@@ -3449,6 +3577,129 @@ impl SqlExecutor {
         }
 
         Ok(final_batch)
+    }
+
+    fn scan_and_filter_vectorized_stream(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        scan_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&PhysicalExpr>,
+        column_ordinals: &HashMap<String, usize>,
+        rows_per_page_group: u64,
+    ) -> Result<Box<dyn BatchStream>, SqlExecutionError> {
+        let batch = self.scan_and_filter_vectorized(
+            table,
+            columns,
+            scan_ordinals,
+            selection_expr,
+            column_ordinals,
+            rows_per_page_group,
+        )?;
+        Ok(Box::new(SingleBatchStream::new(batch)))
+    }
+
+    fn build_scan_stream(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        scan_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&PhysicalExpr>,
+        column_ordinals: &HashMap<String, usize>,
+        rows_per_page_group: u64,
+        row_ids: Option<Vec<u64>>,
+    ) -> Result<Box<dyn BatchStream>, SqlExecutionError> {
+        if let Some(row_ids) = row_ids {
+            let ordinals = scan_ordinals.iter().copied().collect();
+            return Ok(Box::new(RowIdBatchStream::new(
+                Arc::clone(&self.page_handler),
+                table.to_string(),
+                columns.to_vec(),
+                ordinals,
+                row_ids,
+                rows_per_page_group,
+                column_ordinals.clone(),
+            )));
+        }
+        if let Some(stream) =
+            self.build_pipeline_scan_stream(table, columns, scan_ordinals, selection_expr)?
+        {
+            return Ok(Box::new(stream));
+        }
+
+        self.scan_and_filter_vectorized_stream(
+            table,
+            columns,
+            scan_ordinals,
+            selection_expr,
+            column_ordinals,
+            rows_per_page_group,
+        )
+    }
+
+    fn build_pipeline_scan_stream(
+        &self,
+        table: &str,
+        columns: &[ColumnCatalog],
+        scan_ordinals: &BTreeSet<usize>,
+        selection_expr: Option<&PhysicalExpr>,
+    ) -> Result<Option<PipelineBatchStream>, SqlExecutionError> {
+        let mut ordinals: Vec<usize> = scan_ordinals.iter().copied().collect();
+        if ordinals.is_empty() {
+            return Ok(None);
+        }
+        ordinals.sort_unstable();
+
+        let mut steps = Vec::new();
+        let (entry_producer, mut previous_receiver) =
+            crossbeam::channel::unbounded::<PipelineBatch>();
+        let mut is_root = true;
+
+        for &ordinal in &ordinals {
+            let column = columns.get(ordinal).ok_or_else(|| {
+                SqlExecutionError::OperationFailed("invalid scan ordinal".into())
+            })?;
+            let (current_producer, next_receiver) =
+                crossbeam::channel::unbounded::<PipelineBatch>();
+            steps.push(PipelineStep::new(
+                table.to_string(),
+                column.name.clone(),
+                ordinal,
+                Vec::new(),
+                is_root,
+                Arc::clone(&self.page_handler),
+                current_producer,
+                previous_receiver,
+            ));
+            previous_receiver = next_receiver;
+            is_root = false;
+        }
+
+        if let Some(expr) = selection_expr {
+            let (current_producer, next_receiver) =
+                crossbeam::channel::unbounded::<PipelineBatch>();
+            let filter_step = PipelineStep::new(
+                table.to_string(),
+                columns[ordinals[0]].name.clone(),
+                ordinals[0],
+                vec![FilterExpr::leaf(expr.clone())],
+                false,
+                Arc::clone(&self.page_handler),
+                current_producer,
+                previous_receiver,
+            );
+            steps.push(filter_step);
+            previous_receiver = next_receiver;
+        }
+
+        let output_receiver = previous_receiver;
+        let job = Job::new(
+            table.to_string(),
+            steps,
+            entry_producer,
+            output_receiver.clone(),
+        );
+        Ok(Some(PipelineBatchStream::new(job, output_receiver)))
     }
 
     fn unused_scan_placeholder(&self) {}

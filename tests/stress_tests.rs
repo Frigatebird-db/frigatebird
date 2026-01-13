@@ -9,7 +9,7 @@ use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
 use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::pipeline::{Job, PipelineStep};
+use idk_uwu_ig::pipeline::{Job, PipelineBatch, PipelineStep};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -504,9 +504,9 @@ fn executor_stress_many_small_jobs() {
 
     // Submit 1000 small jobs
     for _ in 0..1000 {
-        let (entry_tx, _) = channel::unbounded();
-        let (tx, rx) = channel::unbounded();
-        let _ = tx.send(vec![]);
+        let (entry_tx, _) = channel::unbounded::<PipelineBatch>();
+        let (tx, rx) = channel::unbounded::<PipelineBatch>();
+        let _ = tx.send(PipelineBatch::new());
 
         let step = PipelineStep::new(
             "table".to_string(),
@@ -518,7 +518,8 @@ fn executor_stress_many_small_jobs() {
             tx,
             rx,
         );
-        let job = Job::new("table".into(), vec![step], entry_tx);
+        let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+        let job = Job::new("table".into(), vec![step], entry_tx, out_rx);
         executor.submit(job);
     }
 
@@ -532,15 +533,15 @@ fn executor_stress_few_large_jobs() {
 
     // Submit 10 large jobs (50 steps each)
     for job_id in 0..10 {
-        let (entry_tx, _) = channel::unbounded();
+        let (entry_tx, _) = channel::unbounded::<PipelineBatch>();
         let mut steps = vec![];
 
-        let (tx_init, rx_init) = channel::unbounded();
-        let _ = tx_init.send(vec![]);
+        let (tx_init, rx_init) = channel::unbounded::<PipelineBatch>();
+        let _ = tx_init.send(PipelineBatch::new());
         let mut prev_rx = rx_init;
 
         for i in 0..50 {
-            let (tx, rx) = channel::unbounded();
+            let (tx, rx) = channel::unbounded::<PipelineBatch>();
             let table_name = format!("table{}", job_id);
             steps.push(PipelineStep::new(
                 table_name,
@@ -555,7 +556,8 @@ fn executor_stress_few_large_jobs() {
             prev_rx = rx;
         }
 
-        let job = Job::new(format!("table{}", job_id), steps, entry_tx);
+        let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+        let job = Job::new(format!("table{}", job_id), steps, entry_tx, out_rx);
         executor.submit(job);
     }
 
@@ -574,9 +576,9 @@ fn executor_stress_concurrent_submission() {
         let ph = Arc::clone(&page_handler);
         let handle = thread::spawn(move || {
             for job_id in 0..20 {
-                let (entry_tx, _) = channel::unbounded();
-                let (tx, rx) = channel::unbounded();
-                let _ = tx.send(vec![]);
+                let (entry_tx, _) = channel::unbounded::<PipelineBatch>();
+                let (tx, rx) = channel::unbounded::<PipelineBatch>();
+                let _ = tx.send(PipelineBatch::new());
 
                 let table_name = format!("t{}j{}", thread_id, job_id);
                 let step = PipelineStep::new(
@@ -589,7 +591,8 @@ fn executor_stress_concurrent_submission() {
                     tx,
                     rx,
                 );
-                let job = Job::new(table_name, vec![step], entry_tx);
+                let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+                let job = Job::new(table_name, vec![step], entry_tx, out_rx);
                 exec.submit(job);
             }
         });
@@ -610,7 +613,7 @@ fn executor_stress_variable_job_sizes() {
 
     // Mix of small, medium, and large jobs
     for i in 0..100 {
-        let (entry_tx, _) = channel::unbounded();
+        let (entry_tx, _) = channel::unbounded::<PipelineBatch>();
         let step_count = match i % 3 {
             0 => 1,  // Small
             1 => 10, // Medium
@@ -618,12 +621,12 @@ fn executor_stress_variable_job_sizes() {
         };
 
         let mut steps = vec![];
-        let (tx_init, rx_init) = channel::unbounded();
-        let _ = tx_init.send(vec![]);
+        let (tx_init, rx_init) = channel::unbounded::<PipelineBatch>();
+        let _ = tx_init.send(PipelineBatch::new());
         let mut prev_rx = rx_init;
 
         for j in 0..step_count {
-            let (tx, rx) = channel::unbounded();
+            let (tx, rx) = channel::unbounded::<PipelineBatch>();
             let table_name = format!("table{}", i);
             steps.push(PipelineStep::new(
                 table_name,
@@ -638,7 +641,8 @@ fn executor_stress_variable_job_sizes() {
             prev_rx = rx;
         }
 
-        let job = Job::new(format!("job{}", i), steps, entry_tx);
+        let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+        let job = Job::new(format!("job{}", i), steps, entry_tx, out_rx);
         executor.submit(job);
     }
 
@@ -803,9 +807,9 @@ fn chaos_test_everything_concurrent() {
         let ph = Arc::clone(&page_handler);
         let handle = thread::spawn(move || {
             for i in 0..20 {
-                let (entry_tx, _) = channel::unbounded();
-                let (tx, rx) = channel::unbounded();
-                let _ = tx.send(vec![]);
+                let (entry_tx, _) = channel::unbounded::<PipelineBatch>();
+                let (tx, rx) = channel::unbounded::<PipelineBatch>();
+                let _ = tx.send(PipelineBatch::new());
                 let table_name = format!("j{}", i);
                 let step = PipelineStep::new(
                     table_name.clone(),
@@ -817,7 +821,8 @@ fn chaos_test_everything_concurrent() {
                     tx,
                     rx,
                 );
-                let job = Job::new(table_name, vec![step], entry_tx);
+                let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+                let job = Job::new(table_name, vec![step], entry_tx, out_rx);
                 exec.submit(job);
             }
         });

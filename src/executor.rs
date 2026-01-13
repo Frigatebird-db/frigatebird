@@ -205,7 +205,8 @@ mod tests {
                 rx,
             ));
         }
-        Job::new("t".into(), steps, entry_tx)
+        let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+        Job::new("t".into(), steps, entry_tx, out_rx)
     }
 
     #[test]

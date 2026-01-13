@@ -13,6 +13,19 @@ use idk_uwu_ig::sql::plan_sql;
 use idk_uwu_ig::sql::types::DataType;
 use std::sync::{Arc, RwLock};
 
+fn dummy_batch(row_ids: &[u64]) -> PipelineBatch {
+    let mut batch = PipelineBatch::new();
+    batch.num_rows = row_ids.len();
+    batch.row_ids = row_ids.to_vec();
+    batch
+}
+
+fn assert_batches_match(lhs: &PipelineBatch, rhs: &PipelineBatch) {
+    assert_eq!(lhs.num_rows, rhs.num_rows);
+    assert_eq!(lhs.row_ids, rhs.row_ids);
+    assert_eq!(lhs.columns.len(), rhs.columns.len());
+}
+
 /// Helper function to create a PageHandler with test data
 fn create_page_handler_with_data() -> (Arc<PageHandler>, Arc<PageDirectory>) {
     let meta_store = Arc::new(RwLock::new(TableMetaStore::new()));
@@ -132,7 +145,7 @@ fn test_pipeline_step_execute_flow() {
     let job = &jobs[0];
 
     // Send a batch through the entry producer
-    let batch: PipelineBatch = vec![0, 1, 2, 3, 4];
+    let batch = dummy_batch(&[0, 1, 2, 3, 4]);
     job.entry_producer.send(batch.clone()).unwrap();
 
     // Execute the first step
@@ -310,13 +323,13 @@ fn test_pipeline_channel_wiring() {
     }
 
     // Send batch through entry producer
-    let batch: PipelineBatch = vec![1, 2, 3];
+    let batch = dummy_batch(&[1, 2, 3]);
     job.entry_producer.send(batch.clone()).unwrap();
 
     // First step should receive from entry
     let first_step = &job.steps[0];
     let received_first = first_step.previous_receiver.try_recv().unwrap();
-    assert_eq!(received_first, batch);
+    assert_batches_match(&received_first, &batch);
 
     // Forward to next step
     first_step
@@ -327,7 +340,7 @@ fn test_pipeline_channel_wiring() {
     // Second step should receive from first
     let second_step = &job.steps[1];
     let received_second = second_step.previous_receiver.try_recv().unwrap();
-    assert_eq!(received_second, received_first);
+    assert_batches_match(&received_second, &received_first);
 }
 
 #[test]

@@ -21,6 +21,7 @@ mod metadata_store;
 mod ops_handler;
 mod page;
 mod page_handler;
+mod pipeline;
 mod pool;
 mod sql;
 #[path = "wal/lib.rs"]

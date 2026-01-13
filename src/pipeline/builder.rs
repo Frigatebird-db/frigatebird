@@ -3,7 +3,7 @@ use types::{Job, PipelineBatch, PipelineStep};
 
 use crate::page_handler::PageHandler;
 use crate::sql::models::{FilterExpr, QueryPlan};
-use crossbeam::channel::{Sender, unbounded};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 use rand::{Rng, distributions::Alphanumeric};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,20 +31,26 @@ pub fn build_pipeline(plan: &QueryPlan, page_handler: Arc<PageHandler>) -> Vec<J
                     .expect("missing column in pipeline catalog");
                 grouped_steps.push((column, ordinal, filters));
             }
-            let (entry_producer, steps) = attach_channels(
+            let (entry_producer, output_receiver, steps) = attach_channels(
                 grouped_steps,
                 table.table_name.clone(),
                 Arc::clone(&page_handler),
             );
 
-            jobs.push(Job::new(table.table_name.clone(), steps, entry_producer));
+            jobs.push(Job::new(
+                table.table_name.clone(),
+                steps,
+                entry_producer,
+                output_receiver,
+            ));
         } else {
             // No filters, empty pipeline
-            let (entry_producer, _) = unbounded::<PipelineBatch>();
+            let (entry_producer, output_receiver) = unbounded::<PipelineBatch>();
             jobs.push(Job::new(
                 table.table_name.clone(),
                 Vec::new(),
                 entry_producer,
+                output_receiver,
             ));
         }
     }
@@ -102,7 +108,7 @@ fn attach_channels(
     grouped_steps: Vec<(String, usize, Vec<FilterExpr>)>,
     table: String,
     page_handler: Arc<PageHandler>,
-) -> (Sender<PipelineBatch>, Vec<PipelineStep>) {
+) -> (Sender<PipelineBatch>, Receiver<PipelineBatch>, Vec<PipelineStep>) {
     let (entry_producer, mut previous_receiver) = unbounded::<PipelineBatch>();
     let mut steps = Vec::with_capacity(grouped_steps.len());
     let mut is_root = true;
@@ -123,7 +129,7 @@ fn attach_channels(
         is_root = false;
     }
 
-    (entry_producer, steps)
+    (entry_producer, previous_receiver, steps)
 }
 
 pub(super) fn generate_pipeline_id() -> String {

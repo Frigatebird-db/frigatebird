@@ -14,6 +14,19 @@ use std::cmp::Ordering as CmpOrdering;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, RwLock};
 
+fn dummy_batch(row_ids: &[u64]) -> PipelineBatch {
+    let mut batch = PipelineBatch::new();
+    batch.num_rows = row_ids.len();
+    batch.row_ids = row_ids.to_vec();
+    batch
+}
+
+fn assert_batches_match(lhs: &PipelineBatch, rhs: &PipelineBatch) {
+    assert_eq!(lhs.num_rows, rhs.num_rows);
+    assert_eq!(lhs.row_ids, rhs.row_ids);
+    assert_eq!(lhs.columns.len(), rhs.columns.len());
+}
+
 fn create_test_page_handler() -> (Arc<PageHandler>, Arc<PageDirectory>) {
     let meta_store = Arc::new(RwLock::new(TableMetaStore::new()));
     let directory = Arc::new(PageDirectory::new(meta_store));
@@ -250,7 +263,7 @@ fn wires_channel_chain_between_steps() {
     assert!(!job.id.is_empty());
     assert_eq!(job.cost, job.steps.len());
 
-    let batch: PipelineBatch = vec![1, 2, 3];
+    let batch = dummy_batch(&[1, 2, 3]);
     job.entry_producer
         .send(batch.clone())
         .expect("entry producer should accept batches");
@@ -260,7 +273,7 @@ fn wires_channel_chain_between_steps() {
         .previous_receiver
         .try_recv()
         .expect("first step should receive entry batch");
-    assert_eq!(received_first, batch);
+    assert_batches_match(&received_first, &batch);
 
     first_step
         .current_producer
@@ -272,5 +285,5 @@ fn wires_channel_chain_between_steps() {
         .previous_receiver
         .try_recv()
         .expect("second step should receive forwarded batch");
-    assert_eq!(received_second, received_first);
+    assert_batches_match(&received_second, &received_first);
 }

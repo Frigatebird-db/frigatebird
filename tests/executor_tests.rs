@@ -37,7 +37,7 @@ fn create_dummy_job(step_count: usize) -> Job {
 
     let mut prev_rx = {
         let (tx, rx) = channel::unbounded::<PipelineBatch>();
-        let _ = tx.send(vec![]);
+        let _ = tx.send(PipelineBatch::new());
         rx
     };
 
@@ -56,7 +56,8 @@ fn create_dummy_job(step_count: usize) -> Job {
         prev_rx = rx;
     }
 
-    Job::new("test_table".into(), steps, entry_tx)
+    let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+    Job::new("test_table".into(), steps, entry_tx, out_rx)
 }
 
 #[test]
@@ -106,7 +107,8 @@ fn executor_job_get_next_executes_steps() {
         rx.clone(),
     );
 
-    let job = Job::new("table".into(), vec![step], entry_tx);
+    let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+    let job = Job::new("table".into(), vec![step], entry_tx, out_rx);
 
     let job_arc = Arc::new(job);
     let job_clone = Arc::clone(&job_arc);
@@ -198,7 +200,8 @@ fn executor_job_ordering_by_cost() {
 #[test]
 fn executor_empty_job() {
     let (entry_tx, _) = channel::unbounded::<PipelineBatch>();
-    let job = Job::new("table".into(), vec![], entry_tx);
+    let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+    let job = Job::new("table".into(), vec![], entry_tx, out_rx);
     assert_eq!(job.cost, 0);
 
     job.get_next(); // Should not panic
@@ -247,13 +250,13 @@ fn executor_job_table_name() {
 fn executor_step_execution_sequence() {
     let execution_order = Arc::new(AtomicUsize::new(0));
 
-    let (entry_tx, _) = channel::unbounded();
-    let (tx1, rx1) = channel::unbounded();
-    let (tx2, rx2) = channel::unbounded();
+    let (entry_tx, _) = channel::unbounded::<PipelineBatch>();
+    let (tx1, rx1) = channel::unbounded::<PipelineBatch>();
+    let (tx2, rx2) = channel::unbounded::<PipelineBatch>();
 
     // Send dummy data so steps don't block forever
-    let _ = tx1.send(vec![]);
-    let _ = tx2.send(vec![]);
+    let _ = tx1.send(PipelineBatch::new());
+    let _ = tx2.send(PipelineBatch::new());
 
     let page_handler = create_test_page_handler();
 
@@ -278,7 +281,8 @@ fn executor_step_execution_sequence() {
         rx2,
     );
 
-    let job = Job::new("table".into(), vec![step1, step2], entry_tx);
+    let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
+    let job = Job::new("table".into(), vec![step1, step2], entry_tx, out_rx);
     let job_arc = Arc::new(job);
 
     let job1 = Arc::clone(&job_arc);
