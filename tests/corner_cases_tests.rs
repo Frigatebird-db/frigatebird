@@ -493,6 +493,7 @@ fn job_with_zero_steps() {
         next_free_slot: AtomicUsize::new(0),
         id: "job_zero".to_string(),
         entry_producer: crossbeam_channel::unbounded().0,
+        output_receiver: crossbeam_channel::unbounded().1,
     };
 
     // Should handle gracefully
@@ -528,6 +529,7 @@ fn job_single_step() {
         next_free_slot: AtomicUsize::new(0),
         id: "job_single".to_string(),
         entry_producer: tx,
+        output_receiver: crossbeam_channel::unbounded().1,
     };
 
     job.get_next();
@@ -549,6 +551,7 @@ fn job_get_next_after_completion() {
         next_free_slot: AtomicUsize::new(0),
         id: "job_complete".to_string(),
         entry_producer: tx,
+        output_receiver: crossbeam_channel::unbounded().1,
     };
 
     // Call multiple times after completion
