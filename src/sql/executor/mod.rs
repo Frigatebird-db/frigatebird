@@ -1076,6 +1076,7 @@ impl SqlExecutor {
         qualify_expr: Option<&Expr>,
         row_ids: Option<Vec<u64>>,
     ) -> Result<SelectResult, SqlExecutionError> {
+        let has_row_ids = row_ids.is_some();
         let stream = self.build_scan_stream(
             table,
             columns,
@@ -1085,7 +1086,14 @@ impl SqlExecutor {
             catalog.rows_per_page_group,
             row_ids,
         )?;
-        let batch = merge_stream_to_batch(stream)?;
+        let mut batch = merge_stream_to_batch(stream)?;
+
+        if has_row_ids {
+            if let Some(expr) = selection_expr {
+                let bitmap = PhysicalEvaluator::evaluate_filter(expr, &batch);
+                batch = batch.filter_by_bitmap(&bitmap);
+            }
+        }
 
         if batch.num_rows == 0 || batch.columns.is_empty() {
             return Ok(SelectResult {

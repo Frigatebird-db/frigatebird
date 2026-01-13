@@ -254,38 +254,11 @@ fn gather_column_for_rows(
     if row_ids.is_empty() {
         return ColumnarPage::empty();
     }
-
-    let min_row = *row_ids.first().expect("row_ids not empty");
-    let max_row = *row_ids.last().expect("row_ids not empty");
-
-    let slices = page_handler.list_range_in_table(table, &column.name, min_row, max_row);
-    if slices.is_empty() {
-        return ColumnarPage::empty();
-    }
-
-    let descriptors: Vec<_> = slices.iter().map(|s| s.descriptor.clone()).collect();
-    let pages = page_handler.get_pages(descriptors);
-    let mut page_map = HashMap::with_capacity(pages.len());
-    for page in pages {
-        page_map.insert(page.page.page_metadata.clone(), page.page.clone());
-    }
-
     let mut entries = Vec::with_capacity(row_ids.len());
     for &row_id in row_ids {
-        let mut found = false;
-        for slice in &slices {
-            if row_id >= slice.start_row_offset && row_id < slice.end_row_offset {
-                if let Some(page) = page_map.get(&slice.descriptor.id) {
-                    let idx = (row_id - slice.start_row_offset) as usize;
-                    if let Some(entry) = page.entry_at(idx) {
-                        entries.push(entry);
-                        found = true;
-                    }
-                }
-                break;
-            }
-        }
-        if !found {
+        if let Some(entry) = page_handler.read_entry_at(table, &column.name, row_id) {
+            entries.push(entry);
+        } else {
             entries.push(Entry::new(""));
         }
     }
