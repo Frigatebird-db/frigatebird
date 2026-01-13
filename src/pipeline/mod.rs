@@ -2,6 +2,7 @@ pub mod builder;
 pub mod operators;
 pub mod planner;
 pub mod pattern_matching;
+pub mod select_planner;
 pub mod types;
 pub mod window_helpers;
 

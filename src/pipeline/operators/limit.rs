@@ -35,6 +35,7 @@ impl<'a> PipelineOperator for LimitOperator<'a> {
         if input.num_rows == 0 {
             return Ok(vec![PipelineBatch::new()]);
         }
+        // Limit/offset slices batches, preserving row_ids for kept rows.
         self.execute_batches(vec![input])
     }
 }

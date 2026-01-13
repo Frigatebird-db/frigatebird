@@ -29,14 +29,14 @@ pub(crate) enum ProjectionItem {
     Computed { expr: Expr },
 }
 
-pub(super) struct GroupByInfo {
-    pub(super) sets: Vec<GroupingSetPlan>,
+pub(crate) struct GroupByInfo {
+    pub(crate) sets: Vec<GroupingSetPlan>,
 }
 
 #[derive(Clone)]
-pub(super) struct GroupingSetPlan {
-    pub(super) expressions: Vec<Expr>,
-    pub(super) masked_exprs: Vec<Expr>,
+pub(crate) struct GroupingSetPlan {
+    pub(crate) expressions: Vec<Expr>,
+    pub(crate) masked_exprs: Vec<Expr>,
 }
 
 #[derive(Clone)]

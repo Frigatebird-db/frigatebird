@@ -1,20 +1,20 @@
-mod aggregates;
+pub(crate) mod aggregates;
 mod aggregation_helpers;
 mod aggregation_exec;
 pub mod batch;
 mod executor_types;
 mod executor_utils;
 mod expressions;
-mod grouping_helpers;
+pub(crate) mod grouping_helpers;
 pub(crate) mod helpers;
 mod ordering;
 pub(crate) mod physical_evaluator;
-mod projection_helpers;
-mod scan_stream;
+pub(crate) mod projection_helpers;
+pub(crate) mod scan_stream;
 mod dml;
 mod select;
 mod select_exec;
-mod select_helpers;
+pub(crate) mod select_helpers;
 mod scan_helpers_exec;
 mod row_functions;
 mod scalar_functions;
@@ -73,13 +73,14 @@ use expressions::{evaluate_row_expr, evaluate_scalar_expression};
 use grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
 use helpers::{
     collect_expr_column_ordinals, column_name_from_expr, expr_to_string, object_name_to_string,
-    parse_limit, parse_offset, table_with_joins_to_name,
+    table_with_joins_to_name,
 };
 use ordering::{MergeOperator, build_group_order_key};
 
 pub(crate) use aggregates::AggregateProjectionPlan;
 pub(crate) use executor_types::{AggregatedRow, GroupKey, ProjectionItem, ProjectionPlan};
 pub(crate) use executor_utils::{chunk_batch, deduplicate_batches, merge_batches};
+pub(crate) use helpers::{parse_limit, parse_offset};
 pub(crate) use ordering::{
     NullsPlacement, OrderClause, OrderKey, build_order_keys_on_batch, compare_order_keys,
     sort_batch_in_memory,
@@ -233,6 +234,9 @@ pub struct SqlExecutor {
 }
 
 impl SqlExecutor {
+    pub(crate) fn table_catalog(&self, table: &str) -> Option<TableCatalog> {
+        self.page_directory.table_catalog(table)
+    }
     pub fn new(page_handler: Arc<PageHandler>, page_directory: Arc<PageDirectory>) -> Self {
         Self::new_with_writer_mode(page_handler, page_directory, true)
     }
@@ -417,7 +421,7 @@ impl SqlExecutor {
         Ok(final_batch)
     }
 
-    fn apply_qualify_filter(
+    pub(crate) fn apply_qualify_filter(
         &self,
         batch: ColumnarBatch,
         expr: &Expr,

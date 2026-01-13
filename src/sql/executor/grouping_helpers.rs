@@ -8,7 +8,7 @@ use super::executor_types::{GroupByInfo, GroupKey, GroupingSetPlan};
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{Expr, GroupByExpr};
 
-pub(super) fn validate_group_by(
+pub(crate) fn validate_group_by(
     group_by: &GroupByExpr,
 ) -> Result<Option<GroupByInfo>, SqlExecutionError> {
     match group_by {

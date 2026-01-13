@@ -9,7 +9,7 @@ use sqlparser::ast::{
 };
 use std::collections::HashMap;
 
-pub(super) fn build_projection_alias_map(
+pub(crate) fn build_projection_alias_map(
     plan: &ProjectionPlan,
     columns: &[ColumnCatalog],
 ) -> HashMap<String, Expr> {
@@ -38,7 +38,7 @@ pub(super) fn build_projection_alias_map(
     map
 }
 
-pub(super) fn build_aggregate_alias_map(plan: &AggregateProjectionPlan) -> HashMap<String, Expr> {
+pub(crate) fn build_aggregate_alias_map(plan: &AggregateProjectionPlan) -> HashMap<String, Expr> {
     let mut map = HashMap::new();
     for (label, output) in plan.headers.iter().zip(plan.outputs.iter()) {
         map.insert(label.clone(), output.expr.clone());
@@ -46,7 +46,7 @@ pub(super) fn build_aggregate_alias_map(plan: &AggregateProjectionPlan) -> HashM
     map
 }
 
-pub(super) fn projection_expressions_from_plan(
+pub(crate) fn projection_expressions_from_plan(
     plan: &ProjectionPlan,
     columns: &[ColumnCatalog],
 ) -> Vec<Expr> {
@@ -64,7 +64,7 @@ pub(super) fn projection_expressions_from_plan(
         .collect()
 }
 
-pub(super) fn resolve_group_by_exprs(
+pub(crate) fn resolve_group_by_exprs(
     group_by: &GroupByExpr,
     projection_exprs: &[Expr],
 ) -> Result<GroupByExpr, SqlExecutionError> {
@@ -83,7 +83,7 @@ pub(super) fn resolve_group_by_exprs(
     }
 }
 
-pub(super) fn determine_group_by_strategy(
+pub(crate) fn determine_group_by_strategy(
     group_by: &GroupByExpr,
     sort_columns: &[ColumnCatalog],
     order_clauses: &[OrderClause],
@@ -132,19 +132,19 @@ pub(super) fn determine_group_by_strategy(
     Ok(GroupByStrategy::Hash)
 }
 
-pub(super) enum GroupByStrategy {
+pub(crate) enum GroupByStrategy {
     SortPrefix,
     OrderAligned,
     Hash,
 }
 
 impl GroupByStrategy {
-    pub(super) fn prefer_exact_numeric(&self) -> bool {
+    pub(crate) fn prefer_exact_numeric(&self) -> bool {
         matches!(self, GroupByStrategy::OrderAligned)
     }
 }
 
-pub(super) fn resolve_order_by_exprs(
+pub(crate) fn resolve_order_by_exprs(
     clauses: &[OrderByExpr],
     projection_exprs: &[Expr],
 ) -> Result<Vec<OrderByExpr>, SqlExecutionError> {
@@ -179,7 +179,7 @@ fn resolve_projection_reference(
     }
 }
 
-pub(super) fn rewrite_aliases_in_expr(expr: &Expr, alias_map: &HashMap<String, Expr>) -> Expr {
+pub(crate) fn rewrite_aliases_in_expr(expr: &Expr, alias_map: &HashMap<String, Expr>) -> Expr {
     use sqlparser::ast::Expr::*;
 
     match expr {

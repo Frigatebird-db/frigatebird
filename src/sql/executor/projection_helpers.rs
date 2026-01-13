@@ -13,7 +13,7 @@ use sqlparser::ast::Expr;
 use sqlparser::ast::SelectItem;
 use std::collections::{BTreeSet, HashMap};
 
-pub(super) fn build_projection(
+pub(crate) fn build_projection(
     projection: Vec<SelectItem>,
     table_columns: &[ColumnCatalog],
     column_ordinals: &HashMap<String, usize>,

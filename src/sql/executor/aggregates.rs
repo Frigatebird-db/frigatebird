@@ -576,13 +576,13 @@ fn numeric_value(page: &ColumnarPage, idx: usize) -> Option<f64> {
 }
 
 pub(crate) struct AggregateProjectionPlan {
-    pub(super) outputs: Vec<AggregateProjection>,
-    pub(super) required_ordinals: BTreeSet<usize>,
-    pub(super) headers: Vec<String>,
+    pub(crate) outputs: Vec<AggregateProjection>,
+    pub(crate) required_ordinals: BTreeSet<usize>,
+    pub(crate) headers: Vec<String>,
 }
 
-pub(super) struct AggregateProjection {
-    pub(super) expr: Expr,
+pub(crate) struct AggregateProjection {
+    pub(crate) expr: Expr,
 }
 
 pub(super) struct AggregateDataset<'a> {
@@ -617,7 +617,7 @@ impl<'a> AggregateDataset<'a> {
     }
 }
 
-pub(super) fn select_item_contains_aggregate(item: &SelectItem) -> bool {
+pub(crate) fn select_item_contains_aggregate(item: &SelectItem) -> bool {
     match item {
         SelectItem::UnnamedExpr(expr) => expr_contains_aggregate(expr),
         SelectItem::ExprWithAlias { expr, .. } => expr_contains_aggregate(expr),
@@ -719,7 +719,7 @@ pub(super) fn is_aggregate_function(function: &Function) -> bool {
     )
 }
 
-pub(super) fn plan_aggregate_projection(
+pub(crate) fn plan_aggregate_projection(
     items: &[SelectItem],
     column_ordinals: &HashMap<String, usize>,
     table: &str,

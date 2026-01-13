@@ -7,7 +7,7 @@ use sqlparser::ast::{
 };
 use std::collections::{BTreeSet, HashMap};
 
-pub(super) fn object_name_to_string(name: &ObjectName) -> String {
+pub(crate) fn object_name_to_string(name: &ObjectName) -> String {
     name.0
         .iter()
         .map(|ident| ident.value.clone())
@@ -55,7 +55,7 @@ pub(crate) fn column_name_from_expr(expr: &Expr) -> Option<String> {
     }
 }
 
-pub(super) fn parse_limit(limit: Option<Expr>) -> Result<Option<usize>, SqlExecutionError> {
+pub(crate) fn parse_limit(limit: Option<Expr>) -> Result<Option<usize>, SqlExecutionError> {
     match limit {
         None => Ok(None),
         Some(Expr::Identifier(ident)) if ident.value.eq_ignore_ascii_case("all") => Ok(None),
@@ -63,7 +63,7 @@ pub(super) fn parse_limit(limit: Option<Expr>) -> Result<Option<usize>, SqlExecu
     }
 }
 
-pub(super) fn parse_offset(offset: Option<Offset>) -> Result<usize, SqlExecutionError> {
+pub(crate) fn parse_offset(offset: Option<Offset>) -> Result<usize, SqlExecutionError> {
     match offset {
         None => Ok(0),
         Some(offset) => parse_usize_literal(&offset.value, "OFFSET"),
@@ -210,7 +210,7 @@ fn gather_filters(
     }
 }
 
-pub(super) fn collect_expr_column_ordinals(
+pub(crate) fn collect_expr_column_ordinals(
     expr: &Expr,
     column_ordinals: &HashMap<String, usize>,
     table: &str,

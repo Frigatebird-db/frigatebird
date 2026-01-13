@@ -28,6 +28,7 @@ impl PipelineOperator for DistinctOperator {
         if input.num_rows == 0 {
             return Ok(vec![PipelineBatch::new()]);
         }
+        // Distinct reorders/filters rows; row_ids remain aligned via gather.
         self.execute_batches(vec![input])
     }
 }

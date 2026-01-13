@@ -39,6 +39,7 @@ impl<'a> PipelineOperator for WindowOperator<'a> {
         }
 
         let mut batch = input;
+        // Window computation preserves row_ids alignment; partition sorting reorders rows.
         if !self.partition_exprs.is_empty() {
             let partition_clauses: Vec<OrderClause> = self
                 .partition_exprs

@@ -670,6 +670,13 @@ pub struct ColumnarBatch {
 }
 
 impl ColumnarBatch {
+    fn assert_row_ids_invariant(&self) {
+        debug_assert!(
+            self.row_ids.is_empty() || self.row_ids.len() == self.num_rows,
+            "row_ids must be empty or match num_rows"
+        );
+    }
+
     pub fn new() -> Self {
         Self {
             columns: HashMap::new(),
@@ -704,12 +711,14 @@ impl ColumnarBatch {
                 .filter_map(|&idx| self.row_ids.get(idx).copied())
                 .collect()
         };
-        ColumnarBatch {
+        let batch = ColumnarBatch {
             columns,
             num_rows: indices.len(),
             aliases: self.aliases.clone(),
             row_ids,
-        }
+        };
+        batch.assert_row_ids_invariant();
+        batch
     }
 
     pub fn slice(&self, start: usize, end: usize) -> Self {
@@ -726,12 +735,14 @@ impl ColumnarBatch {
         } else {
             self.row_ids[start..end].to_vec()
         };
-        ColumnarBatch {
+        let batch = ColumnarBatch {
             columns,
             num_rows: end - start,
             aliases: self.aliases.clone(),
             row_ids,
-        }
+        };
+        batch.assert_row_ids_invariant();
+        batch
     }
 
     pub fn append(&mut self, other: &Self) {
@@ -740,6 +751,7 @@ impl ColumnarBatch {
         }
         if self.columns.is_empty() {
             *self = other.clone();
+            self.assert_row_ids_invariant();
             return;
         }
         for (ordinal, page) in &other.columns {
@@ -760,6 +772,7 @@ impl ColumnarBatch {
                 self.row_ids.extend_from_slice(&other.row_ids);
             }
         }
+        self.assert_row_ids_invariant();
         if self.aliases != other.aliases {
             for (alias, ordinal) in &other.aliases {
                 self.aliases.insert(alias.clone(), *ordinal);
@@ -788,12 +801,14 @@ impl ColumnarBatch {
                 .filter_map(|idx| self.row_ids.get(idx).copied())
                 .collect()
         };
-        ColumnarBatch {
+        let batch = ColumnarBatch {
             columns,
             num_rows: bitmap.count_ones(),
             aliases: self.aliases.clone(),
             row_ids,
-        }
+        };
+        batch.assert_row_ids_invariant();
+        batch
     }
 }
 

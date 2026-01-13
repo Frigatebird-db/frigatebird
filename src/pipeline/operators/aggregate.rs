@@ -73,6 +73,7 @@ impl<'a> AggregateOperator<'a> {
         batch: &crate::sql::executor::batch::ColumnarBatch,
         group_exprs: &[Expr],
     ) -> Result<SelectResult, SqlExecutionError> {
+        // Aggregation outputs are newly generated rows; row_ids are synthetic.
         let aggregated_rows = self
             .executor
             .execute_grouping_set_aggregation_rows_from_batch(
@@ -107,6 +108,7 @@ impl<'a> AggregateOperator<'a> {
         group_exprs: &[Expr],
         masked_exprs: Option<&[Expr]>,
     ) -> Result<Vec<AggregatedRow>, SqlExecutionError> {
+        // Aggregation outputs are new grouped rows; row_ids do not map to source rows.
         self.executor.execute_grouping_set_aggregation_rows_from_batch(
             batch,
             self.table,

@@ -40,6 +40,7 @@ impl<'a> PipelineOperator for SortOperator<'a> {
         if input.num_rows == 0 {
             return Ok(vec![PipelineBatch::new()]);
         }
+        // Sort preserves row_ids alignment with rows.
         self.execute_batches(vec![input])
     }
 }
