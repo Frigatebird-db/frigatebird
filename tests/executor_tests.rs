@@ -52,6 +52,7 @@ fn create_dummy_job(step_count: usize) -> Job {
             Arc::clone(&page_handler),
             tx,
             prev_rx,
+            None,
         ));
         prev_rx = rx;
     }
@@ -105,6 +106,7 @@ fn executor_job_get_next_executes_steps() {
         page_handler,
         tx.clone(),
         rx.clone(),
+        None,
     );
 
     let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
@@ -269,6 +271,7 @@ fn executor_step_execution_sequence() {
         Arc::clone(&page_handler),
         tx1,
         rx1,
+        None,
     );
     let step2 = PipelineStep::new(
         "table".to_string(),
@@ -279,6 +282,7 @@ fn executor_step_execution_sequence() {
         page_handler,
         tx2,
         rx2,
+        None,
     );
 
     let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();

@@ -124,6 +124,7 @@ fn attach_channels(
             Arc::clone(&page_handler),
             current_producer,
             previous_receiver,
+            None,
         ));
         previous_receiver = next_receiver;
         is_root = false;

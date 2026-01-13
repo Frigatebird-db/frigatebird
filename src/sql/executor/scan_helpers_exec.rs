@@ -3,12 +3,12 @@ use crate::metadata_store::ColumnCatalog;
 use crate::sql::executor::batch::ColumnarBatch;
 use crate::sql::executor::scan_helpers::SortKeyPrefix;
 use crate::sql::executor::scan_stream::{
-    BatchStream, PipelineBatchStream, PipelineScanBuilder, RowIdBatchStream, SingleBatchStream,
+    BatchStream, PipelineBatchStream, PipelineScanBuilder, SingleBatchStream,
 };
 use crate::sql::executor::values::compare_strs;
 use crate::sql::physical_plan::PhysicalExpr;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 impl SqlExecutor {
@@ -126,25 +126,20 @@ impl SqlExecutor {
         columns: &[ColumnCatalog],
         scan_ordinals: &BTreeSet<usize>,
         selection_expr: Option<&PhysicalExpr>,
-        column_ordinals: &HashMap<String, usize>,
-        rows_per_page_group: u64,
         row_ids: Option<Vec<u64>>,
     ) -> Result<Box<dyn BatchStream>, SqlExecutionError> {
-        if let Some(row_ids) = row_ids {
-            let ordinals = scan_ordinals.iter().copied().collect();
-            return Ok(Box::new(RowIdBatchStream::new(
-                Arc::clone(&self.page_handler),
-                table.to_string(),
-                columns.to_vec(),
-                ordinals,
-                row_ids,
-                rows_per_page_group,
-                column_ordinals.clone(),
-            )));
-        }
-        if let Some(stream) =
-            self.build_pipeline_scan_stream(table, columns, scan_ordinals, selection_expr)?
-        {
+        let effective_selection = if row_ids.is_some() {
+            None
+        } else {
+            selection_expr
+        };
+        if let Some(stream) = self.build_pipeline_scan_stream(
+            table,
+            columns,
+            scan_ordinals,
+            effective_selection,
+            row_ids,
+        )? {
             return Ok(Box::new(stream));
         }
         Ok(Box::new(SingleBatchStream::new(ColumnarBatch::new())))
@@ -156,6 +151,7 @@ impl SqlExecutor {
         columns: &[ColumnCatalog],
         scan_ordinals: &BTreeSet<usize>,
         selection_expr: Option<&PhysicalExpr>,
+        row_ids: Option<Vec<u64>>,
     ) -> Result<Option<PipelineBatchStream>, SqlExecutionError> {
         PipelineScanBuilder::new(
             Arc::clone(&self.page_handler),
@@ -163,6 +159,7 @@ impl SqlExecutor {
             columns,
             scan_ordinals,
             selection_expr,
+            row_ids.map(Arc::new),
         )
         .build()
     }

@@ -2,6 +2,7 @@ use crate::page_handler::PageHandler;
 use crate::sql::executor::batch::{Bitmap, ColumnarBatch, ColumnarPage};
 use crate::sql::executor::physical_evaluator::PhysicalEvaluator;
 use crate::sql::models::FilterExpr;
+use crate::metadata_store::ROWS_PER_PAGE_GROUP;
 use crossbeam::channel::{Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -66,6 +67,7 @@ pub struct PipelineStep {
     pub is_root: bool,
     pub table: String,
     pub page_handler: Arc<PageHandler>,
+    pub row_ids: Option<Arc<Vec<u64>>>,
 }
 
 impl std::fmt::Debug for PipelineStep {
@@ -90,6 +92,7 @@ impl PipelineStep {
         page_handler: Arc<PageHandler>,
         current_producer: Sender<PipelineBatch>,
         previous_receiver: Receiver<PipelineBatch>,
+        row_ids: Option<Arc<Vec<u64>>>,
     ) -> Self {
         Self {
             current_producer,
@@ -100,6 +103,7 @@ impl PipelineStep {
             is_root,
             table,
             page_handler,
+            row_ids,
         }
     }
 
@@ -112,6 +116,10 @@ impl PipelineStep {
     }
 
     fn execute_root(&self) {
+        if let Some(row_ids) = self.row_ids.as_ref() {
+            self.execute_root_for_row_ids(row_ids);
+            return;
+        }
         let descriptors = self
             .page_handler
             .list_pages_in_table(&self.table, &self.column);
@@ -144,6 +152,56 @@ impl PipelineStep {
 
             base_row += page_len;
         }
+        let _ = self.current_producer.send(ColumnarBatch::new());
+    }
+
+    fn execute_root_for_row_ids(&self, row_ids: &[u64]) {
+        if row_ids.is_empty() {
+            let _ = self.current_producer.send(ColumnarBatch::new());
+            return;
+        }
+
+        let rows_per_page_group = self
+            .page_handler
+            .table_catalog(&self.table)
+            .map(|catalog| catalog.rows_per_page_group)
+            .unwrap_or(ROWS_PER_PAGE_GROUP);
+
+        let mut idx = 0;
+        while idx < row_ids.len() {
+            let start = idx;
+            let base_page = row_ids[start] / rows_per_page_group;
+            let mut end = start + 1;
+            while end < row_ids.len() && row_ids[end] / rows_per_page_group == base_page {
+                end += 1;
+            }
+
+            let slice = &row_ids[start..end];
+            let mut batch = ColumnarBatch::new();
+            batch.num_rows = slice.len();
+            batch.row_ids = slice.to_vec();
+            batch.columns.insert(
+                self.column_ordinal,
+                materialize_column_in_batch(
+                    &self.page_handler,
+                    &self.table,
+                    &self.column,
+                    slice,
+                ),
+            );
+
+            let bitmap = evaluate_filters(&self.filters, &batch);
+            let filtered_batch = batch.filter_by_bitmap(&bitmap);
+
+            if filtered_batch.num_rows > 0 {
+                if self.current_producer.send(filtered_batch).is_err() {
+                    return;
+                }
+            }
+
+            idx = end;
+        }
+
         let _ = self.current_producer.send(ColumnarBatch::new());
     }
 
@@ -208,72 +266,24 @@ fn materialize_column_in_batch(
     if row_ids.is_empty() {
         return ColumnarPage::empty();
     }
-    
-    // In a real vectorized system, we would batch this fetch more efficiently.
-    // For now, we reuse the existing page scatter-gather logic but build a ColumnarPage.
-    
-    // We can reuse the page_handler logic to fetch ranges of rows
-    // Since rows are likely somewhat sequential from the scan, we can optimize.
-    
-    let min_row = *row_ids.iter().min().unwrap();
-    let max_row = *row_ids.iter().max().unwrap();
-    
-    let slices = page_handler.list_range_in_table(table, column, min_row, max_row);
-    let descriptors: Vec<_> = slices.iter().map(|s| s.descriptor.clone()).collect();
-    let pages = page_handler.get_pages(descriptors);
-    
-    let mut page_map = HashMap::with_capacity(pages.len());
-    for p in pages {
-        page_map.insert(p.page.page_metadata.clone(), p.page.clone());
-    }
-    
+
     let catalog = page_handler.table_catalog(table).expect("missing catalog");
     let col_cat = catalog.column(column).expect("missing column");
-    
-    // Reconstruct a single columnar page from the pieces
-    // This is essentially "gather"
-    
-    // Note: We need to build a single ColumnarPage that matches `row_ids` order.
-    // Ideally ColumnarBatch supports multiple pages per column (ChunkedArray),
-    // but our current definition is one Page per Column per Batch.
-    // So we must concat/gather.
 
-    // 1. Collect all values
     let mut entries = Vec::with_capacity(row_ids.len());
-    
     for &row_id in row_ids {
-        // Find which page contains this row_id
-        // This is slow O(N*M) but correct for now. Optimization: lock-step iterator.
-        // Given row_ids are sorted in the pipeline usually, we can optimize.
-        
-        let mut found = false;
-        for slice in &slices {
-             if row_id >= slice.start_row_offset && row_id < slice.end_row_offset {
-                 if let Some(page) = page_map.get(&slice.descriptor.id) {
-                     let idx = (row_id - slice.start_row_offset) as usize;
-                     if let Some(entry) = page.entry_at(idx) {
-                         entries.push(entry);
-                         found = true;
-                     }
-                 }
-                 break;
-             }
-        }
-        if !found {
-            // Should not happen in valid pipeline
-            entries.push(crate::entry::Entry::new("")); // Null/Empty fallback
+        if let Some(entry) = page_handler.read_entry_at(table, column, row_id) {
+            entries.push(entry);
+        } else {
+            entries.push(crate::entry::Entry::new(""));
         }
     }
-    
-    // 2. Convert entries back to ColumnarPage
-    // This double conversion (Page -> Entry -> Page) is inefficient but safe for this refactor step.
-    // A better way is ColumnarPage::gather but we need cross-page gather.
-    
+
     let disk_page = crate::page::Page {
         page_metadata: String::new(),
         entries,
     };
-    
+
     ColumnarPage::load(disk_page, col_cat.data_type)
 }
 

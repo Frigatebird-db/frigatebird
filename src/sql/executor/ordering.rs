@@ -1,12 +1,9 @@
 use super::SqlExecutionError;
-use super::aggregates::{AggregateDataset, MaterializedColumns};
+use super::aggregates::AggregateDataset;
 use super::batch::{ColumnData, ColumnarBatch, ColumnarPage};
-use super::expressions::{
-    evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
-};
+use super::expressions::{evaluate_expression_on_batch, evaluate_scalar_expression};
 use super::values::{ScalarValue, compare_scalar_values, compare_strs, format_float};
 use crate::metadata_store::TableCatalog;
-use crate::sql::types::DataType;
 use sqlparser::ast::Expr;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -26,6 +23,8 @@ pub(super) enum NullsPlacement {
     Last,
 }
 
+// Legacy rowwise ordering path; unused after pipeline refactor.
+/*
 pub(super) fn sort_rows_logical(
     clauses: &[OrderClause],
     materialized: &MaterializedColumns,
@@ -66,12 +65,14 @@ pub(super) fn sort_rows_logical(
 
     Ok(())
 }
+*/
 
 #[derive(Clone)]
 pub(super) struct OrderKey {
     pub(super) values: Vec<ScalarValue>,
 }
 
+/*
 pub(super) fn build_row_order_key(
     clauses: &[OrderClause],
     row_idx: u64,
@@ -88,6 +89,7 @@ pub(super) fn build_row_order_key(
     }
     Ok(OrderKey { values })
 }
+*/
 
 pub(super) fn compare_order_keys(
     left: &OrderKey,

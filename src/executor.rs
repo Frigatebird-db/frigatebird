@@ -203,6 +203,7 @@ mod tests {
                 Arc::clone(&page_handler),
                 tx,
                 rx,
+                None,
             ));
         }
         let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();

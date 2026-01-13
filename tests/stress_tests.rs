@@ -517,6 +517,7 @@ fn executor_stress_many_small_jobs() {
             Arc::clone(&page_handler),
             tx,
             rx,
+            None,
         );
         let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
         let job = Job::new("table".into(), vec![step], entry_tx, out_rx);
@@ -552,6 +553,7 @@ fn executor_stress_few_large_jobs() {
                 Arc::clone(&page_handler),
                 tx,
                 prev_rx,
+                None,
             ));
             prev_rx = rx;
         }
@@ -590,6 +592,7 @@ fn executor_stress_concurrent_submission() {
                     Arc::clone(&*ph),
                     tx,
                     rx,
+                    None,
                 );
                 let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
                 let job = Job::new(table_name, vec![step], entry_tx, out_rx);
@@ -637,6 +640,7 @@ fn executor_stress_variable_job_sizes() {
                 Arc::clone(&page_handler),
                 tx,
                 prev_rx,
+                None,
             ));
             prev_rx = rx;
         }
@@ -820,6 +824,7 @@ fn chaos_test_everything_concurrent() {
                     Arc::clone(&*ph),
                     tx,
                     rx,
+                    None,
                 );
                 let (_out_tx, out_rx) = channel::unbounded::<PipelineBatch>();
                 let job = Job::new(table_name, vec![step], entry_tx, out_rx);

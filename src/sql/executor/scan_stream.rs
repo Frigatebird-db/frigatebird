@@ -1,15 +1,12 @@
 use super::SqlExecutionError;
-use super::batch::{ColumnarBatch, ColumnarPage};
-use crate::entry::Entry;
+use super::batch::ColumnarBatch;
 use crate::metadata_store::ColumnCatalog;
-use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::pipeline::{Job, PipelineBatch, PipelineStep};
 use crate::sql::FilterExpr;
 use crate::sql::physical_plan::PhysicalExpr;
 use std::collections::BTreeSet;
 use crossbeam::channel::Receiver;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub trait BatchStream {
@@ -46,6 +43,8 @@ pub fn merge_stream_to_batch(
     Ok(merged)
 }
 
+// Legacy row-id stream; superseded by pipeline row-id scans.
+/*
 pub struct RowIdBatchStream {
     page_handler: Arc<PageHandler>,
     table: String,
@@ -119,6 +118,7 @@ impl BatchStream for RowIdBatchStream {
         Ok(Some(batch))
     }
 }
+*/
 
 pub struct PipelineBatchStream {
     job: Option<Job>,
@@ -166,6 +166,7 @@ pub struct PipelineScanBuilder<'a> {
     columns: &'a [ColumnCatalog],
     scan_ordinals: &'a BTreeSet<usize>,
     selection_expr: Option<&'a PhysicalExpr>,
+    row_ids: Option<Arc<Vec<u64>>>,
 }
 
 impl<'a> PipelineScanBuilder<'a> {
@@ -175,6 +176,7 @@ impl<'a> PipelineScanBuilder<'a> {
         columns: &'a [ColumnCatalog],
         scan_ordinals: &'a BTreeSet<usize>,
         selection_expr: Option<&'a PhysicalExpr>,
+        row_ids: Option<Arc<Vec<u64>>>,
     ) -> Self {
         Self {
             page_handler,
@@ -182,6 +184,7 @@ impl<'a> PipelineScanBuilder<'a> {
             columns,
             scan_ordinals,
             selection_expr,
+            row_ids,
         }
     }
 
@@ -212,6 +215,11 @@ impl<'a> PipelineScanBuilder<'a> {
                 Arc::clone(&self.page_handler),
                 current_producer,
                 previous_receiver,
+                if is_root {
+                    self.row_ids.clone()
+                } else {
+                    None
+                },
             ));
             previous_receiver = next_receiver;
             is_root = false;
@@ -229,6 +237,7 @@ impl<'a> PipelineScanBuilder<'a> {
                 Arc::clone(&self.page_handler),
                 current_producer,
                 previous_receiver,
+                None,
             );
             steps.push(filter_step);
             previous_receiver = next_receiver;
@@ -245,6 +254,7 @@ impl<'a> PipelineScanBuilder<'a> {
     }
 }
 
+/*
 fn gather_column_for_rows(
     page_handler: &PageHandler,
     table: &str,
@@ -270,3 +280,4 @@ fn gather_column_for_rows(
 
     ColumnarPage::load(disk_page, column.data_type)
 }
+*/

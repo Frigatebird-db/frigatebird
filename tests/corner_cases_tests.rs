@@ -520,6 +520,7 @@ fn job_single_step() {
         is_root: true,
         table: "test".to_string(),
         page_handler,
+        row_ids: None,
     };
 
     let job = Job {

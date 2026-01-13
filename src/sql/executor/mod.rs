@@ -1,6 +1,9 @@
 mod aggregates;
+mod aggregation_helpers;
 mod aggregation_exec;
 pub mod batch;
+mod executor_types;
+mod executor_utils;
 mod expressions;
 mod grouping_helpers;
 pub(crate) mod helpers;
@@ -10,6 +13,8 @@ mod projection_helpers;
 mod scan_stream;
 mod dml;
 mod select;
+mod select_exec;
+mod select_helpers;
 mod scan_helpers_exec;
 mod row_functions;
 mod scalar_functions;
@@ -19,6 +24,11 @@ pub mod values;
 mod window_helpers;
 
 use self::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
+use executor_types::{
+    AggregatedRow, GroupByInfo, GroupKey, GroupingSetPlan, ProjectionItem, ProjectionPlan,
+    VectorAggregationOutput,
+};
+use executor_utils::{chunk_batch, deduplicate_batches, merge_batches, rows_to_batch};
 use self::spill::SpillManager;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
@@ -42,9 +52,8 @@ use crate::writer::{
     UpdateJob, UpdateOp, Writer,
 };
 use sqlparser::ast::{
-    Assignment, BinaryOperator, Expr, FromTable, FunctionArg, FunctionArgExpr, GroupByExpr, Ident,
-    ObjectName, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
-    TableWithJoins, UnaryOperator, Value, WindowType,
+    Assignment, BinaryOperator, Expr, FromTable, Ident, ObjectName, Offset, OrderByExpr, Query,
+    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, UnaryOperator, Value,
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
@@ -57,7 +66,7 @@ use std::sync::Arc;
 use crate::sql::types::DataType;
 use aggregates::{
     AggregateDataset, AggregateFunctionKind, AggregateFunctionPlan, AggregateProjection,
-    AggregateProjectionPlan, AggregateState, AggregationHashTable, MaterializedColumns,
+    AggregationHashTable, MaterializedColumns,
     ensure_state_vec, evaluate_aggregate_outputs, plan_aggregate_projection,
     select_item_contains_aggregate, vectorized_average_update,
     vectorized_count_distinct_update, vectorized_count_star_update,
@@ -73,23 +82,17 @@ use helpers::{
     parse_limit, parse_offset, table_with_joins_to_name,
 };
 use ordering::{
-    MergeOperator, NullsPlacement, OrderClause, OrderKey, build_group_order_key,
-    compare_order_keys, sort_batch_in_memory, sort_rows_logical,
+    MergeOperator, NullsPlacement, OrderClause, build_group_order_key,
+    compare_order_keys, sort_batch_in_memory,
 };
-use physical_evaluator::{PhysicalEvaluator, filter_supported};
+use physical_evaluator::PhysicalEvaluator;
 use projection_helpers::{build_projection, materialize_columns};
 use scan_stream::{
-    BatchStream, PipelineBatchStream, PipelineScanBuilder, RowIdBatchStream, SingleBatchStream,
-    merge_stream_to_batch,
+    BatchStream, PipelineBatchStream, PipelineScanBuilder, SingleBatchStream,
 };
 use scan_helpers::{SortKeyPrefix, collect_sort_key_filters, collect_sort_key_prefixes};
 use values::{
-    CachedValue, ScalarValue, cached_to_scalar_with_type, combine_numeric, compare_scalar_values,
-    compare_strs, scalar_from_f64,
-};
-use window_helpers::{
-    WindowOperator, collect_window_function_plans, collect_window_plans_from_expr,
-    ensure_common_partition, plan_order_clauses, rewrite_window_expressions,
+    CachedValue, ScalarValue, cached_to_scalar_with_type, compare_strs,
 };
 
 
@@ -102,259 +105,6 @@ pub enum SqlExecutionError {
     ColumnMismatch { table: String, column: String },
     ValueMismatch(String),
     OperationFailed(String),
-}
-
-fn find_group_expr_index(expr: &Expr, group_exprs: &[Expr]) -> Option<usize> {
-    group_exprs.iter().position(|candidate| candidate == expr)
-}
-
-fn literal_value(expr: &Expr) -> Option<Option<String>> {
-    match expr {
-        Expr::Value(Value::Null) => Some(None),
-        Expr::Value(Value::Boolean(flag)) => {
-            Some(Some(if *flag { "true".into() } else { "false".into() }))
-        }
-        Expr::Value(Value::Number(value, _)) => Some(Some(value.clone())),
-        Expr::Value(Value::SingleQuotedString(text)) => Some(Some(text.clone())),
-        _ => None,
-    }
-}
-
-fn ensure_aggregate_plan_for_expr(
-    expr: &Expr,
-    aggregate_plans: &mut Vec<AggregateFunctionPlan>,
-    aggregate_lookup: &mut HashMap<String, usize>,
-) -> Result<Option<usize>, SqlExecutionError> {
-    let key = expr.to_string();
-    if let Some(&idx) = aggregate_lookup.get(&key) {
-        return Ok(Some(idx));
-    }
-    if let Some(plan) = AggregateFunctionPlan::from_expr(expr)? {
-        let idx = aggregate_plans.len();
-        aggregate_plans.push(plan);
-        aggregate_lookup.insert(key, idx);
-        Ok(Some(idx))
-    } else {
-        Ok(None)
-    }
-}
-
-fn ensure_having_aggregate_plans(
-    expr: &Expr,
-    aggregate_plans: &mut Vec<AggregateFunctionPlan>,
-    aggregate_lookup: &mut HashMap<String, usize>,
-) -> Result<(), SqlExecutionError> {
-    if ensure_aggregate_plan_for_expr(expr, aggregate_plans, aggregate_lookup)?.is_some() {
-        return Ok(());
-    }
-    match expr {
-        Expr::BinaryOp { left, right, .. } => {
-            ensure_having_aggregate_plans(left, aggregate_plans, aggregate_lookup)?;
-            ensure_having_aggregate_plans(right, aggregate_plans, aggregate_lookup)?;
-        }
-        Expr::UnaryOp { expr, .. } | Expr::Nested(expr) => {
-            ensure_having_aggregate_plans(expr, aggregate_plans, aggregate_lookup)?;
-        }
-        Expr::Between {
-            expr, low, high, ..
-        } => {
-            ensure_having_aggregate_plans(expr, aggregate_plans, aggregate_lookup)?;
-            ensure_having_aggregate_plans(low, aggregate_plans, aggregate_lookup)?;
-            ensure_having_aggregate_plans(high, aggregate_plans, aggregate_lookup)?;
-        }
-        Expr::InList { expr, list, .. } => {
-            ensure_having_aggregate_plans(expr, aggregate_plans, aggregate_lookup)?;
-            for item in list {
-                ensure_having_aggregate_plans(item, aggregate_plans, aggregate_lookup)?;
-            }
-        }
-        Expr::Case {
-            operand,
-            conditions,
-            results,
-            else_result,
-        } => {
-            if let Some(op) = operand {
-                ensure_having_aggregate_plans(op, aggregate_plans, aggregate_lookup)?;
-            }
-            for condition in conditions {
-                ensure_having_aggregate_plans(condition, aggregate_plans, aggregate_lookup)?;
-            }
-            for result in results {
-                ensure_having_aggregate_plans(result, aggregate_plans, aggregate_lookup)?;
-            }
-            if let Some(else_expr) = else_result {
-                ensure_having_aggregate_plans(else_expr, aggregate_plans, aggregate_lookup)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-struct HavingEvalContext<'a> {
-    aggregate_plans: &'a [AggregateFunctionPlan],
-    aggregate_lookup: &'a HashMap<String, usize>,
-    group_expr_lookup: &'a HashMap<String, usize>,
-    group_key: &'a GroupKey,
-    states: &'a [AggregateState],
-}
-
-fn evaluate_having_expression(
-    expr: &Expr,
-    ctx: &HavingEvalContext,
-) -> Result<ScalarValue, SqlExecutionError> {
-    match expr {
-        Expr::Identifier(ident) => group_value_as_scalar(&ident.value, ctx),
-        Expr::CompoundIdentifier(idents) => {
-            if let Some(last) = idents.last() {
-                group_value_as_scalar(&last.value, ctx)
-            } else {
-                Err(SqlExecutionError::Unsupported(
-                    "empty compound identifier in HAVING clause".into(),
-                ))
-            }
-        }
-        Expr::Value(Value::Number(value, _)) => value
-            .parse::<f64>()
-            .map(scalar_from_f64)
-            .map_err(|_| SqlExecutionError::Unsupported("invalid numeric literal".into())),
-        Expr::Value(Value::SingleQuotedString(text)) => Ok(ScalarValue::String(text.clone())),
-        Expr::Value(Value::Boolean(flag)) => Ok(ScalarValue::Boolean(*flag)),
-        Expr::Value(Value::Null) => Ok(ScalarValue::Null),
-        Expr::BinaryOp { left, op, right } => {
-            let lhs = evaluate_having_expression(left, ctx)?;
-            let rhs = evaluate_having_expression(right, ctx)?;
-            match op {
-                BinaryOperator::Plus => {
-                    combine_numeric(&lhs, &rhs, |a, b| a + b).ok_or_else(|| {
-                        SqlExecutionError::Unsupported("non-numeric addition in HAVING".into())
-                    })
-                }
-                BinaryOperator::Minus => {
-                    combine_numeric(&lhs, &rhs, |a, b| a - b).ok_or_else(|| {
-                        SqlExecutionError::Unsupported("non-numeric subtraction in HAVING".into())
-                    })
-                }
-                BinaryOperator::Multiply => {
-                    combine_numeric(&lhs, &rhs, |a, b| a * b).ok_or_else(|| {
-                        SqlExecutionError::Unsupported(
-                            "non-numeric multiplication in HAVING".into(),
-                        )
-                    })
-                }
-                BinaryOperator::Divide => {
-                    combine_numeric(&lhs, &rhs, |a, b| a / b).ok_or_else(|| {
-                        SqlExecutionError::Unsupported("non-numeric division in HAVING".into())
-                    })
-                }
-                BinaryOperator::Modulo => {
-                    combine_numeric(&lhs, &rhs, |a, b| a % b).ok_or_else(|| {
-                        SqlExecutionError::Unsupported("non-numeric modulo in HAVING".into())
-                    })
-                }
-                BinaryOperator::And => Ok(ScalarValue::Boolean(
-                    lhs.as_bool().unwrap_or(false) && rhs.as_bool().unwrap_or(false),
-                )),
-                BinaryOperator::Or => Ok(ScalarValue::Boolean(
-                    lhs.as_bool().unwrap_or(false) || rhs.as_bool().unwrap_or(false),
-                )),
-                BinaryOperator::Xor => Ok(ScalarValue::Boolean(
-                    lhs.as_bool().unwrap_or(false) ^ rhs.as_bool().unwrap_or(false),
-                )),
-                BinaryOperator::Eq => Ok(ScalarValue::Boolean(
-                    compare_scalar_values(&lhs, &rhs)
-                        .map(|ord| ord == Ordering::Equal)
-                        .unwrap_or(false),
-                )),
-                BinaryOperator::NotEq => Ok(ScalarValue::Boolean(
-                    compare_scalar_values(&lhs, &rhs)
-                        .map(|ord| ord != Ordering::Equal)
-                        .unwrap_or(false),
-                )),
-                BinaryOperator::Gt => Ok(ScalarValue::Boolean(
-                    compare_scalar_values(&lhs, &rhs)
-                        .map(|ord| ord == Ordering::Greater)
-                        .unwrap_or(false),
-                )),
-                BinaryOperator::GtEq => Ok(ScalarValue::Boolean(
-                    compare_scalar_values(&lhs, &rhs)
-                        .map(|ord| ord == Ordering::Greater || ord == Ordering::Equal)
-                        .unwrap_or(false),
-                )),
-                BinaryOperator::Lt => Ok(ScalarValue::Boolean(
-                    compare_scalar_values(&lhs, &rhs)
-                        .map(|ord| ord == Ordering::Less)
-                        .unwrap_or(false),
-                )),
-                BinaryOperator::LtEq => Ok(ScalarValue::Boolean(
-                    compare_scalar_values(&lhs, &rhs)
-                        .map(|ord| ord == Ordering::Less || ord == Ordering::Equal)
-                        .unwrap_or(false),
-                )),
-                _ => Err(SqlExecutionError::Unsupported(
-                    "operator not supported in HAVING".into(),
-                )),
-            }
-        }
-        Expr::UnaryOp { op, expr } => {
-            let value = evaluate_having_expression(expr, ctx)?;
-            match op {
-                UnaryOperator::Plus => Ok(value),
-                UnaryOperator::Minus => {
-                    let num = value.as_f64().ok_or_else(|| {
-                        SqlExecutionError::Unsupported(
-                            "unary minus requires numeric operand in HAVING".into(),
-                        )
-                    })?;
-                    Ok(scalar_from_f64(-num))
-                }
-                UnaryOperator::Not => Ok(ScalarValue::Boolean(!value.as_bool().unwrap_or(false))),
-                _ => Err(SqlExecutionError::Unsupported(
-                    "unsupported unary operator in HAVING".into(),
-                )),
-            }
-        }
-        Expr::Nested(inner) => evaluate_having_expression(inner, ctx),
-        Expr::Function(_) => aggregate_value_as_scalar(expr, ctx),
-        _ => Err(SqlExecutionError::Unsupported(
-            "HAVING expression is not supported in vectorized mode".into(),
-        )),
-    }
-}
-
-fn group_value_as_scalar(
-    ident: &str,
-    ctx: &HavingEvalContext<'_>,
-) -> Result<ScalarValue, SqlExecutionError> {
-    let idx = ctx.group_expr_lookup.get(ident).ok_or_else(|| {
-        SqlExecutionError::Unsupported(format!("HAVING references non-grouped column {ident}"))
-    })?;
-    let value = ctx.group_key.value_at(*idx).unwrap_or(None);
-    Ok(match value {
-        Some(text) => ScalarValue::String(text),
-        None => ScalarValue::Null,
-    })
-}
-
-fn aggregate_value_as_scalar(
-    expr: &Expr,
-    ctx: &HavingEvalContext<'_>,
-) -> Result<ScalarValue, SqlExecutionError> {
-    let key = expr.to_string();
-    let slot = ctx.aggregate_lookup.get(&key).ok_or_else(|| {
-        SqlExecutionError::Unsupported(format!(
-            "aggregate {key} missing from vectorized aggregation"
-        ))
-    })?;
-    let state = ctx.states.get(*slot).ok_or_else(|| {
-        SqlExecutionError::OperationFailed("missing aggregate state for HAVING".into())
-    })?;
-    ctx.aggregate_plans[*slot]
-        .scalar_value(state)
-        .ok_or_else(|| {
-            SqlExecutionError::Unsupported(format!("unable to evaluate aggregate {key} in HAVING"))
-        })
 }
 
 impl std::fmt::Display for SqlExecutionError {
@@ -462,402 +212,6 @@ impl fmt::Display for SelectResult {
     }
 }
 
-struct ProjectionPlan {
-    headers: Vec<String>,
-    items: Vec<ProjectionItem>,
-    required_ordinals: BTreeSet<usize>,
-}
-
-impl ProjectionPlan {
-    fn new() -> Self {
-        Self {
-            headers: Vec::new(),
-            items: Vec::new(),
-            required_ordinals: BTreeSet::new(),
-        }
-    }
-
-    fn needs_dataset(&self) -> bool {
-        self.items
-            .iter()
-            .any(|item| matches!(item, ProjectionItem::Computed { .. }))
-    }
-}
-
-fn build_projection_alias_map(
-    plan: &ProjectionPlan,
-    columns: &[ColumnCatalog],
-) -> HashMap<String, Expr> {
-    let mut map = HashMap::new();
-    for (idx, header) in plan.headers.iter().enumerate() {
-        match plan
-            .items
-            .get(idx)
-            .expect("projection items and headers must align")
-        {
-            ProjectionItem::Direct { ordinal } => {
-                if let Some(column) = columns.get(*ordinal) {
-                    if header != &column.name {
-                        map.insert(
-                            header.clone(),
-                            Expr::Identifier(Ident::new(column.name.clone())),
-                        );
-                    }
-                }
-            }
-            ProjectionItem::Computed { expr } => {
-                map.insert(header.clone(), expr.clone());
-            }
-        }
-    }
-    map
-}
-
-fn build_aggregate_alias_map(plan: &AggregateProjectionPlan) -> HashMap<String, Expr> {
-    let mut map = HashMap::new();
-    for (label, output) in plan.headers.iter().zip(plan.outputs.iter()) {
-        map.insert(label.clone(), output.expr.clone());
-    }
-    map
-}
-
-fn projection_expressions_from_plan(plan: &ProjectionPlan, columns: &[ColumnCatalog]) -> Vec<Expr> {
-    plan.items
-        .iter()
-        .map(|item| match item {
-            ProjectionItem::Direct { ordinal } => {
-                let column = columns
-                    .get(*ordinal)
-                    .expect("projection direct ordinal must reference a column");
-                Expr::Identifier(Ident::new(column.name.clone()))
-            }
-            ProjectionItem::Computed { expr } => expr.clone(),
-        })
-        .collect()
-}
-
-fn rewrite_projection_plan_for_windows(
-    plan: &mut ProjectionPlan,
-    alias_map: &HashMap<String, String>,
-) -> Result<(), SqlExecutionError> {
-    for item in &mut plan.items {
-        if let ProjectionItem::Computed { expr } = item {
-            rewrite_window_expressions(expr, alias_map)?;
-        }
-    }
-    Ok(())
-}
-
-fn assign_window_display_aliases(
-    plans: &mut [WindowFunctionPlan],
-    projection_plan: &ProjectionPlan,
-) {
-    use sqlparser::ast::Expr;
-    use std::collections::VecDeque;
-
-    let mut key_to_indices: HashMap<String, VecDeque<usize>> = HashMap::new();
-    for (idx, plan) in plans.iter().enumerate() {
-        key_to_indices
-            .entry(plan.key.clone())
-            .or_default()
-            .push_back(idx);
-    }
-
-    for (idx, item) in projection_plan.items.iter().enumerate() {
-        let expr = match item {
-            ProjectionItem::Computed { expr } => expr,
-            ProjectionItem::Direct { .. } => continue,
-        };
-        if let Expr::Function(function) = expr {
-            if function.over.is_none() {
-                continue;
-            }
-            let key = function.to_string();
-            if let Some(indices) = key_to_indices.get_mut(&key) {
-                if let Some(plan_idx) = indices.pop_front() {
-                    plans[plan_idx].display_alias = Some(projection_plan.headers[idx].clone());
-                }
-            }
-        }
-    }
-}
-
-fn resolve_group_by_exprs(
-    group_by: &GroupByExpr,
-    projection_exprs: &[Expr],
-) -> Result<GroupByExpr, SqlExecutionError> {
-    match group_by {
-        GroupByExpr::All => Ok(GroupByExpr::All),
-        GroupByExpr::Expressions(exprs) => {
-            if exprs.is_empty() {
-                return Ok(GroupByExpr::Expressions(Vec::new()));
-            }
-            let mut resolved = Vec::with_capacity(exprs.len());
-            for expr in exprs {
-                resolved.push(resolve_projection_reference(expr, projection_exprs)?);
-            }
-            Ok(GroupByExpr::Expressions(resolved))
-        }
-    }
-}
-
-fn determine_group_by_strategy(
-    group_by: &GroupByExpr,
-    sort_columns: &[ColumnCatalog],
-    order_clauses: &[OrderClause],
-) -> Result<GroupByStrategy, SqlExecutionError> {
-    let group_columns = match group_by {
-        GroupByExpr::All => return Ok(GroupByStrategy::SortPrefix),
-        GroupByExpr::Expressions(exprs) => {
-            if exprs.is_empty() {
-                return Ok(GroupByStrategy::SortPrefix);
-            }
-            let mut names = Vec::with_capacity(exprs.len());
-            for expr in exprs {
-                if let Some(name) = column_name_from_expr(expr) {
-                    names.push(name);
-                } else {
-                    return Ok(GroupByStrategy::Hash);
-                }
-            }
-            names
-        }
-    };
-
-    let matches_sort_prefix = group_columns.iter().enumerate().all(|(idx, name)| {
-        sort_columns
-            .get(idx)
-            .map(|column| column.name == *name)
-            .unwrap_or(false)
-    });
-    if matches_sort_prefix {
-        return Ok(GroupByStrategy::SortPrefix);
-    }
-
-    let order_matches = group_columns.len() <= order_clauses.len()
-        && group_columns.iter().enumerate().all(|(idx, name)| {
-            order_clauses
-                .get(idx)
-                .and_then(|clause| column_name_from_expr(&clause.expr))
-                .map(|order_name| order_name == *name)
-                .unwrap_or(false)
-        });
-
-    if order_matches {
-        return Ok(GroupByStrategy::OrderAligned);
-    }
-
-    Ok(GroupByStrategy::Hash)
-}
-
-enum GroupByStrategy {
-    SortPrefix,
-    OrderAligned,
-    Hash,
-}
-
-impl GroupByStrategy {
-    fn prefer_exact_numeric(&self) -> bool {
-        matches!(self, GroupByStrategy::OrderAligned)
-    }
-}
-
-fn resolve_order_by_exprs(
-    clauses: &[OrderByExpr],
-    projection_exprs: &[Expr],
-) -> Result<Vec<OrderByExpr>, SqlExecutionError> {
-    let mut resolved = Vec::with_capacity(clauses.len());
-    for clause in clauses {
-        let mut rewritten = clause.clone();
-        rewritten.expr = resolve_projection_reference(&clause.expr, projection_exprs)?;
-        resolved.push(rewritten);
-    }
-    Ok(resolved)
-}
-
-fn resolve_projection_reference(
-    expr: &Expr,
-    projection_exprs: &[Expr],
-) -> Result<Expr, SqlExecutionError> {
-    match expr {
-        Expr::Value(Value::Number(value, _)) => {
-            let position = value.parse::<usize>().map_err(|_| {
-                SqlExecutionError::Unsupported(format!(
-                    "invalid projection index reference `{value}`"
-                ))
-            })?;
-            if position == 0 || position > projection_exprs.len() {
-                return Err(SqlExecutionError::Unsupported(format!(
-                    "projection index {position} is out of range"
-                )));
-            }
-            Ok(projection_exprs[position - 1].clone())
-        }
-        _ => Ok(expr.clone()),
-    }
-}
-
-fn rewrite_aliases_in_expr(expr: &Expr, alias_map: &HashMap<String, Expr>) -> Expr {
-    use sqlparser::ast::Expr::*;
-
-    match expr {
-        Identifier(ident) => alias_map
-            .get(&ident.value)
-            .cloned()
-            .unwrap_or_else(|| Identifier(ident.clone())),
-        CompoundIdentifier(idents) => {
-            if idents.len() == 1 {
-                if let Some(replacement) = alias_map.get(&idents[0].value) {
-                    return replacement.clone();
-                }
-            }
-            CompoundIdentifier(idents.clone())
-        }
-        BinaryOp { left, op, right } => Expr::BinaryOp {
-            left: Box::new(rewrite_aliases_in_expr(left, alias_map)),
-            op: op.clone(),
-            right: Box::new(rewrite_aliases_in_expr(right, alias_map)),
-        },
-        UnaryOp { op, expr } => Expr::UnaryOp {
-            op: op.clone(),
-            expr: Box::new(rewrite_aliases_in_expr(expr, alias_map)),
-        },
-        Nested(inner) => Expr::Nested(Box::new(rewrite_aliases_in_expr(inner, alias_map))),
-        Function(function) => {
-            let mut function = function.clone();
-            for arg in &mut function.args {
-                match arg {
-                    FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
-                        if let FunctionArgExpr::Expr(inner) = arg {
-                            *inner = rewrite_aliases_in_expr(inner, alias_map);
-                        }
-                    }
-                }
-            }
-            if let Some(filter) = &mut function.filter {
-                *filter = Box::new(rewrite_aliases_in_expr(filter, alias_map));
-            }
-            for order in &mut function.order_by {
-                order.expr = rewrite_aliases_in_expr(&order.expr, alias_map);
-            }
-            if let Some(WindowType::WindowSpec(spec)) = &mut function.over {
-                for expr in &mut spec.partition_by {
-                    *expr = rewrite_aliases_in_expr(expr, alias_map);
-                }
-                for order in &mut spec.order_by {
-                    order.expr = rewrite_aliases_in_expr(&order.expr, alias_map);
-                }
-            }
-            Expr::Function(function)
-        }
-        Case {
-            operand,
-            conditions,
-            results,
-            else_result,
-        } => Expr::Case {
-            operand: operand
-                .as_ref()
-                .map(|expr| Box::new(rewrite_aliases_in_expr(expr, alias_map))),
-            conditions: conditions
-                .iter()
-                .map(|expr| rewrite_aliases_in_expr(expr, alias_map))
-                .collect(),
-            results: results
-                .iter()
-                .map(|expr| rewrite_aliases_in_expr(expr, alias_map))
-                .collect(),
-            else_result: else_result
-                .as_ref()
-                .map(|expr| Box::new(rewrite_aliases_in_expr(expr, alias_map))),
-        },
-        _ => expr.clone(),
-    }
-}
-
-enum ProjectionItem {
-    Direct { ordinal: usize },
-    Computed { expr: Expr },
-}
-
-struct GroupByInfo {
-    sets: Vec<GroupingSetPlan>,
-}
-
-#[derive(Clone)]
-struct GroupingSetPlan {
-    expressions: Vec<Expr>,
-    masked_exprs: Vec<Expr>,
-}
-
-#[derive(Clone)]
-struct AggregatedRow {
-    order_key: OrderKey,
-    values: Vec<Option<String>>,
-}
-
-#[derive(Hash, PartialEq, Eq, Clone)]
-struct GroupKey {
-    values: Vec<Option<String>>,
-}
-
-impl GroupKey {
-    fn empty() -> Self {
-        Self { values: Vec::new() }
-    }
-
-    fn from_values(values: Vec<Option<String>>) -> Self {
-        Self { values }
-    }
-
-    fn value_at(&self, idx: usize) -> Option<Option<String>> {
-        self.values.get(idx).cloned()
-    }
-}
-
-enum VectorAggregationOutput {
-    Aggregate { slot_index: usize },
-    GroupExpr { group_index: usize },
-    Literal { value: Option<String> },
-    ScalarExpr { expr: Expr },
-}
-
-#[derive(Clone)]
-enum WindowFunctionKind {
-    RowNumber,
-    Rank,
-    DenseRank,
-    Sum { frame: SumWindowFrame },
-    Lag { offset: usize },
-    Lead { offset: usize },
-    FirstValue { preceding: Option<usize> },
-    LastValue { preceding: Option<usize> },
-}
-
-#[derive(Clone)]
-struct WindowFunctionPlan {
-    key: String,
-    kind: WindowFunctionKind,
-    partition_by: Vec<Expr>,
-    order_by: Vec<OrderByExpr>,
-    arg: Option<Expr>,
-    default_expr: Option<Expr>,
-    result_ordinal: usize,
-    result_alias: String,
-    display_alias: Option<String>,
-}
-
-#[derive(Clone)]
-enum SumWindowFrame {
-    Rows { preceding: Option<usize> },
-    Range { preceding: RangePreceding },
-}
-
-#[derive(Clone, Copy)]
-enum RangePreceding {
-    Unbounded,
-    Value(f64),
-}
 
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
 const WINDOW_BATCH_CHUNK_SIZE: usize = 1_024;
@@ -1033,269 +387,7 @@ impl SqlExecutor {
         }
     }
 
-    // select.rs provides impl SqlExecutor for SELECT flow.
-
-    fn execute_vectorized_projection(
-        &self,
-        table: &str,
-        catalog: &TableCatalog,
-        columns: &[ColumnCatalog],
-        projection_plan: &ProjectionPlan,
-        required_ordinals: &BTreeSet<usize>,
-        selection_expr: Option<&Expr>,
-        selection_physical_expr: Option<&PhysicalExpr>,
-        selection_applied_in_scan: bool,
-        column_ordinals: &HashMap<String, usize>,
-        column_types: &HashMap<String, DataType>,
-        order_clauses: &[OrderClause],
-        result_columns: Vec<String>,
-        limit_expr: Option<Expr>,
-        offset_expr: Option<Offset>,
-        distinct_flag: bool,
-        qualify_expr: Option<&Expr>,
-        row_ids: Option<Vec<u64>>,
-    ) -> Result<SelectResult, SqlExecutionError> {
-        let stream = self.build_scan_stream(
-            table,
-            columns,
-            required_ordinals,
-            selection_physical_expr,
-            column_ordinals,
-            catalog.rows_per_page_group,
-            row_ids,
-        )?;
-        let mut batch = merge_stream_to_batch(stream)?;
-
-        if !selection_applied_in_scan {
-            if let Some(expr) = selection_expr {
-                batch = self.apply_filter_expr(
-                    batch,
-                    expr,
-                    selection_physical_expr,
-                    catalog,
-                    table,
-                    columns,
-                    column_ordinals,
-                    column_types,
-                )?;
-            }
-        }
-
-        if batch.num_rows == 0 || batch.columns.is_empty() {
-            return Ok(SelectResult {
-                columns: result_columns,
-                batches: Vec::new(),
-            });
-        }
-
-        let mut processed_batch = if let Some(expr) = qualify_expr {
-            let filtered = self.apply_filter_expr(
-                batch,
-                expr,
-                None,
-                catalog,
-                table,
-                columns,
-                column_ordinals,
-                column_types,
-            )?;
-            if filtered.num_rows == 0 {
-                return Ok(SelectResult {
-                    columns: result_columns,
-                    batches: Vec::new(),
-                });
-            }
-            filtered
-        } else {
-            batch
-        };
-
-        if !order_clauses.is_empty() {
-            let sorted_batches =
-                self.execute_sort(std::iter::once(processed_batch), order_clauses, catalog)?;
-            processed_batch = merge_batches(sorted_batches);
-        }
-
-        let final_batch = self.build_projection_batch(&processed_batch, projection_plan, catalog)?;
-
-        let offset = parse_offset(offset_expr)?;
-        let limit = parse_limit(limit_expr)?;
-
-        if distinct_flag {
-            let deduped = deduplicate_batches(vec![final_batch], projection_plan.items.len());
-            let limited_batches = self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
-            return Ok(SelectResult {
-                columns: result_columns,
-                batches: limited_batches,
-            });
-        }
-
-        let limited_batches =
-            self.apply_limit_offset(std::iter::once(final_batch), offset, limit)?;
-        Ok(SelectResult {
-            columns: result_columns,
-            batches: limited_batches,
-        })
-    }
-
-    fn execute_vectorized_window_query(
-        &self,
-        table: &str,
-        catalog: &TableCatalog,
-        columns: &[ColumnCatalog],
-        mut projection_plan: ProjectionPlan,
-        mut window_plans: Vec<WindowFunctionPlan>,
-        partition_exprs: Vec<Expr>,
-        required_ordinals: &BTreeSet<usize>,
-        selection_expr: Option<&Expr>,
-        selection_physical_expr: Option<&PhysicalExpr>,
-        selection_applied_in_scan: bool,
-        column_ordinals: &HashMap<String, usize>,
-        column_types: &HashMap<String, DataType>,
-        order_clauses: &[OrderClause],
-        result_columns: Vec<String>,
-        limit_expr: Option<Expr>,
-        offset_expr: Option<Offset>,
-        distinct_flag: bool,
-        mut qualify_expr: Option<Expr>,
-        row_ids: Option<Vec<u64>>,
-    ) -> Result<SelectResult, SqlExecutionError> {
-        if projection_plan.items.is_empty() {
-            return Err(SqlExecutionError::Unsupported(
-                "projection required for window queries".into(),
-            ));
-        }
-
-        assign_window_display_aliases(window_plans.as_mut_slice(), &projection_plan);
-        let mut alias_map: HashMap<String, String> = HashMap::with_capacity(window_plans.len());
-        let mut next_ordinal = columns
-            .iter()
-            .map(|column| column.ordinal)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        for (idx, plan) in window_plans.iter_mut().enumerate() {
-            let alias = format!("__window_col_{idx}");
-            plan.result_ordinal = next_ordinal;
-            plan.result_alias = alias.clone();
-            alias_map.insert(plan.key.clone(), alias);
-            next_ordinal += 1;
-        }
-
-        rewrite_projection_plan_for_windows(&mut projection_plan, &alias_map)?;
-        if let Some(expr) = qualify_expr.as_mut() {
-            rewrite_window_expressions(expr, &alias_map)?;
-        }
-        let mut final_order_clauses = order_clauses.to_vec();
-        for clause in &mut final_order_clauses {
-            rewrite_window_expressions(&mut clause.expr, &alias_map)?;
-        }
-
-        let stream = self.build_scan_stream(
-            table,
-            columns,
-            required_ordinals,
-            selection_physical_expr,
-            column_ordinals,
-            catalog.rows_per_page_group,
-            row_ids,
-        )?;
-        let mut batch = merge_stream_to_batch(stream)?;
-        if batch.num_rows == 0 {
-            return Ok(SelectResult {
-                columns: result_columns,
-                batches: Vec::new(),
-            });
-        }
-
-        if !selection_applied_in_scan {
-            if let Some(expr) = selection_expr {
-                batch = self.apply_filter_expr(
-                    batch,
-                    expr,
-                    selection_physical_expr,
-                    catalog,
-                    table,
-                    columns,
-                    column_ordinals,
-                    column_types,
-                )?;
-                if batch.num_rows == 0 {
-                    return Ok(SelectResult {
-                        columns: result_columns,
-                        batches: Vec::new(),
-                    });
-                }
-            }
-        }
-
-        if !partition_exprs.is_empty() {
-            let partition_clauses: Vec<OrderClause> = partition_exprs
-                .iter()
-                .map(|expr| OrderClause {
-                    expr: expr.clone(),
-                    descending: false,
-                    nulls: NullsPlacement::Default,
-                })
-                .collect();
-            batch = sort_batch_in_memory(&batch, &partition_clauses, catalog)?;
-        }
-
-        let chunks = chunk_batch(&batch, WINDOW_BATCH_CHUNK_SIZE);
-        let mut operator =
-            WindowOperator::new(chunks.into_iter(), window_plans, partition_exprs, catalog);
-        let mut processed_batches = Vec::new();
-        while let Some(processed) = operator.next_batch()? {
-            processed_batches.push(processed);
-        }
-        if processed_batches.is_empty() {
-            return Ok(SelectResult {
-                columns: result_columns,
-                batches: Vec::new(),
-            });
-        }
-        let mut processed_batch = merge_batches(processed_batches);
-
-        if let Some(expr) = qualify_expr {
-            processed_batch = self.apply_qualify_filter(processed_batch, &expr, catalog)?;
-            if processed_batch.num_rows == 0 {
-                return Ok(SelectResult {
-                    columns: result_columns,
-                    batches: Vec::new(),
-                });
-            }
-        }
-
-        if !final_order_clauses.is_empty() {
-            let sorted_batches = self.execute_sort(
-                std::iter::once(processed_batch),
-                &final_order_clauses,
-                catalog,
-            )?;
-            processed_batch = merge_batches(sorted_batches);
-        }
-
-        let final_batch =
-            self.build_projection_batch(&processed_batch, &projection_plan, catalog)?;
-        let offset = parse_offset(offset_expr)?;
-        let limit = parse_limit(limit_expr)?;
-
-        if distinct_flag {
-            let deduped = deduplicate_batches(vec![final_batch], projection_plan.items.len());
-            let limited_batches = self.apply_limit_offset(deduped.into_iter(), offset, limit)?;
-            return Ok(SelectResult {
-                columns: result_columns,
-                batches: limited_batches,
-            });
-        }
-
-        let limited_batches =
-            self.apply_limit_offset(std::iter::once(final_batch), offset, limit)?;
-        Ok(SelectResult {
-            columns: result_columns,
-            batches: limited_batches,
-        })
-    }
+    // select.rs and select_exec.rs provide the SELECT flow.
 
     fn build_projection_batch(
         &self,
@@ -1639,6 +731,8 @@ fn filter_rows_with_expr(
     Ok(filtered)
 }
 
+// Legacy row-id refinement path; unused after pipeline refactor.
+/*
 fn refine_rows_with_vectorized_filter(
     page_handler: &PageHandler,
     table: &str,
@@ -1717,6 +811,7 @@ fn refine_rows_with_vectorized_filter(
 
     Ok(rows)
 }
+*/
 
 impl Drop for SqlExecutor {
     fn drop(&mut self) {
@@ -1817,27 +912,6 @@ fn boolean_bitmap_from_page(page: &ColumnarPage) -> Result<Bitmap, SqlExecutionE
     }
 }
 
-fn strings_to_text_column(values: Vec<Option<String>>) -> ColumnarPage {
-    let len = values.len();
-    let mut null_bitmap = Bitmap::new(len);
-    let mut col = BytesColumn::with_capacity(len, len * 16);
-    for (idx, value) in values.into_iter().enumerate() {
-        match value {
-            Some(text) => col.push(&text),
-            None => {
-                null_bitmap.set(idx);
-                col.push("");
-            }
-        }
-    }
-    ColumnarPage {
-        page_metadata: String::new(),
-        data: ColumnData::Text(col),
-        null_bitmap,
-        num_rows: len,
-    }
-}
-
 pub struct RowIter<'a> {
     result: &'a SelectResult,
     batch_idx: usize,
@@ -1895,27 +969,8 @@ impl<'a> RowView<'a> {
     }
 }
 
-fn rows_to_batch(rows: Vec<Vec<Option<String>>>) -> ColumnarBatch {
-    if rows.is_empty() {
-        return ColumnarBatch::new();
-    }
-
-    let column_count = rows[0].len();
-    let mut batch = ColumnarBatch::with_capacity(column_count);
-    batch.num_rows = rows.len();
-    batch.row_ids = (0..rows.len() as u64).collect();
-    for column_idx in 0..column_count {
-        let mut column_values = Vec::with_capacity(rows.len());
-        for row in &rows {
-            column_values.push(row.get(column_idx).cloned().unwrap_or(None));
-        }
-        batch
-            .columns
-            .insert(column_idx, strings_to_text_column(column_values));
-    }
-    batch
-}
-
+// Legacy batch-to-row helpers; unused after pipeline refactor.
+/*
 fn batch_to_rows(batch: &ColumnarBatch) -> Vec<Vec<Option<String>>> {
     if batch.num_rows == 0 {
         return Vec::new();
@@ -1943,130 +998,7 @@ fn batches_to_rows(batches: &[ColumnarBatch]) -> Vec<Vec<Option<String>>> {
     }
     rows
 }
-
-#[derive(Hash, PartialEq, Eq)]
-enum DistinctValue {
-    Null,
-    Int(i64),
-    Float(u64),
-    Text(String),
-    Boolean(bool),
-    Timestamp(i64),
-}
-
-#[derive(Hash, PartialEq, Eq)]
-struct DistinctKey {
-    values: Vec<DistinctValue>,
-}
-
-fn build_distinct_key(batch: &ColumnarBatch, row_idx: usize, column_count: usize) -> DistinctKey {
-    let mut values = Vec::with_capacity(column_count);
-    for column_idx in 0..column_count {
-        let value = match batch.columns.get(&column_idx) {
-            Some(page) => match &page.data {
-                ColumnData::Int64(data) => {
-                    if page.null_bitmap.is_set(row_idx) {
-                        DistinctValue::Null
-                    } else {
-                        DistinctValue::Int(data[row_idx])
-                    }
-                }
-                ColumnData::Float64(data) => {
-                    if page.null_bitmap.is_set(row_idx) {
-                        DistinctValue::Null
-                    } else {
-                        DistinctValue::Float(data[row_idx].to_bits())
-                    }
-                }
-                ColumnData::Text(col) => {
-                    if page.null_bitmap.is_set(row_idx) {
-                        DistinctValue::Null
-                    } else {
-                        DistinctValue::Text(col.get_string(row_idx))
-                    }
-                }
-                ColumnData::Boolean(data) => {
-                    if page.null_bitmap.is_set(row_idx) {
-                        DistinctValue::Null
-                    } else {
-                        DistinctValue::Boolean(data[row_idx])
-                    }
-                }
-                ColumnData::Timestamp(data) => {
-                    if page.null_bitmap.is_set(row_idx) {
-                        DistinctValue::Null
-                    } else {
-                        DistinctValue::Timestamp(data[row_idx])
-                    }
-                }
-                ColumnData::Dictionary(dict) => {
-                    if page.null_bitmap.is_set(row_idx) {
-                        DistinctValue::Null
-                    } else {
-                        DistinctValue::Text(dict.get_string(row_idx))
-                    }
-                }
-            },
-            None => DistinctValue::Null,
-        };
-        values.push(value);
-    }
-    DistinctKey { values }
-}
-
-fn deduplicate_batches(batches: Vec<ColumnarBatch>, column_count: usize) -> Vec<ColumnarBatch> {
-    if batches.is_empty() || column_count == 0 {
-        return batches;
-    }
-
-    let mut seen: HashSet<DistinctKey> = HashSet::new();
-    let mut deduped: Vec<ColumnarBatch> = Vec::new();
-
-    for batch in batches.into_iter() {
-        if batch.num_rows == 0 {
-            continue;
-        }
-        let mut indices: Vec<usize> = Vec::new();
-        for row_idx in 0..batch.num_rows {
-            let key = build_distinct_key(&batch, row_idx, column_count);
-            if seen.insert(key) {
-                indices.push(row_idx);
-            }
-        }
-        if !indices.is_empty() {
-            deduped.push(batch.gather(&indices));
-        }
-    }
-    deduped
-}
-
-fn chunk_batch(batch: &ColumnarBatch, chunk_size: usize) -> Vec<ColumnarBatch> {
-    if batch.num_rows == 0 {
-        return Vec::new();
-    }
-    if batch.num_rows <= chunk_size {
-        return vec![batch.clone()];
-    }
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < batch.num_rows {
-        let end = (start + chunk_size).min(batch.num_rows);
-        chunks.push(batch.slice(start, end));
-        start = end;
-    }
-    chunks
-}
-
-fn merge_batches(mut batches: Vec<ColumnarBatch>) -> ColumnarBatch {
-    if batches.is_empty() {
-        return ColumnarBatch::new();
-    }
-    let mut merged = batches.remove(0);
-    for batch in batches {
-        merged.append(&batch);
-    }
-    merged
-}
+*/
 
 #[derive(Debug, Clone)]
 struct PagePrunePredicate {

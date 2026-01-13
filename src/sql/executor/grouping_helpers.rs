@@ -3,7 +3,8 @@ use super::batch::ColumnarBatch;
 use super::expressions::{
     evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
 };
-use super::{GroupByInfo, GroupKey, GroupingSetPlan, SqlExecutionError};
+use super::SqlExecutionError;
+use super::executor_types::{GroupByInfo, GroupKey, GroupingSetPlan};
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{Expr, GroupByExpr};
 
@@ -126,7 +127,7 @@ pub(super) fn evaluate_group_key(
         let scalar = evaluate_row_expr(expr, row_idx, dataset)?;
         values.push(scalar.into_option_string());
     }
-    Ok(GroupKey { values })
+    Ok(GroupKey::from_values(values))
 }
 
 pub(super) fn evaluate_having(

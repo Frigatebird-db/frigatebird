@@ -1,4 +1,4 @@
-use super::GroupKey;
+use super::executor_types::GroupKey;
 use super::SqlExecutionError;
 use super::batch::{ColumnData, ColumnarPage};
 use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};

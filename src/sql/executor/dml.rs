@@ -351,7 +351,7 @@ impl SqlExecutor {
         } else {
             None
         };
-
+        let row_ids = None;
         let has_row_ids = row_ids.is_some();
         let vectorized_selection_expr = if can_use_physical_filter {
             physical_selection_expr.as_ref()
@@ -363,8 +363,6 @@ impl SqlExecutor {
             &columns,
             &required_ordinals,
             vectorized_selection_expr,
-            &column_ordinals,
-            catalog.rows_per_page_group,
             row_ids,
         )?;
         let mut batch = merge_stream_to_batch(stream)?;
@@ -554,7 +552,7 @@ impl SqlExecutor {
         } else {
             None
         };
-
+        let row_ids = None;
         let has_row_ids = row_ids.is_some();
         let vectorized_selection_expr = if can_use_physical_filter {
             physical_selection_expr.as_ref()
@@ -566,8 +564,6 @@ impl SqlExecutor {
             &columns,
             &required_ordinals,
             vectorized_selection_expr,
-            &column_ordinals,
-            catalog.rows_per_page_group,
             row_ids,
         )?;
         let mut batch = merge_stream_to_batch(stream)?;

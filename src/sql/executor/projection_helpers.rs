@@ -4,7 +4,8 @@ use super::helpers::{
     wildcard_options_supported,
 };
 use super::values::CachedValue;
-use super::{ProjectionItem, ProjectionPlan, SqlExecutionError};
+use super::SqlExecutionError;
+use super::executor_types::{ProjectionItem, ProjectionPlan};
 use crate::entry::Entry;
 use crate::metadata_store::ColumnCatalog;
 use crate::page_handler::PageHandler;

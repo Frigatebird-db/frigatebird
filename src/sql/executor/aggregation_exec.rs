@@ -7,11 +7,11 @@ use super::helpers::{parse_limit, parse_offset};
 use super::ordering::{OrderClause, OrderKey, build_group_order_key, compare_order_keys};
 use super::projection_helpers::materialize_columns;
 use super::scan_stream::merge_stream_to_batch;
-use super::{
-    AggregatedRow, GroupKey, SelectResult, SqlExecutionError, SqlExecutor,
-    VectorAggregationOutput, ensure_aggregate_plan_for_expr, find_group_expr_index, literal_value,
-    rows_to_batch,
+use super::aggregation_helpers::{
+    ensure_aggregate_plan_for_expr, find_group_expr_index, literal_value,
 };
+use super::{SelectResult, SqlExecutionError, SqlExecutor, rows_to_batch};
+use super::executor_types::{AggregatedRow, GroupKey, VectorAggregationOutput};
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
@@ -124,8 +124,6 @@ impl SqlExecutor {
             columns,
             required_ordinals,
             selection_physical_expr,
-            column_ordinals,
-            catalog.rows_per_page_group,
             row_ids,
         )?;
         let mut batch = merge_stream_to_batch(stream)?;

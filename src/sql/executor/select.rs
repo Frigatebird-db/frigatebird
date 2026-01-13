@@ -1,25 +1,25 @@
-use super::{
-    AggregatedRow, GroupByStrategy, ProjectionItem, ProjectionPlan, SqlExecutionError, SqlExecutor,
-    build_aggregate_alias_map, build_projection_alias_map,
+use super::{SqlExecutionError, SqlExecutor, SelectResult};
+use super::executor_types::{AggregatedRow, ProjectionPlan};
+use super::select_helpers::{
+    GroupByStrategy, build_aggregate_alias_map, build_projection_alias_map,
     determine_group_by_strategy, projection_expressions_from_plan, resolve_group_by_exprs,
-    resolve_order_by_exprs, rewrite_aliases_in_expr, SelectResult,
+    resolve_order_by_exprs, rewrite_aliases_in_expr,
 };
 use crate::metadata_store::ColumnCatalog;
 use crate::sql::PlannerError;
 use crate::sql::executor::aggregates::{
-    AggregateDataset, AggregateProjectionPlan, plan_aggregate_projection,
-    select_item_contains_aggregate,
+    AggregateProjectionPlan, plan_aggregate_projection, select_item_contains_aggregate,
 };
-use crate::sql::executor::expressions::{evaluate_row_expr, evaluate_scalar_expression};
 use crate::sql::executor::grouping_helpers::validate_group_by;
-use crate::sql::executor::helpers::{collect_expr_column_ordinals, object_name_to_string, parse_limit, parse_offset};
-use crate::sql::executor::ordering::{OrderClause, compare_order_keys, sort_rows_logical};
+use crate::sql::executor::helpers::{
+    collect_expr_column_ordinals, column_name_from_expr, object_name_to_string, parse_limit,
+    parse_offset,
+};
+use crate::sql::executor::ordering::{OrderClause, compare_order_keys};
 use crate::sql::executor::physical_evaluator::filter_supported;
 use crate::sql::executor::projection_helpers::build_projection;
-use crate::sql::executor::scan_stream::merge_stream_to_batch;
-use crate::sql::executor::{deduplicate_batches, filter_rows_with_expr, materialize_columns, rows_to_batch};
+use crate::sql::executor::rows_to_batch;
 use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
-use crate::sql::executor::values::{CachedValue, cached_to_scalar_with_type};
 use crate::sql::executor::window_helpers::{
     collect_window_function_plans, collect_window_plans_from_expr, ensure_common_partition,
     plan_order_clauses,
@@ -302,7 +302,7 @@ impl SqlExecutor {
 
         let apply_selection_late = !window_plans.is_empty();
 
-        let sort_key_filters = collect_sort_key_filters(
+        let mut sort_key_filters = collect_sort_key_filters(
             if has_selection {
                 Some(&selection_expr)
             } else {
@@ -310,19 +310,20 @@ impl SqlExecutor {
             },
             &sort_columns,
         )?;
-        let sort_key_prefixes = if has_selection {
+        let mut sort_key_prefixes = if has_selection {
             collect_sort_key_prefixes(Some(&selection_expr), &sort_columns)?
         } else {
             None
         };
+        if let Some(expr) = if has_selection { Some(&selection_expr) } else { None } {
+            if selection_uses_numeric_literal_on_string_sort(expr, &sort_columns, &column_types) {
+                sort_key_filters = None;
+                sort_key_prefixes = None;
+            }
+        }
 
-        let scan_selection_expr =
-            if has_selection && !apply_selection_late && can_use_physical_filter {
-                physical_selection_expr.as_ref()
-            } else {
-                None
-            };
-        let mut selection_applied_in_scan = scan_selection_expr.is_some();
+        let scan_selection_expr = None;
+        let mut selection_applied_in_scan = false;
         let selection_expr_full = if has_selection {
             Some(&selection_expr)
         } else {
@@ -380,7 +381,7 @@ impl SqlExecutor {
             Some(Vec::new())
         };
 
-        let used_index = sort_key_filters.is_some() || sort_key_prefixes.is_some();
+        let mut used_index = sort_key_filters.is_some() || sort_key_prefixes.is_some();
         let mut row_ids = if let Some(sort_key_filters) = sort_key_filters.as_ref() {
             for column in &sort_columns {
                 key_values.push(sort_key_filters.get(&column.name).cloned().ok_or_else(|| {
@@ -412,12 +413,14 @@ impl SqlExecutor {
         if let Some(rows) = row_ids.as_mut() {
             rows.sort_unstable();
             rows.dedup();
-            if rows.is_empty() && !needs_aggregation {
-                return Ok(SelectResult {
-                    columns: result_columns,
-                    batches: Vec::new(),
-                });
+            if rows.is_empty() {
+                row_ids = None;
+                used_index = false;
             }
+        }
+        if row_ids.is_some() {
+            row_ids = None;
+            used_index = false;
         }
 
 
@@ -471,70 +474,6 @@ impl SqlExecutor {
                 distinct_flag,
                 row_ids.clone(),
             );
-        }
-
-        let candidate_rows = if let Some(rows) = row_ids.clone() {
-            rows
-        } else {
-            let stream = self.build_scan_stream(
-                &table_name,
-                &columns,
-                &required_ordinals,
-                scan_selection_expr,
-                &column_ordinals,
-                catalog.rows_per_page_group,
-                None,
-            )?;
-            let batch = merge_stream_to_batch(stream)?;
-            batch.row_ids
-        };
-
-        let materialized = materialize_columns(
-            &self.page_handler,
-            &table_name,
-            &columns,
-            &required_ordinals,
-            &candidate_rows,
-        )?;
-        let mut matching_rows = candidate_rows.clone();
-        if has_selection && !selection_applied_in_scan {
-            matching_rows = filter_rows_with_expr(
-                &selection_expr,
-                &matching_rows,
-                &materialized,
-                &column_ordinals,
-                &column_types,
-                false,
-            )?;
-            selection_applied_in_scan = true;
-        }
-        let mut selection_set: HashSet<u64> = if apply_selection_late {
-            candidate_rows.iter().copied().collect()
-        } else {
-            HashSet::new()
-        };
-
-        if apply_selection_late {
-            if selection_set.is_empty() && !needs_aggregation {
-                return Ok(SelectResult {
-                    columns: result_columns,
-                    batches: Vec::new(),
-                });
-            }
-        }
-
-        if !needs_aggregation {
-            sort_rows_logical(
-                &order_clauses,
-                &materialized,
-                &column_ordinals,
-                &column_types,
-                &mut matching_rows,
-            )?;
-        }
-
-        if apply_selection_late {
-            matching_rows.retain(|row| selection_set.contains(row));
         }
 
         if needs_aggregation {
@@ -625,92 +564,112 @@ impl SqlExecutor {
             });
         }
 
-        let no_selected_rows = apply_selection_late && selection_set.is_empty();
-        if (!apply_selection_late && matching_rows.is_empty()) || no_selected_rows {
-            return Ok(SelectResult {
-                columns: result_columns,
-                batches: Vec::new(),
-            });
-        }
+        Err(SqlExecutionError::OperationFailed(
+            "select execution fell through without a pipeline path".into(),
+        ))
+    }
+}
 
-        let projection_plan = projection_plan_opt.expect("projection plan required");
-        let mut rows = Vec::with_capacity(matching_rows.len());
-        let dataset_required = projection_plan.needs_dataset() || qualify_expr.is_some();
-        let dataset_holder = if dataset_required {
-            Some(AggregateDataset {
-                rows: matching_rows.as_slice(),
-                materialized: &materialized,
-                column_ordinals: &column_ordinals,
-                column_types: &column_types,
-                masked_exprs: None,
-                prefer_exact_numeric: false,
+fn selection_uses_numeric_literal_on_string_sort(
+    expr: &Expr,
+    sort_columns: &[ColumnCatalog],
+    column_types: &HashMap<String, DataType>,
+) -> bool {
+    let sort_names: HashSet<&str> = sort_columns.iter().map(|col| col.name.as_str()).collect();
+    match expr {
+        Expr::BinaryOp { left, op, right } => {
+            if matches!(op, sqlparser::ast::BinaryOperator::Eq) {
+                if let Some(name) = column_name_from_expr(left) {
+                    if sort_names.contains(name.as_str()) {
+                        if is_numeric_literal(right) {
+                            return matches!(
+                                column_types.get(&name),
+                                Some(DataType::String)
+                            );
+                        }
+                    }
+                }
+                if let Some(name) = column_name_from_expr(right) {
+                    if sort_names.contains(name.as_str()) {
+                        if is_numeric_literal(left) {
+                            return matches!(
+                                column_types.get(&name),
+                                Some(DataType::String)
+                            );
+                        }
+                    }
+                }
+            }
+            selection_uses_numeric_literal_on_string_sort(left, sort_columns, column_types)
+                || selection_uses_numeric_literal_on_string_sort(right, sort_columns, column_types)
+        }
+        Expr::Nested(inner) => {
+            selection_uses_numeric_literal_on_string_sort(inner, sort_columns, column_types)
+        }
+        Expr::UnaryOp { expr, .. } => {
+            selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types)
+        }
+        Expr::Between { expr, low, high, .. } => {
+            selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types)
+                || selection_uses_numeric_literal_on_string_sort(low, sort_columns, column_types)
+                || selection_uses_numeric_literal_on_string_sort(high, sort_columns, column_types)
+        }
+        Expr::InList { expr, list, .. } => {
+            if selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types) {
+                return true;
+            }
+            list.iter().any(|item| {
+                selection_uses_numeric_literal_on_string_sort(item, sort_columns, column_types)
             })
-        } else {
-            None
-        };
-        let dataset = dataset_holder.as_ref();
-
-        for &row_idx in &matching_rows {
-            if apply_selection_late && !selection_set.contains(&row_idx) {
-                continue;
-            }
-            if let Some(qualify_expr) = &qualify_expr {
-                let dataset = dataset.expect("dataset required for QUALIFY evaluation");
-                let value = evaluate_row_expr(qualify_expr, row_idx, dataset)?;
-                if !value.as_bool().unwrap_or(false) {
-                    continue;
-                }
-            }
-
-            let mut projected = Vec::with_capacity(projection_plan.items.len());
-            for item in &projection_plan.items {
-                match item {
-                    ProjectionItem::Direct { ordinal } => {
-                        let cached = materialized
-                            .get(ordinal)
-                            .and_then(|column_map| column_map.get(&row_idx))
-                            .cloned()
-                            .or_else(|| {
-                                self.page_handler
-                                    .read_entry_at(&table_name, &columns[*ordinal].name, row_idx)
-                                    .map(|entry| CachedValue::from_entry(&entry))
-                            })
-                            .ok_or_else(|| {
-                                SqlExecutionError::OperationFailed(format!(
-                                    "missing value for {table_name}.{} at row {row_idx}",
-                                    columns[*ordinal].name
-                                ))
-                            })?;
-                        let scalar =
-                            cached_to_scalar_with_type(&cached, columns[*ordinal].data_type);
-                        projected.push(scalar.into_option_string());
-                    }
-                    ProjectionItem::Computed { expr } => {
-                        let dataset = dataset.expect("dataset required for computed projection");
-                        let value = evaluate_row_expr(expr, row_idx, dataset)?;
-                        projected.push(value.into_option_string());
-                    }
-                }
-            }
-            rows.push(projected);
         }
-
-        let offset = parse_offset(offset_expr)?;
-        let limit = parse_limit(limit_expr)?;
-
-        let mut batches = if rows.is_empty() {
-            Vec::new()
-        } else {
-            vec![rows_to_batch(rows)]
-        };
-        if distinct_flag {
-            batches = deduplicate_batches(batches, projection_plan.items.len());
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand
+                .as_ref()
+                .is_some_and(|op| {
+                    selection_uses_numeric_literal_on_string_sort(
+                        op,
+                        sort_columns,
+                        column_types,
+                    )
+                })
+                || conditions.iter().any(|cond| {
+                    selection_uses_numeric_literal_on_string_sort(
+                        cond,
+                        sort_columns,
+                        column_types,
+                    )
+                })
+                || results.iter().any(|res| {
+                    selection_uses_numeric_literal_on_string_sort(
+                        res,
+                        sort_columns,
+                        column_types,
+                    )
+                })
+                || else_result.as_ref().is_some_and(|expr| {
+                    selection_uses_numeric_literal_on_string_sort(
+                        expr,
+                        sort_columns,
+                        column_types,
+                    )
+                })
         }
-        let limited_batches = self.apply_limit_offset(batches.into_iter(), offset, limit)?;
+        _ => false,
+    }
+}
 
-        Ok(SelectResult {
-            columns: result_columns,
-            batches: limited_batches,
-        })
+fn is_numeric_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Value(Value::Number(_, _)) => true,
+        Expr::UnaryOp { op, expr } => {
+            matches!(op, sqlparser::ast::UnaryOperator::Plus | sqlparser::ast::UnaryOperator::Minus)
+                && matches!(**expr, Expr::Value(Value::Number(_, _)))
+        }
+        _ => false,
     }
 }
