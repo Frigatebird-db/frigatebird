@@ -5,7 +5,7 @@ use super::{
 use super::batch::ColumnarBatch;
 use super::executor_types::ProjectionPlan;
 use super::scan_stream::collect_stream_batches;
-use super::window_helpers::{
+use crate::pipeline::window_helpers::{
     WindowFunctionPlan, assign_window_display_aliases, rewrite_projection_plan_for_windows,
     rewrite_window_expressions,
 };

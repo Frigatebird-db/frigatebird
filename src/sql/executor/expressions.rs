@@ -671,7 +671,7 @@ pub(super) fn evaluate_row_expr(
     }
 }
 
-pub(super) fn evaluate_expression_on_batch(
+pub(crate) fn evaluate_expression_on_batch(
     expr: &Expr,
     batch: &ColumnarBatch,
     catalog: &TableCatalog,

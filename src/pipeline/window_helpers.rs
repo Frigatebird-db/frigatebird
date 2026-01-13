@@ -1,13 +1,11 @@
-use super::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
-use super::expressions::evaluate_expression_on_batch;
-use super::grouping_helpers::evaluate_group_keys_on_batch;
-use super::helpers::parse_interval_seconds;
-use super::ordering::{
-    NullsPlacement, OrderClause, OrderKey, build_order_keys_on_batch, compare_order_keys,
+use crate::sql::executor::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
+use crate::sql::executor::helpers::parse_interval_seconds;
+use crate::sql::executor::values::{ScalarValue, scalar_from_f64};
+use crate::sql::executor::{
+    GroupKey, NullsPlacement, OrderClause, OrderKey, SqlExecutionError,
+    build_order_keys_on_batch, compare_order_keys, evaluate_expression_on_batch,
+    evaluate_group_keys_on_batch, ProjectionItem, ProjectionPlan,
 };
-use super::values::{ScalarValue, scalar_from_f64};
-use super::SqlExecutionError;
-use super::executor_types::GroupKey;
 use sqlparser::ast::{Expr, OrderByExpr};
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{
@@ -17,7 +15,7 @@ use sqlparser::ast::{
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 
-pub(super) fn plan_order_clauses(
+pub(crate) fn plan_order_clauses(
     order_by: &[OrderByExpr],
     alias_map: Option<&HashMap<String, Expr>>,
 ) -> Result<Vec<OrderClause>, SqlExecutionError> {
@@ -119,7 +117,7 @@ fn rewrite_aliases(expr: &Expr, alias_map: &HashMap<String, Expr>) -> Expr {
     }
 }
 
-pub(super) fn collect_window_function_plans(
+pub(crate) fn collect_window_function_plans(
     items: &[SelectItem],
 ) -> Result<Vec<WindowFunctionPlan>, SqlExecutionError> {
     let mut plans = Vec::new();
@@ -136,7 +134,7 @@ pub(super) fn collect_window_function_plans(
 }
 
 #[derive(Clone)]
-pub(super) enum WindowFunctionKind {
+pub(crate) enum WindowFunctionKind {
     RowNumber,
     Rank,
     DenseRank,
@@ -149,44 +147,44 @@ pub(super) enum WindowFunctionKind {
 
 #[derive(Clone)]
 pub(crate) struct WindowFunctionPlan {
-    pub(super) key: String,
-    pub(super) kind: WindowFunctionKind,
-    pub(super) partition_by: Vec<Expr>,
-    pub(super) order_by: Vec<OrderByExpr>,
-    pub(super) arg: Option<Expr>,
-    pub(super) default_expr: Option<Expr>,
-    pub(super) result_ordinal: usize,
-    pub(super) result_alias: String,
-    pub(super) display_alias: Option<String>,
+    pub(crate) key: String,
+    pub(crate) kind: WindowFunctionKind,
+    pub(crate) partition_by: Vec<Expr>,
+    pub(crate) order_by: Vec<OrderByExpr>,
+    pub(crate) arg: Option<Expr>,
+    pub(crate) default_expr: Option<Expr>,
+    pub(crate) result_ordinal: usize,
+    pub(crate) result_alias: String,
+    pub(crate) display_alias: Option<String>,
 }
 
 #[derive(Clone)]
-pub(super) enum SumWindowFrame {
+pub(crate) enum SumWindowFrame {
     Rows { preceding: Option<usize> },
     Range { preceding: RangePreceding },
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum RangePreceding {
+pub(crate) enum RangePreceding {
     Unbounded,
     Value(f64),
 }
 
-pub(super) fn rewrite_projection_plan_for_windows(
-    plan: &mut super::executor_types::ProjectionPlan,
+pub(crate) fn rewrite_projection_plan_for_windows(
+    plan: &mut ProjectionPlan,
     alias_map: &HashMap<String, String>,
 ) -> Result<(), SqlExecutionError> {
     for item in &mut plan.items {
-        if let super::executor_types::ProjectionItem::Computed { expr } = item {
+        if let ProjectionItem::Computed { expr } = item {
             rewrite_window_expressions(expr, alias_map)?;
         }
     }
     Ok(())
 }
 
-pub(super) fn assign_window_display_aliases(
+pub(crate) fn assign_window_display_aliases(
     plans: &mut [WindowFunctionPlan],
-    projection_plan: &super::executor_types::ProjectionPlan,
+    projection_plan: &ProjectionPlan,
 ) {
     use sqlparser::ast::Expr;
     use std::collections::VecDeque;
@@ -201,8 +199,8 @@ pub(super) fn assign_window_display_aliases(
 
     for (idx, item) in projection_plan.items.iter().enumerate() {
         let expr = match item {
-            super::executor_types::ProjectionItem::Computed { expr } => expr,
-            super::executor_types::ProjectionItem::Direct { .. } => continue,
+            ProjectionItem::Computed { expr } => expr,
+            ProjectionItem::Direct { .. } => continue,
         };
         if let Expr::Function(function) = expr {
             if function.over.is_none() {
@@ -218,7 +216,7 @@ pub(super) fn assign_window_display_aliases(
     }
 }
 
-pub(super) fn collect_window_plans_from_expr(
+pub(crate) fn collect_window_plans_from_expr(
     expr: &Expr,
     plans: &mut Vec<WindowFunctionPlan>,
 ) -> Result<(), SqlExecutionError> {
@@ -330,14 +328,14 @@ pub(super) fn collect_window_plans_from_expr(
     Ok(())
 }
 
-pub(super) fn parse_usize_literal(expr: &Expr) -> Option<usize> {
+pub(crate) fn parse_usize_literal(expr: &Expr) -> Option<usize> {
     match expr {
         Expr::Value(Value::Number(n, _)) => n.parse::<usize>().ok(),
         _ => None,
     }
 }
 
-pub(super) fn extract_window_plan(
+pub(crate) fn extract_window_plan(
     expr: &Expr,
 ) -> Result<Option<WindowFunctionPlan>, SqlExecutionError> {
     let Expr::Function(function) = expr else {
@@ -752,7 +750,7 @@ pub(super) fn extract_window_plan(
     }
 }
 
-pub(super) fn rewrite_window_expressions(
+pub(crate) fn rewrite_window_expressions(
     expr: &mut Expr,
     alias_map: &HashMap<String, String>,
 ) -> Result<(), SqlExecutionError> {
@@ -886,7 +884,7 @@ pub(super) fn rewrite_window_expressions(
     }
 }
 
-pub(super) fn ensure_common_partition(
+pub(crate) fn ensure_common_partition(
     plans: &[WindowFunctionPlan],
 ) -> Result<Vec<Expr>, SqlExecutionError> {
     if plans.is_empty() {

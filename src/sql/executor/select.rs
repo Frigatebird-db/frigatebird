@@ -12,16 +12,15 @@ use crate::sql::executor::aggregates::{
 };
 use crate::sql::executor::grouping_helpers::validate_group_by;
 use crate::sql::executor::helpers::{
-    collect_expr_column_ordinals, column_name_from_expr, object_name_to_string, parse_limit,
-    parse_offset,
+    collect_expr_column_ordinals, object_name_to_string, parse_limit, parse_offset,
 };
 use crate::sql::executor::ordering::OrderClause;
 use crate::sql::executor::physical_evaluator::filter_supported;
 use crate::sql::executor::projection_helpers::build_projection;
 use crate::sql::executor::merge_batches;
-use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
+use crate::pipeline::planner::plan_row_ids_for_select;
 use crate::sql::executor::scan_stream::collect_stream_batches;
-use crate::sql::executor::window_helpers::{
+use crate::pipeline::window_helpers::{
     collect_window_function_plans, collect_window_plans_from_expr, ensure_common_partition,
     plan_order_clauses,
 };
@@ -140,6 +139,7 @@ impl SqlExecutor {
             Some(expr) => (expr, true),
             None => (Expr::Value(Value::Boolean(true)), false),
         };
+        let selection_expr_opt = if has_selection { Some(&selection_expr) } else { None };
 
         let expr_planner = ExpressionPlanner::new(&catalog);
         let physical_selection_expr = if has_selection {
@@ -162,8 +162,6 @@ impl SqlExecutor {
             ));
         }
         let sort_columns: Vec<ColumnCatalog> = sort_columns_refs.into_iter().cloned().collect();
-
-        let mut key_values = Vec::with_capacity(sort_columns.len());
 
         let aggregate_query = projection_items
             .iter()
@@ -304,26 +302,7 @@ impl SqlExecutor {
 
         let apply_selection_late = !window_plans.is_empty();
 
-        let mut sort_key_filters = collect_sort_key_filters(
-            if has_selection {
-                Some(&selection_expr)
-            } else {
-                None
-            },
-            &sort_columns,
-        )?;
-        let mut sort_key_prefixes = if has_selection {
-            collect_sort_key_prefixes(Some(&selection_expr), &sort_columns)?
-        } else {
-            None
-        };
-        if let Some(expr) = if has_selection { Some(&selection_expr) } else { None } {
-            if selection_uses_numeric_literal_on_string_sort(expr, &sort_columns, &column_types) {
-                sort_key_filters = None;
-                sort_key_prefixes = None;
-            }
-        }
-
+        let row_id_selection = selection_expr_opt;
         let scan_selection_expr = None;
         let mut selection_applied_in_scan = false;
         let selection_expr_full = if has_selection {
@@ -383,30 +362,14 @@ impl SqlExecutor {
             Some(Vec::new())
         };
 
-        let mut used_index = sort_key_filters.is_some() || sort_key_prefixes.is_some();
-        let mut row_ids = if let Some(sort_key_filters) = sort_key_filters.as_ref() {
-            for column in &sort_columns {
-                key_values.push(sort_key_filters.get(&column.name).cloned().ok_or_else(|| {
-                    SqlExecutionError::Unsupported(format!(
-                        "SELECT requires equality predicate for ORDER BY column {}",
-                        column.name
-                    ))
-                })?);
-            }
-            Some(self.locate_rows_by_sort_tuple(
-                &table_name,
-                &sort_columns,
-                &key_values,
-            )?)
-        } else if let Some(prefixes) = sort_key_prefixes.as_ref() {
-            Some(self.locate_rows_by_sort_prefixes(
-                &table_name,
-                &sort_columns,
-                &prefixes,
-            )?)
-        } else {
-            None
-        };
+        let mut row_ids = plan_row_ids_for_select(
+            self,
+            &table_name,
+            &sort_columns,
+            row_id_selection,
+            &column_types,
+        )?;
+        let mut used_index = row_ids.is_some();
 
         if used_index {
             selection_applied_in_scan = false;
@@ -557,109 +520,5 @@ impl SqlExecutor {
         Err(SqlExecutionError::OperationFailed(
             "select execution fell through without a pipeline path".into(),
         ))
-    }
-}
-
-fn selection_uses_numeric_literal_on_string_sort(
-    expr: &Expr,
-    sort_columns: &[ColumnCatalog],
-    column_types: &HashMap<String, DataType>,
-) -> bool {
-    let sort_names: HashSet<&str> = sort_columns.iter().map(|col| col.name.as_str()).collect();
-    match expr {
-        Expr::BinaryOp { left, op, right } => {
-            if matches!(op, sqlparser::ast::BinaryOperator::Eq) {
-                if let Some(name) = column_name_from_expr(left) {
-                    if sort_names.contains(name.as_str()) {
-                        if is_numeric_literal(right) {
-                            return matches!(
-                                column_types.get(&name),
-                                Some(DataType::String)
-                            );
-                        }
-                    }
-                }
-                if let Some(name) = column_name_from_expr(right) {
-                    if sort_names.contains(name.as_str()) {
-                        if is_numeric_literal(left) {
-                            return matches!(
-                                column_types.get(&name),
-                                Some(DataType::String)
-                            );
-                        }
-                    }
-                }
-            }
-            selection_uses_numeric_literal_on_string_sort(left, sort_columns, column_types)
-                || selection_uses_numeric_literal_on_string_sort(right, sort_columns, column_types)
-        }
-        Expr::Nested(inner) => {
-            selection_uses_numeric_literal_on_string_sort(inner, sort_columns, column_types)
-        }
-        Expr::UnaryOp { expr, .. } => {
-            selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types)
-        }
-        Expr::Between { expr, low, high, .. } => {
-            selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types)
-                || selection_uses_numeric_literal_on_string_sort(low, sort_columns, column_types)
-                || selection_uses_numeric_literal_on_string_sort(high, sort_columns, column_types)
-        }
-        Expr::InList { expr, list, .. } => {
-            if selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types) {
-                return true;
-            }
-            list.iter().any(|item| {
-                selection_uses_numeric_literal_on_string_sort(item, sort_columns, column_types)
-            })
-        }
-        Expr::Case {
-            operand,
-            conditions,
-            results,
-            else_result,
-        } => {
-            operand
-                .as_ref()
-                .is_some_and(|op| {
-                    selection_uses_numeric_literal_on_string_sort(
-                        op,
-                        sort_columns,
-                        column_types,
-                    )
-                })
-                || conditions.iter().any(|cond| {
-                    selection_uses_numeric_literal_on_string_sort(
-                        cond,
-                        sort_columns,
-                        column_types,
-                    )
-                })
-                || results.iter().any(|res| {
-                    selection_uses_numeric_literal_on_string_sort(
-                        res,
-                        sort_columns,
-                        column_types,
-                    )
-                })
-                || else_result.as_ref().is_some_and(|expr| {
-                    selection_uses_numeric_literal_on_string_sort(
-                        expr,
-                        sort_columns,
-                        column_types,
-                    )
-                })
-        }
-        _ => false,
-    }
-}
-
-fn is_numeric_literal(expr: &Expr) -> bool {
-    match expr {
-        Expr::Value(Value::Number(_, _)) => true,
-        Expr::UnaryOp { op, expr } => {
-            matches!(op, sqlparser::ast::UnaryOperator::Plus | sqlparser::ast::UnaryOperator::Minus)
-                && matches!(**expr, Expr::Value(Value::Number(_, _)))
-        }
-        _ => false,
     }
 }

@@ -23,75 +23,15 @@ pub(crate) enum NullsPlacement {
     Last,
 }
 
-// Legacy rowwise ordering path; unused after pipeline refactor.
-/*
-pub(super) fn sort_rows_logical(
-    clauses: &[OrderClause],
-    materialized: &MaterializedColumns,
-    column_ordinals: &HashMap<String, usize>,
-    column_types: &HashMap<String, DataType>,
-    rows: &mut Vec<u64>,
-) -> Result<(), SqlExecutionError> {
-    if clauses.is_empty() || rows.len() <= 1 {
-        return Ok(());
-    }
-
-    let dataset = AggregateDataset {
-        rows: rows.as_slice(),
-        materialized,
-        column_ordinals,
-        column_types,
-        masked_exprs: None,
-        prefer_exact_numeric: false,
-    };
-
-    let mut keyed: Vec<(OrderKey, u64)> = Vec::with_capacity(rows.len());
-    for &row_idx in rows.iter() {
-        let key = build_row_order_key(clauses, row_idx, &dataset)?;
-        keyed.push((key, row_idx));
-    }
-
-    keyed.sort_by(|left, right| {
-        let ordering = compare_order_keys(&left.0, &right.0, clauses);
-        if ordering == Ordering::Equal {
-            left.1.cmp(&right.1)
-        } else {
-            ordering
-        }
-    });
-
-    rows.clear();
-    rows.extend(keyed.into_iter().map(|(_, row)| row));
-
-    Ok(())
-}
-*/
 
 #[derive(Clone)]
-pub(super) struct OrderKey {
-    pub(super) values: Vec<ScalarValue>,
+pub(crate) struct OrderKey {
+    pub(crate) values: Vec<ScalarValue>,
 }
 
-/*
-pub(super) fn build_row_order_key(
-    clauses: &[OrderClause],
-    row_idx: u64,
-    dataset: &AggregateDataset,
-) -> Result<OrderKey, SqlExecutionError> {
-    if clauses.is_empty() {
-        return Ok(OrderKey { values: Vec::new() });
-    }
+// Legacy rowwise ordering helpers removed after pipeline refactor.
 
-    let mut values = Vec::with_capacity(clauses.len());
-    for clause in clauses {
-        let value = evaluate_row_expr(&clause.expr, row_idx, dataset)?;
-        values.push(value);
-    }
-    Ok(OrderKey { values })
-}
-*/
-
-pub(super) fn compare_order_keys(
+pub(crate) fn compare_order_keys(
     left: &OrderKey,
     right: &OrderKey,
     clauses: &[OrderClause],
@@ -107,7 +47,7 @@ pub(super) fn compare_order_keys(
     Ordering::Equal
 }
 
-pub(super) fn build_group_order_key(
+pub(crate) fn build_group_order_key(
     clauses: &[OrderClause],
     dataset: &AggregateDataset,
 ) -> Result<OrderKey, SqlExecutionError> {
@@ -195,7 +135,7 @@ fn scalar_to_string(value: &ScalarValue) -> String {
     }
 }
 
-pub(super) fn build_order_keys_on_batch(
+pub(crate) fn build_order_keys_on_batch(
     clauses: &[OrderClause],
     batch: &ColumnarBatch,
     catalog: &TableCatalog,

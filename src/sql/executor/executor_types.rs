@@ -3,9 +3,9 @@ use sqlparser::ast::Expr;
 use std::collections::BTreeSet;
 
 pub(crate) struct ProjectionPlan {
-    pub(super) headers: Vec<String>,
-    pub(super) items: Vec<ProjectionItem>,
-    pub(super) required_ordinals: BTreeSet<usize>,
+    pub(crate) headers: Vec<String>,
+    pub(crate) items: Vec<ProjectionItem>,
+    pub(crate) required_ordinals: BTreeSet<usize>,
 }
 
 impl ProjectionPlan {
@@ -24,7 +24,7 @@ impl ProjectionPlan {
     }
 }
 
-pub(super) enum ProjectionItem {
+pub(crate) enum ProjectionItem {
     Direct { ordinal: usize },
     Computed { expr: Expr },
 }
@@ -46,20 +46,20 @@ pub(crate) struct AggregatedRow {
 }
 
 #[derive(Hash, PartialEq, Eq, Clone)]
-pub(super) struct GroupKey {
+pub(crate) struct GroupKey {
     values: Vec<Option<String>>,
 }
 
 impl GroupKey {
-    pub(super) fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self { values: Vec::new() }
     }
 
-    pub(super) fn from_values(values: Vec<Option<String>>) -> Self {
+    pub(crate) fn from_values(values: Vec<Option<String>>) -> Self {
         Self { values }
     }
 
-    pub(super) fn value_at(&self, idx: usize) -> Option<Option<String>> {
+    pub(crate) fn value_at(&self, idx: usize) -> Option<Option<String>> {
         self.values.get(idx).cloned()
     }
 }

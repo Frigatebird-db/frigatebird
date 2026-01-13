@@ -142,7 +142,7 @@ pub(super) fn evaluate_having(
     }
 }
 
-pub(super) fn evaluate_group_keys_on_batch(
+pub(crate) fn evaluate_group_keys_on_batch(
     group_by_exprs: &[Expr],
     batch: &ColumnarBatch,
     catalog: &TableCatalog,

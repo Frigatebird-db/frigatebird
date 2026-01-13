@@ -196,7 +196,7 @@ pub(super) fn format_float(value: f64) -> String {
     }
 }
 
-pub(super) fn scalar_from_f64(value: f64) -> ScalarValue {
+pub(crate) fn scalar_from_f64(value: f64) -> ScalarValue {
     if value.is_nan() || value.is_infinite() {
         ScalarValue::Float64(value)
     } else if (value.fract().abs() - 0.0).abs() < 1e-9 {

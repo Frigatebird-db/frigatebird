@@ -11,9 +11,8 @@ use crate::sql::executor::helpers::{
 };
 use crate::sql::executor::physical_evaluator::filter_supported;
 use crate::sql::executor::batch::ColumnarBatch;
-use crate::sql::executor::{merge_batches};
 use crate::sql::executor::scan_stream::collect_stream_batches;
-use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
+use crate::pipeline::planner::plan_row_ids_from_sort_keys;
 use crate::sql::executor::values::compare_strs;
 use crate::sql::planner::ExpressionPlanner;
 use crate::pipeline::operators::{FilterOperator, PipelineOperator};
@@ -315,45 +314,12 @@ impl SqlExecutor {
             required_ordinals.extend(predicate_ordinals);
         }
 
-        let sort_key_filters = collect_sort_key_filters(
-            if has_selection {
-                Some(&selection_expr)
-            } else {
-                None
-            },
+        let row_ids = plan_row_ids_from_sort_keys(
+            self,
+            &table_name,
             &sort_columns,
+            if has_selection { Some(&selection_expr) } else { None },
         )?;
-        let sort_key_prefixes = if has_selection {
-            collect_sort_key_prefixes(Some(&selection_expr), &sort_columns)?
-        } else {
-            None
-        };
-
-        let mut key_values = Vec::with_capacity(sort_columns.len());
-        let row_ids = if let Some(filters) = sort_key_filters {
-            for column in &sort_columns {
-                let value = filters.get(&column.name).cloned().ok_or_else(|| {
-                    SqlExecutionError::Unsupported(format!(
-                        "UPDATE requires equality predicate for ORDER BY column {}",
-                        column.name
-                    ))
-                })?;
-                key_values.push(value);
-            }
-            Some(self.locate_rows_by_sort_tuple(
-                &table_name,
-                &sort_columns,
-                &key_values,
-            )?)
-        } else if let Some(prefixes) = sort_key_prefixes {
-            Some(self.locate_rows_by_sort_prefixes(
-                &table_name,
-                &sort_columns,
-                &prefixes,
-            )?)
-        } else {
-            None
-        };
         let mut row_ids = row_ids;
         if let Some(rows) = row_ids.as_mut() {
             rows.sort_unstable();
@@ -375,26 +341,30 @@ impl SqlExecutor {
             vectorized_selection_expr,
             row_ids,
         )?;
-        let batches = collect_stream_batches(stream)?;
-        let mut batch = merge_batches(batches);
         let selection_applied_in_scan =
             has_selection && can_use_physical_filter && !has_row_ids;
-        if has_selection && !selection_applied_in_scan {
-            let mut filter = FilterOperator::new(
-                self,
-                &selection_expr,
-                vectorized_selection_expr,
-                &catalog,
-                &table_name,
-                &columns,
-                &column_ordinals,
-                &column_types,
-            );
-            let mut results = filter.execute(batch)?;
-            batch = results.pop().unwrap_or_else(ColumnarBatch::new);
+        let mut matching_rows = Vec::new();
+        let batches = collect_stream_batches(stream)?;
+        for batch in batches {
+            let mut batch = batch;
+            if has_selection && !selection_applied_in_scan {
+                let mut filter = FilterOperator::new(
+                    self,
+                    &selection_expr,
+                    vectorized_selection_expr,
+                    &catalog,
+                    &table_name,
+                    &columns,
+                    &column_ordinals,
+                    &column_types,
+                );
+                let mut results = filter.execute(batch)?;
+                batch = results.pop().unwrap_or_else(ColumnarBatch::new);
+            }
+            if batch.num_rows > 0 {
+                matching_rows.extend(batch.row_ids);
+            }
         }
-
-        let mut matching_rows = batch.row_ids;
         if matching_rows.is_empty() {
             return Ok(());
         }
@@ -526,45 +496,12 @@ impl SqlExecutor {
             required_ordinals.extend(predicate_ordinals);
         }
 
-        let sort_key_filters = collect_sort_key_filters(
-            if has_selection {
-                Some(&selection_expr)
-            } else {
-                None
-            },
+        let row_ids = plan_row_ids_from_sort_keys(
+            self,
+            &table_name,
             &sort_columns,
+            if has_selection { Some(&selection_expr) } else { None },
         )?;
-        let sort_key_prefixes = if has_selection {
-            collect_sort_key_prefixes(Some(&selection_expr), &sort_columns)?
-        } else {
-            None
-        };
-
-        let mut key_values = Vec::with_capacity(sort_columns.len());
-        let row_ids = if let Some(filters) = sort_key_filters {
-            for column in &sort_columns {
-                let value = filters.get(&column.name).cloned().ok_or_else(|| {
-                    SqlExecutionError::Unsupported(format!(
-                        "DELETE requires equality predicate for ORDER BY column {}",
-                        column.name
-                    ))
-                })?;
-                key_values.push(value);
-            }
-            Some(self.locate_rows_by_sort_tuple(
-                &table_name,
-                &sort_columns,
-                &key_values,
-            )?)
-        } else if let Some(prefixes) = sort_key_prefixes {
-            Some(self.locate_rows_by_sort_prefixes(
-                &table_name,
-                &sort_columns,
-                &prefixes,
-            )?)
-        } else {
-            None
-        };
         let mut row_ids = row_ids;
         if let Some(rows) = row_ids.as_mut() {
             rows.sort_unstable();
@@ -586,26 +523,30 @@ impl SqlExecutor {
             vectorized_selection_expr,
             row_ids,
         )?;
-        let batches = collect_stream_batches(stream)?;
-        let mut batch = merge_batches(batches);
         let selection_applied_in_scan =
             has_selection && can_use_physical_filter && !has_row_ids;
-        if has_selection && !selection_applied_in_scan {
-            let mut filter = FilterOperator::new(
-                self,
-                &selection_expr,
-                vectorized_selection_expr,
-                &catalog,
-                &table_name,
-                &columns,
-                &column_ordinals,
-                &column_types,
-            );
-            let mut results = filter.execute(batch)?;
-            batch = results.pop().unwrap_or_else(ColumnarBatch::new);
+        let mut matching_rows = Vec::new();
+        let batches = collect_stream_batches(stream)?;
+        for batch in batches {
+            let mut batch = batch;
+            if has_selection && !selection_applied_in_scan {
+                let mut filter = FilterOperator::new(
+                    self,
+                    &selection_expr,
+                    vectorized_selection_expr,
+                    &catalog,
+                    &table_name,
+                    &columns,
+                    &column_ordinals,
+                    &column_types,
+                );
+                let mut results = filter.execute(batch)?;
+                batch = results.pop().unwrap_or_else(ColumnarBatch::new);
+            }
+            if batch.num_rows > 0 {
+                matching_rows.extend(batch.row_ids);
+            }
         }
-
-        let mut matching_rows = batch.row_ids;
         if matching_rows.is_empty() {
             return Ok(());
         }

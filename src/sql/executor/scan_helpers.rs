@@ -6,7 +6,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Value};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-pub(super) fn collect_sort_key_filters(
+pub(crate) fn collect_sort_key_filters(
     expr: Option<&Expr>,
     sort_columns: &[ColumnCatalog],
 ) -> Result<Option<HashMap<String, String>>, SqlExecutionError> {
@@ -120,7 +120,7 @@ impl SortKeyPrefix {
     }
 }
 
-pub(super) fn collect_sort_key_prefixes(
+pub(crate) fn collect_sort_key_prefixes(
     expr: Option<&Expr>,
     sort_columns: &[ColumnCatalog],
 ) -> Result<Option<Vec<SortKeyPrefix>>, SqlExecutionError> {

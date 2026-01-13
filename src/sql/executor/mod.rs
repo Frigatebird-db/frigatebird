@@ -18,15 +18,12 @@ mod select_helpers;
 mod scan_helpers_exec;
 mod row_functions;
 mod scalar_functions;
-mod scan_helpers;
+pub(crate) mod scan_helpers;
 mod spill;
 pub mod values;
-mod window_helpers;
 
 use self::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
-use executor_types::{
-    GroupByInfo, GroupKey, GroupingSetPlan, ProjectionItem, VectorAggregationOutput,
-};
+use executor_types::{GroupByInfo, GroupingSetPlan, VectorAggregationOutput};
 use executor_utils::{rows_to_batch};
 use self::spill::SpillManager;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
@@ -72,23 +69,23 @@ use aggregates::{
     vectorized_count_value_update, vectorized_max_update, vectorized_min_update,
     vectorized_sum_update, vectorized_variance_update,
 };
-use expressions::{evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression};
-use grouping_helpers::{
-    evaluate_group_key, evaluate_group_keys_on_batch, evaluate_having, validate_group_by,
-};
+use expressions::{evaluate_row_expr, evaluate_scalar_expression};
+use grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
 use helpers::{
     collect_expr_column_ordinals, column_name_from_expr, expr_to_string, object_name_to_string,
     parse_limit, parse_offset, table_with_joins_to_name,
 };
-use ordering::{
-    MergeOperator, build_group_order_key, compare_order_keys,
-};
+use ordering::{MergeOperator, build_group_order_key};
 
 pub(crate) use aggregates::AggregateProjectionPlan;
-pub(crate) use executor_types::{AggregatedRow, ProjectionPlan};
+pub(crate) use executor_types::{AggregatedRow, GroupKey, ProjectionItem, ProjectionPlan};
 pub(crate) use executor_utils::{chunk_batch, deduplicate_batches, merge_batches};
-pub(crate) use ordering::{NullsPlacement, OrderClause, sort_batch_in_memory};
-pub(crate) use window_helpers::{WindowFunctionPlan, WindowOperator};
+pub(crate) use ordering::{
+    NullsPlacement, OrderClause, OrderKey, build_order_keys_on_batch, compare_order_keys,
+    sort_batch_in_memory,
+};
+pub(crate) use expressions::evaluate_expression_on_batch;
+pub(crate) use grouping_helpers::evaluate_group_keys_on_batch;
 use physical_evaluator::PhysicalEvaluator;
 use projection_helpers::{build_projection, materialize_columns};
 use scan_stream::{
@@ -735,87 +732,7 @@ fn filter_rows_with_expr(
     Ok(filtered)
 }
 
-// Legacy row-id refinement path; unused after pipeline refactor.
-/*
-fn refine_rows_with_vectorized_filter(
-    page_handler: &PageHandler,
-    table: &str,
-    columns: &[ColumnCatalog],
-    expr: &PhysicalExpr,
-    column_ordinals: &HashMap<String, usize>,
-    candidate_rows: &[u64],
-    rows_per_page_group: u64,
-) -> Result<Vec<u64>, SqlExecutionError> {
-    if candidate_rows.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut ordinals = BTreeSet::new();
-    collect_physical_ordinals(expr, &mut ordinals);
-    if ordinals.is_empty() {
-        return Ok(candidate_rows.to_vec());
-    }
-
-    let mut rows = Vec::new();
-    let mut idx = 0;
-    while idx < candidate_rows.len() {
-        let row = candidate_rows[idx];
-        let page_idx = (row / rows_per_page_group) as usize;
-        let page_base = (page_idx as u64) * rows_per_page_group;
-
-        let mut page_rows = Vec::new();
-        while idx < candidate_rows.len()
-            && (candidate_rows[idx] / rows_per_page_group) as usize == page_idx
-        {
-            page_rows.push((candidate_rows[idx] - page_base) as usize);
-            idx += 1;
-        }
-
-        let mut batch_slice = ColumnarBatch::with_capacity(ordinals.len());
-        let mut pages_keepalive = Vec::with_capacity(ordinals.len());
-        let mut num_rows = 0;
-        let mut segment_valid = true;
-
-        for &ordinal in &ordinals {
-            let column = &columns[ordinal];
-            let col_descriptors = page_handler.list_pages_in_table(table, &column.name);
-            if let Some(desc) = col_descriptors.get(page_idx) {
-                let page_arc = page_handler
-                    .get_page(desc.clone())
-                    .ok_or_else(|| SqlExecutionError::OperationFailed("page load failed".into()))?;
-                num_rows = page_arc.page.num_rows;
-                pages_keepalive.push((ordinal, page_arc));
-            } else {
-                segment_valid = false;
-                break;
-            }
-        }
-
-        if !segment_valid || num_rows == 0 {
-            continue;
-        }
-
-        for (ordinal, page_arc) in &pages_keepalive {
-            batch_slice.columns.insert(*ordinal, page_arc.page.clone());
-        }
-        batch_slice.num_rows = num_rows;
-        batch_slice.aliases = column_ordinals.clone();
-
-        let mut bitmap = PhysicalEvaluator::evaluate_filter(expr, &batch_slice);
-        let mut candidate_bitmap = Bitmap::new(num_rows);
-        for offset in page_rows {
-            candidate_bitmap.set(offset);
-        }
-        bitmap.and(&candidate_bitmap);
-
-        for offset in bitmap.iter_ones() {
-            rows.push(page_base + offset as u64);
-        }
-    }
-
-    Ok(rows)
-}
-*/
+// Legacy row-id refinement path removed after pipeline refactor.
 
 impl Drop for SqlExecutor {
     fn drop(&mut self) {
@@ -973,36 +890,7 @@ impl<'a> RowView<'a> {
     }
 }
 
-// Legacy batch-to-row helpers; unused after pipeline refactor.
-/*
-fn batch_to_rows(batch: &ColumnarBatch) -> Vec<Vec<Option<String>>> {
-    if batch.num_rows == 0 {
-        return Vec::new();
-    }
-    let column_count = batch.columns.len();
-    let mut rows = Vec::with_capacity(batch.num_rows);
-    for row_idx in 0..batch.num_rows {
-        let mut row = Vec::with_capacity(column_count);
-        for column_idx in 0..column_count {
-            let column = batch
-                .columns
-                .get(&column_idx)
-                .expect("missing projection column in batch");
-            row.push(column.value_as_string(row_idx));
-        }
-        rows.push(row);
-    }
-    rows
-}
-
-fn batches_to_rows(batches: &[ColumnarBatch]) -> Vec<Vec<Option<String>>> {
-    let mut rows = Vec::new();
-    for batch in batches {
-        rows.extend(batch_to_rows(batch));
-    }
-    rows
-}
-*/
+// Legacy batch-to-row helpers removed after pipeline refactor.
 
 #[derive(Debug, Clone)]
 struct PagePrunePredicate {

@@ -1,9 +1,9 @@
 use crate::metadata_store::TableCatalog;
 use crate::sql::executor::{
     chunk_batch, merge_batches, sort_batch_in_memory, NullsPlacement, OrderClause,
-    SqlExecutionError, WindowFunctionPlan, WindowOperator as ExecWindowOperator,
-    WINDOW_BATCH_CHUNK_SIZE,
+    SqlExecutionError, WINDOW_BATCH_CHUNK_SIZE,
 };
+use crate::pipeline::window_helpers::{WindowFunctionPlan, WindowOperator as ExecWindowOperator};
 use sqlparser::ast::Expr;
 
 use super::{PipelineBatch, PipelineOperator};

@@ -46,7 +46,7 @@ pub(super) fn expr_to_string(expr: &Expr) -> Result<String, SqlExecutionError> {
     }
 }
 
-pub(super) fn column_name_from_expr(expr: &Expr) -> Option<String> {
+pub(crate) fn column_name_from_expr(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Identifier(ident) => Some(ident.value.clone()),
         Expr::CompoundIdentifier(idents) => idents.last().map(|ident| ident.value.clone()),
@@ -83,7 +83,7 @@ pub(super) fn parse_usize_literal(expr: &Expr, context: &str) -> Result<usize, S
     }
 }
 
-pub(super) fn parse_interval_seconds(expr: &Expr, context: &str) -> Result<f64, SqlExecutionError> {
+pub(crate) fn parse_interval_seconds(expr: &Expr, context: &str) -> Result<f64, SqlExecutionError> {
     match expr {
         Expr::Value(Value::Number(value, _)) => value.parse::<f64>().map_err(|_| {
             SqlExecutionError::Unsupported(format!("{context} requires numeric interval"))
