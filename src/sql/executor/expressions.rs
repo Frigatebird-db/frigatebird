@@ -869,6 +869,87 @@ fn evaluate_case_expression_vectorized(
         None
     };
 
+    let numeric_output = result_pages.iter().all(page_is_numeric)
+        && else_page.as_ref().map_or(true, page_is_numeric);
+
+    if numeric_output {
+        let mut values: Vec<f64> = Vec::with_capacity(batch.num_rows);
+        let mut null_bitmap = Bitmap::new(batch.num_rows);
+        if let Some(op_expr) = operand {
+            let operand_page = evaluate_expression_on_batch(op_expr, batch, catalog)?;
+            let condition_pages: Vec<ColumnarPage> = conditions
+                .iter()
+                .map(|expr| evaluate_expression_on_batch(expr, batch, catalog))
+                .collect::<Result<_, _>>()?;
+            for row_idx in 0..batch.num_rows {
+                let operand_value = operand_page.value_as_string(row_idx);
+                let mut selected = None;
+                let mut matched = false;
+                if operand_value.is_some() {
+                    for (cond_page, result_page) in
+                        condition_pages.iter().zip(result_pages.iter())
+                    {
+                        let cond_value = cond_page.value_as_string(row_idx);
+                        if cond_value.is_some() && cond_value == operand_value {
+                            matched = true;
+                            selected = page_numeric_value(result_page, row_idx);
+                            break;
+                        }
+                    }
+                }
+                if !matched {
+                    selected = else_page
+                        .as_ref()
+                        .and_then(|page| page_numeric_value(page, row_idx));
+                }
+                match selected {
+                    Some(value) => values.push(value),
+                    None => {
+                        null_bitmap.set(row_idx);
+                        values.push(0.0);
+                    }
+                }
+            }
+        } else {
+            let condition_pages: Vec<ColumnarPage> = conditions
+                .iter()
+                .map(|expr| evaluate_expression_on_batch(expr, batch, catalog))
+                .collect::<Result<_, _>>()?;
+            for row_idx in 0..batch.num_rows {
+                let mut selected = None;
+                let mut matched = false;
+                for (cond_page, result_page) in
+                    condition_pages.iter().zip(result_pages.iter())
+                {
+                    if page_value_truthy(cond_page, row_idx) {
+                        matched = true;
+                        selected = page_numeric_value(result_page, row_idx);
+                        break;
+                    }
+                }
+                if !matched {
+                    selected = else_page
+                        .as_ref()
+                        .and_then(|page| page_numeric_value(page, row_idx));
+                }
+                match selected {
+                    Some(value) => values.push(value),
+                    None => {
+                        null_bitmap.set(row_idx);
+                        values.push(0.0);
+                    }
+                }
+            }
+        }
+
+        return Ok(ColumnarPage {
+            page_metadata: String::new(),
+            data: ColumnData::Float64(values),
+            null_bitmap,
+            num_rows: batch.num_rows,
+        });
+    }
+
     let mut values: Vec<Option<String>> = Vec::with_capacity(batch.num_rows);
     if let Some(op_expr) = operand {
         let operand_page = evaluate_expression_on_batch(op_expr, batch, catalog)?;
@@ -950,6 +1031,21 @@ fn page_value_truthy(page: &ColumnarPage, row_idx: usize) -> bool {
                 "true" | "t" | "1" | "yes" | "y"
             )
         }
+    }
+}
+
+fn page_is_numeric(page: &ColumnarPage) -> bool {
+    matches!(page.data, ColumnData::Int64(_) | ColumnData::Float64(_))
+}
+
+fn page_numeric_value(page: &ColumnarPage, row_idx: usize) -> Option<f64> {
+    if page.null_bitmap.is_set(row_idx) {
+        return None;
+    }
+    match &page.data {
+        ColumnData::Int64(values) => values.get(row_idx).copied().map(|value| value as f64),
+        ColumnData::Float64(values) => values.get(row_idx).copied(),
+        _ => None,
     }
 }
 
