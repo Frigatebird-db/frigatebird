@@ -18,9 +18,9 @@ use crate::sql::executor::helpers::{
 use crate::sql::executor::ordering::OrderClause;
 use crate::sql::executor::physical_evaluator::filter_supported;
 use crate::sql::executor::projection_helpers::build_projection;
-use crate::sql::executor::batch::ColumnarBatch;
+use crate::sql::executor::merge_batches;
 use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
-use crate::sql::executor::scan_stream::merge_stream_to_batch;
+use crate::sql::executor::scan_stream::collect_stream_batches;
 use crate::sql::executor::window_helpers::{
     collect_window_function_plans, collect_window_plans_from_expr, ensure_common_partition,
     plan_order_clauses,
@@ -420,12 +420,6 @@ impl SqlExecutor {
                 used_index = false;
             }
         }
-        if row_ids.is_some() {
-            row_ids = None;
-            used_index = false;
-        }
-
-
         if !needs_aggregation {
             let projection_plan = projection_plan_opt.expect("projection plan required");
             return self.execute_vectorized_projection(
@@ -456,23 +450,32 @@ impl SqlExecutor {
             scan_selection_expr,
             row_ids.clone(),
         )?;
-        let mut base_batch = merge_stream_to_batch(stream)?;
+        let mut base_batches = collect_stream_batches(stream)?;
         if has_selection && !selection_applied_in_scan {
             if let Some(expr) = selection_expr_full {
-                let mut filter = FilterOperator::new(
-                    self,
-                    expr,
-                    scan_selection_expr,
-                    &catalog,
-                    &table_name,
-                    &columns,
-                    &column_ordinals,
-                    &column_types,
-                );
-                let mut results = filter.execute(base_batch)?;
-                base_batch = results.pop().unwrap_or_else(ColumnarBatch::new);
+                let mut filtered = Vec::new();
+                for batch in base_batches {
+                    let mut filter = FilterOperator::new(
+                        self,
+                        expr,
+                        scan_selection_expr,
+                        &catalog,
+                        &table_name,
+                        &columns,
+                        &column_ordinals,
+                        &column_types,
+                    );
+                    let results = filter.execute(batch)?;
+                    for result in results {
+                        if result.num_rows > 0 {
+                            filtered.push(result);
+                        }
+                    }
+                }
+                base_batches = filtered;
             }
         }
+        let base_batch = merge_batches(base_batches);
 
         if let Some(group_exprs) = simple_group_exprs.clone() {
             let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");

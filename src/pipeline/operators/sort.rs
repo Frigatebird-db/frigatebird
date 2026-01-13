@@ -21,6 +21,14 @@ impl<'a> SortOperator<'a> {
             catalog,
         }
     }
+
+    pub(crate) fn execute_batches(
+        &mut self,
+        batches: Vec<PipelineBatch>,
+    ) -> Result<Vec<PipelineBatch>, SqlExecutionError> {
+        self.executor
+            .execute_sort(batches.into_iter(), self.clauses, self.catalog)
+    }
 }
 
 impl<'a> PipelineOperator for SortOperator<'a> {
@@ -32,7 +40,6 @@ impl<'a> PipelineOperator for SortOperator<'a> {
         if input.num_rows == 0 {
             return Ok(vec![PipelineBatch::new()]);
         }
-        self.executor
-            .execute_sort(std::iter::once(input), self.clauses, self.catalog)
+        self.execute_batches(vec![input])
     }
 }

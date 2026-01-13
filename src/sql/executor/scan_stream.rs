@@ -29,6 +29,8 @@ impl BatchStream for SingleBatchStream {
     }
 }
 
+// Legacy batch merge helper (unused after streaming refactor).
+/*
 pub fn merge_stream_to_batch(
     mut stream: Box<dyn BatchStream>,
 ) -> Result<ColumnarBatch, SqlExecutionError> {
@@ -42,83 +44,21 @@ pub fn merge_stream_to_batch(
     }
     Ok(merged)
 }
-
-// Legacy row-id stream; superseded by pipeline row-id scans.
-/*
-pub struct RowIdBatchStream {
-    page_handler: Arc<PageHandler>,
-    table: String,
-    columns: Vec<ColumnCatalog>,
-    ordinals: Vec<usize>,
-    row_ids: Vec<u64>,
-    rows_per_page_group: u64,
-    aliases: HashMap<String, usize>,
-    position: usize,
-}
-
-impl RowIdBatchStream {
-    pub fn new(
-        page_handler: Arc<PageHandler>,
-        table: String,
-        columns: Vec<ColumnCatalog>,
-        ordinals: Vec<usize>,
-        row_ids: Vec<u64>,
-        rows_per_page_group: u64,
-        aliases: HashMap<String, usize>,
-    ) -> Self {
-        Self {
-            page_handler,
-            table,
-            columns,
-            ordinals,
-            row_ids,
-            rows_per_page_group,
-            aliases,
-            position: 0,
-        }
-    }
-}
-
-impl BatchStream for RowIdBatchStream {
-    fn next_batch(&mut self) -> Result<Option<ColumnarBatch>, SqlExecutionError> {
-        if self.position >= self.row_ids.len() {
-            return Ok(None);
-        }
-
-        let start = self.position;
-        let base_page = self.row_ids[start] / self.rows_per_page_group;
-        let mut end = start + 1;
-        while end < self.row_ids.len()
-            && self.row_ids[end] / self.rows_per_page_group == base_page
-        {
-            end += 1;
-        }
-
-        let slice = &self.row_ids[start..end];
-        let mut batch = ColumnarBatch::with_capacity(self.ordinals.len());
-        batch.num_rows = slice.len();
-        batch.row_ids = slice.to_vec();
-        batch.aliases = self.aliases.clone();
-
-        for &ordinal in &self.ordinals {
-            let column = self
-                .columns
-                .get(ordinal)
-                .ok_or_else(|| SqlExecutionError::OperationFailed("missing column ordinal".into()))?;
-            let page = gather_column_for_rows(
-                &self.page_handler,
-                &self.table,
-                column,
-                slice,
-            );
-            batch.columns.insert(ordinal, page);
-        }
-
-        self.position = end;
-        Ok(Some(batch))
-    }
-}
 */
+
+pub fn collect_stream_batches(
+    mut stream: Box<dyn BatchStream>,
+) -> Result<Vec<ColumnarBatch>, SqlExecutionError> {
+    let mut batches = Vec::new();
+    while let Some(batch) = stream.next_batch()? {
+        if batch.num_rows > 0 {
+            batches.push(batch);
+        }
+    }
+    Ok(batches)
+}
+
+// Legacy row-id stream removed after pipeline row-id scans.
 
 pub struct PipelineBatchStream {
     job: Option<Job>,
@@ -254,30 +194,4 @@ impl<'a> PipelineScanBuilder<'a> {
     }
 }
 
-/*
-fn gather_column_for_rows(
-    page_handler: &PageHandler,
-    table: &str,
-    column: &ColumnCatalog,
-    row_ids: &[u64],
-) -> ColumnarPage {
-    if row_ids.is_empty() {
-        return ColumnarPage::empty();
-    }
-    let mut entries = Vec::with_capacity(row_ids.len());
-    for &row_id in row_ids {
-        if let Some(entry) = page_handler.read_entry_at(table, &column.name, row_id) {
-            entries.push(entry);
-        } else {
-            entries.push(Entry::new(""));
-        }
-    }
-
-    let disk_page = Page {
-        page_metadata: String::new(),
-        entries,
-    };
-
-    ColumnarPage::load(disk_page, column.data_type)
-}
-*/
+// Legacy gather_column_for_rows helper removed after pipeline row-id scans.

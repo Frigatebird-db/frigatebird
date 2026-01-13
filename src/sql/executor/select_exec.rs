@@ -4,7 +4,7 @@ use super::{
 };
 use super::batch::ColumnarBatch;
 use super::executor_types::ProjectionPlan;
-use super::scan_stream::merge_stream_to_batch;
+use super::scan_stream::collect_stream_batches;
 use super::window_helpers::{
     WindowFunctionPlan, assign_window_display_aliases, rewrite_projection_plan_for_windows,
     rewrite_window_expressions,
@@ -47,72 +47,101 @@ impl SqlExecutor {
             selection_physical_expr,
             row_ids,
         )?;
-        let mut batch = merge_stream_to_batch(stream)?;
+        let mut batches = collect_stream_batches(stream)?;
 
         if !selection_applied_in_scan {
             if let Some(expr) = selection_expr {
-                let mut filter = FilterOperator::new(
-                    self,
-                    expr,
-                    selection_physical_expr,
-                    catalog,
-                    table,
-                    columns,
-                    column_ordinals,
-                    column_types,
-                );
-                let mut results = filter.execute(batch)?;
-                batch = results.pop().unwrap_or_else(ColumnarBatch::new);
+                let mut filtered = Vec::new();
+                for batch in batches {
+                    let mut filter = FilterOperator::new(
+                        self,
+                        expr,
+                        selection_physical_expr,
+                        catalog,
+                        table,
+                        columns,
+                        column_ordinals,
+                        column_types,
+                    );
+                    let results = filter.execute(batch)?;
+                    for result in results {
+                        if result.num_rows > 0 {
+                            filtered.push(result);
+                        }
+                    }
+                }
+                batches = filtered;
             }
         }
 
-        if batch.num_rows == 0 || batch.columns.is_empty() {
+        if batches.is_empty() {
             return Ok(SelectResult {
                 columns: result_columns,
                 batches: Vec::new(),
             });
         }
 
-        let mut processed_batch = if let Some(expr) = qualify_expr {
-            let mut filter = FilterOperator::new(
-                self,
-                expr,
-                None,
-                catalog,
-                table,
-                columns,
-                column_ordinals,
-                column_types,
-            );
-            let mut results = filter.execute(batch)?;
-            let filtered = results.pop().unwrap_or_else(ColumnarBatch::new);
-            if filtered.num_rows == 0 {
-                return Ok(SelectResult {
-                    columns: result_columns,
-                    batches: Vec::new(),
-                });
+        let mut processed_batches = if let Some(expr) = qualify_expr {
+            let mut filtered = Vec::new();
+            for batch in batches {
+                let mut filter = FilterOperator::new(
+                    self,
+                    expr,
+                    None,
+                    catalog,
+                    table,
+                    columns,
+                    column_ordinals,
+                    column_types,
+                );
+                let results = filter.execute(batch)?;
+                for result in results {
+                    if result.num_rows > 0 {
+                        filtered.push(result);
+                    }
+                }
             }
             filtered
         } else {
-            batch
+            batches
         };
+
+        if processed_batches.is_empty() {
+            return Ok(SelectResult {
+                columns: result_columns,
+                batches: Vec::new(),
+            });
+        }
 
         if !order_clauses.is_empty() {
             let mut sorter = SortOperator::new(self, order_clauses, catalog);
-            let sorted_batches = sorter.execute(processed_batch)?;
-            processed_batch = merge_batches(sorted_batches);
+            processed_batches = sorter.execute_batches(processed_batches)?;
         }
 
         let mut project = ProjectOperator::new(self, projection_plan, catalog);
-        let mut results = project.execute(processed_batch)?;
-        let final_batch = results.pop().unwrap_or_else(ColumnarBatch::new);
+        let mut projected = Vec::new();
+        for batch in processed_batches {
+            let results = project.execute(batch)?;
+            for result in results {
+                if result.num_rows > 0 {
+                    projected.push(result);
+                }
+            }
+        }
+
+        if projected.is_empty() {
+            return Ok(SelectResult {
+                columns: result_columns,
+                batches: Vec::new(),
+            });
+        }
 
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
 
         if distinct_flag {
             let mut distinct = DistinctOperator::new(projection_plan.items.len());
-            let deduped = distinct.execute(final_batch)?;
+            let deduped = distinct.execute_batches(projected)?;
             let mut limiter = LimitOperator::new(self, offset, limit);
             let limited_batches = limiter.execute_batches(deduped)?;
             return Ok(SelectResult {
@@ -122,7 +151,7 @@ impl SqlExecutor {
         }
 
         let mut limiter = LimitOperator::new(self, offset, limit);
-        let limited_batches = limiter.execute_batches(vec![final_batch])?;
+        let limited_batches = limiter.execute_batches(projected)?;
         Ok(SelectResult {
             columns: result_columns,
             batches: limited_batches,
@@ -189,8 +218,8 @@ impl SqlExecutor {
             selection_physical_expr,
             row_ids,
         )?;
-        let mut batch = merge_stream_to_batch(stream)?;
-        if batch.num_rows == 0 {
+        let mut batches = collect_stream_batches(stream)?;
+        if batches.is_empty() {
             return Ok(SelectResult {
                 columns: result_columns,
                 batches: Vec::new(),
@@ -199,19 +228,27 @@ impl SqlExecutor {
 
         if !selection_applied_in_scan {
             if let Some(expr) = selection_expr {
-                let mut filter = FilterOperator::new(
-                    self,
-                    expr,
-                    selection_physical_expr,
-                    catalog,
-                    table,
-                    columns,
-                    column_ordinals,
-                    column_types,
-                );
-                let mut results = filter.execute(batch)?;
-                batch = results.pop().unwrap_or_else(ColumnarBatch::new);
-                if batch.num_rows == 0 {
+                let mut filtered = Vec::new();
+                for batch in batches {
+                    let mut filter = FilterOperator::new(
+                        self,
+                        expr,
+                        selection_physical_expr,
+                        catalog,
+                        table,
+                        columns,
+                        column_ordinals,
+                        column_types,
+                    );
+                    let results = filter.execute(batch)?;
+                    for result in results {
+                        if result.num_rows > 0 {
+                            filtered.push(result);
+                        }
+                    }
+                }
+                batches = filtered;
+                if batches.is_empty() {
                     return Ok(SelectResult {
                         columns: result_columns,
                         batches: Vec::new(),
@@ -220,9 +257,17 @@ impl SqlExecutor {
             }
         }
 
+        let mut base_batch = merge_batches(batches);
+        if base_batch.num_rows == 0 {
+            return Ok(SelectResult {
+                columns: result_columns,
+                batches: Vec::new(),
+            });
+        }
+
         let mut window_operator =
             PipelineWindowOperator::new(window_plans, partition_exprs, catalog);
-        let processed_batches = window_operator.execute(batch)?;
+        let processed_batches = window_operator.execute(base_batch)?;
         if processed_batches.is_empty() {
             return Ok(SelectResult {
                 columns: result_columns,

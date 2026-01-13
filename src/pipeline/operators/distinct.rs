@@ -10,6 +10,13 @@ impl DistinctOperator {
     pub(crate) fn new(column_count: usize) -> Self {
         Self { column_count }
     }
+
+    pub(crate) fn execute_batches(
+        &mut self,
+        batches: Vec<PipelineBatch>,
+    ) -> Result<Vec<PipelineBatch>, SqlExecutionError> {
+        Ok(deduplicate_batches(batches, self.column_count))
+    }
 }
 
 impl PipelineOperator for DistinctOperator {
@@ -21,6 +28,6 @@ impl PipelineOperator for DistinctOperator {
         if input.num_rows == 0 {
             return Ok(vec![PipelineBatch::new()]);
         }
-        Ok(deduplicate_batches(vec![input], self.column_count))
+        self.execute_batches(vec![input])
     }
 }
