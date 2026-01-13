@@ -7,6 +7,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+pub trait PipelineStepInterface: Send + Sync {
+    fn execute(&self);
+    fn debug_label(&self) -> &str;
+}
+
 fn evaluate_filters(filters: &[FilterExpr], batch: &ColumnarBatch) -> Bitmap {
     if filters.is_empty() {
         let mut bitmap = Bitmap::new(batch.num_rows);
@@ -181,6 +186,16 @@ impl PipelineStep {
         if !sent_termination {
             let _ = self.current_producer.send(ColumnarBatch::new());
         }
+    }
+}
+
+impl PipelineStepInterface for PipelineStep {
+    fn execute(&self) {
+        PipelineStep::execute(self);
+    }
+
+    fn debug_label(&self) -> &str {
+        &self.column
     }
 }
 

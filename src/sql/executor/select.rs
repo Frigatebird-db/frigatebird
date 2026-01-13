@@ -3,7 +3,7 @@ use super::{
     SqlExecutor, build_aggregate_alias_map, build_group_exprs_for_distinct,
     build_projection_alias_map, determine_group_by_strategy, projection_expressions_from_plan,
     projection_item_expr, resolve_group_by_exprs, resolve_order_by_exprs, rewrite_aliases_in_expr,
-    ENABLE_VECTORIZED_AGGREGATION, ENABLE_VECTORIZED_PROJECTION, SelectResult,
+    SelectResult,
 };
 use crate::metadata_store::ColumnCatalog;
 use crate::sql::PlannerError;
@@ -17,6 +17,7 @@ use crate::sql::executor::helpers::{collect_expr_column_ordinals, object_name_to
 use crate::sql::executor::ordering::{OrderClause, OrderKey, build_group_order_key, compare_order_keys, sort_rows_logical};
 use crate::sql::executor::physical_evaluator::filter_supported;
 use crate::sql::executor::projection_helpers::build_projection;
+use crate::sql::executor::scan_stream::merge_stream_to_batch;
 use crate::sql::executor::{deduplicate_batches, filter_rows_with_expr, materialize_columns, refine_rows_with_vectorized_filter, rows_to_batch};
 use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
 use crate::sql::executor::values::{CachedValue, cached_to_scalar_with_type};
@@ -257,6 +258,11 @@ impl SqlExecutor {
             required_ordinals.extend(ordinals);
         }
 
+        if let Some(expr) = qualify_expr.as_ref() {
+            let ordinals = collect_expr_column_ordinals(expr, &column_ordinals, &table_name)?;
+            required_ordinals.extend(ordinals);
+        }
+
         if let Some(group_info) = &group_by_info {
             for grouping in &group_info.sets {
                 for expr in &grouping.expressions {
@@ -357,17 +363,14 @@ impl SqlExecutor {
             );
         }
 
-        let can_run_vectorized_projection = ENABLE_VECTORIZED_PROJECTION
-            && !needs_aggregation
-            && qualify.is_none()
+        let can_run_pipeline_projection = !needs_aggregation
             && window_plans.is_empty()
             && sort_key_filters.is_none()
             && sort_key_prefixes.is_none()
             && projection_plan_opt.is_some()
-            && (order_clauses.is_empty() || !distinct_flag)
             && (!has_selection || can_use_physical_filter);
 
-        if can_run_vectorized_projection {
+        if can_run_pipeline_projection {
             if let Some(projection_plan) = &projection_plan_opt {
                 match self.execute_vectorized_projection(
                     &table_name,
@@ -382,6 +385,7 @@ impl SqlExecutor {
                     limit_expr.clone(),
                     offset_expr.clone(),
                     distinct_flag,
+                    qualify_expr.as_ref(),
                     None,
                 ) {
                     Ok(result) => return Ok(result),
@@ -401,8 +405,7 @@ impl SqlExecutor {
             Some(Vec::new())
         };
 
-        let can_run_vectorized_aggregation = ENABLE_VECTORIZED_AGGREGATION
-            && needs_aggregation
+        let can_run_pipeline_aggregation = needs_aggregation
             && !distinct_flag
             && order_clauses.is_empty()
             && sort_key_filters.is_none()
@@ -413,7 +416,7 @@ impl SqlExecutor {
             && simple_group_exprs.is_some()
             && (!has_selection || can_use_physical_filter);
 
-        if can_run_vectorized_aggregation {
+        if can_run_pipeline_aggregation {
             if let Some(aggregate_plan) = &aggregate_plan_opt {
                 let group_exprs = simple_group_exprs
                     .clone()
@@ -466,7 +469,7 @@ impl SqlExecutor {
                     headers: projection_plan.headers.clone(),
                 };
 
-                return self.execute_vectorized_aggregation(
+                match self.execute_vectorized_aggregation(
                     &table_name,
                     &catalog,
                     &columns,
@@ -475,12 +478,16 @@ impl SqlExecutor {
                     &required_ordinals,
                     scan_selection_expr,
                     &column_ordinals,
-                    result_columns,
-                    limit_expr,
-                    offset_expr,
+                    result_columns.clone(),
+                    limit_expr.clone(),
+                    offset_expr.clone(),
                     None,
                     None,
-                );
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(SqlExecutionError::Unsupported(_)) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
 
@@ -499,14 +506,17 @@ impl SqlExecutor {
         } else if let Some(prefixes) = sort_key_prefixes.as_ref() {
             self.locate_rows_by_sort_prefixes(&table_name, &sort_columns, &prefixes)?
         } else {
-            self.scan_rows_via_full_table(
+            let stream = self.build_scan_stream(
                 &table_name,
                 &columns,
                 &required_ordinals,
                 scan_selection_expr,
                 &column_ordinals,
                 catalog.rows_per_page_group,
-            )?
+                None,
+            )?;
+            let batch = merge_stream_to_batch(stream)?;
+            batch.row_ids
         };
         if used_index {
             selection_applied_in_scan = false;
@@ -536,14 +546,11 @@ impl SqlExecutor {
             }
         }
 
-        let can_run_vectorized_projection_with_rows = ENABLE_VECTORIZED_PROJECTION
-            && used_index
+        let can_run_pipeline_projection_with_rows = used_index
             && !needs_aggregation
-            && qualify.is_none()
             && projection_plan_opt.is_some()
-            && (order_clauses.is_empty() || !distinct_flag)
             && (!has_selection || selection_applied_in_scan);
-        if can_run_vectorized_projection_with_rows {
+        if can_run_pipeline_projection_with_rows {
             if let Some(projection_plan) = &projection_plan_opt {
                 return self.execute_vectorized_projection(
                     &table_name,
@@ -558,13 +565,13 @@ impl SqlExecutor {
                     limit_expr.clone(),
                     offset_expr.clone(),
                     distinct_flag,
+                    qualify_expr.as_ref(),
                     Some(candidate_rows.clone()),
                 );
             }
         }
 
-        let can_run_vectorized_aggregation_with_rows = ENABLE_VECTORIZED_AGGREGATION
-            && used_index
+        let can_run_pipeline_aggregation_with_rows = used_index
             && needs_aggregation
             && !distinct_flag
             && order_clauses.is_empty()
@@ -575,12 +582,12 @@ impl SqlExecutor {
             && aggregate_plan_opt.is_some()
             && simple_group_exprs.is_some()
             && (!has_selection || selection_applied_in_scan);
-        if can_run_vectorized_aggregation_with_rows {
+        if can_run_pipeline_aggregation_with_rows {
             if let Some(aggregate_plan) = &aggregate_plan_opt {
                 let group_exprs = simple_group_exprs
                     .clone()
                     .expect("group expressions checked above");
-                return self.execute_vectorized_aggregation(
+                match self.execute_vectorized_aggregation(
                     &table_name,
                     &catalog,
                     &columns,
@@ -594,7 +601,11 @@ impl SqlExecutor {
                     offset_expr.clone(),
                     having.as_ref(),
                     Some(candidate_rows.clone()),
-                );
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(SqlExecutionError::Unsupported(_)) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
 
@@ -626,7 +637,7 @@ impl SqlExecutor {
                     headers: projection_plan.headers.clone(),
                 };
 
-                return self.execute_vectorized_aggregation(
+                match self.execute_vectorized_aggregation(
                     &table_name,
                     &catalog,
                     &columns,
@@ -640,7 +651,11 @@ impl SqlExecutor {
                     offset_expr.clone(),
                     None,
                     Some(candidate_rows.clone()),
-                );
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(SqlExecutionError::Unsupported(_)) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
 
@@ -841,7 +856,7 @@ impl SqlExecutor {
 
         let projection_plan = projection_plan_opt.expect("projection plan required");
         let mut rows = Vec::with_capacity(matching_rows.len());
-        let dataset_required = projection_plan.needs_dataset() || qualify.is_some();
+        let dataset_required = projection_plan.needs_dataset() || qualify_expr.is_some();
         let dataset_holder = if dataset_required {
             Some(AggregateDataset {
                 rows: matching_rows.as_slice(),
@@ -860,7 +875,7 @@ impl SqlExecutor {
             if apply_selection_late && !selection_set.contains(&row_idx) {
                 continue;
             }
-            if let Some(qualify_expr) = &qualify {
+            if let Some(qualify_expr) = &qualify_expr {
                 let dataset = dataset.expect("dataset required for QUALIFY evaluation");
                 let value = evaluate_row_expr(qualify_expr, row_idx, dataset)?;
                 if !value.as_bool().unwrap_or(false) {

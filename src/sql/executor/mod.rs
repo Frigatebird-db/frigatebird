@@ -89,9 +89,6 @@ use window_helpers::{
     ensure_common_partition, plan_order_clauses, rewrite_window_expressions,
 };
 
-const ENABLE_VECTORIZED_PROJECTION: bool = false;
-const ENABLE_VECTORIZED_AGGREGATION: bool = false;
-// const ENABLE_PIPELINE_SCAN: bool = false;
 
 #[derive(Debug)]
 pub enum SqlExecutionError {
@@ -1076,6 +1073,7 @@ impl SqlExecutor {
         limit_expr: Option<Expr>,
         offset_expr: Option<Offset>,
         distinct_flag: bool,
+        qualify_expr: Option<&Expr>,
         row_ids: Option<Vec<u64>>,
     ) -> Result<SelectResult, SqlExecutionError> {
         let stream = self.build_scan_stream(
@@ -1096,14 +1094,26 @@ impl SqlExecutor {
             });
         }
 
-        let final_batch = if !order_clauses.is_empty() {
-            let sorted_batches =
-                self.execute_sort(std::iter::once(batch), order_clauses, catalog)?;
-            let merged = merge_batches(sorted_batches);
-            self.build_projection_batch(&merged, projection_plan, catalog)?
+        let mut processed_batch = if let Some(expr) = qualify_expr {
+            let filtered = self.apply_qualify_filter(batch, expr, catalog)?;
+            if filtered.num_rows == 0 {
+                return Ok(SelectResult {
+                    columns: result_columns,
+                    batches: Vec::new(),
+                });
+            }
+            filtered
         } else {
-            self.build_projection_batch(&batch, projection_plan, catalog)?
+            batch
         };
+
+        if !order_clauses.is_empty() {
+            let sorted_batches =
+                self.execute_sort(std::iter::once(processed_batch), order_clauses, catalog)?;
+            processed_batch = merge_batches(sorted_batches);
+        }
+
+        let final_batch = self.build_projection_batch(&processed_batch, projection_plan, catalog)?;
 
         let offset = parse_offset(offset_expr)?;
         let limit = parse_limit(limit_expr)?;
@@ -1695,12 +1705,6 @@ impl SqlExecutor {
 
     // dml.rs provides impl SqlExecutor for DML flow.
     // scan_helpers_exec.rs provides impl SqlExecutor for scan/index helpers.
-
-    /*
-    fn unused_scan_placeholder(&self) {}
-
-    fn unused_scan_rowwise_placeholder(&self) {}
-    */
 
     fn estimate_table_row_count(
         &self,

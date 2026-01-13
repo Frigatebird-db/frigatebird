@@ -11,6 +11,7 @@ use crate::sql::executor::helpers::{
 };
 use crate::sql::executor::physical_evaluator::filter_supported;
 use crate::sql::executor::projection_helpers::materialize_columns;
+use crate::sql::executor::scan_stream::merge_stream_to_batch;
 use crate::sql::executor::{filter_rows_with_expr, refine_rows_with_vectorized_filter};
 use crate::sql::executor::scan_helpers::{collect_sort_key_filters, collect_sort_key_prefixes};
 use crate::sql::executor::values::compare_strs;
@@ -328,6 +329,7 @@ impl SqlExecutor {
         };
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
+        let mut selection_applied_in_scan = false;
         let mut candidate_rows = if let Some(filters) = sort_key_filters {
             for column in &sort_columns {
                 let value = filters.get(&column.name).cloned().ok_or_else(|| {
@@ -342,7 +344,7 @@ impl SqlExecutor {
         } else if let Some(prefixes) = sort_key_prefixes {
             self.locate_rows_by_sort_prefixes(&table_name, &sort_columns, &prefixes)?
         } else {
-            self.scan_rows_via_full_table(
+            let stream = self.build_scan_stream(
                 &table_name,
                 &columns,
                 &required_ordinals,
@@ -353,7 +355,11 @@ impl SqlExecutor {
                 },
                 &column_ordinals,
                 catalog.rows_per_page_group,
-            )?
+                None,
+            )?;
+            let batch = merge_stream_to_batch(stream)?;
+            selection_applied_in_scan = has_selection && can_use_physical_filter;
+            batch.row_ids
         };
         if candidate_rows.is_empty() {
             return Ok(());
@@ -362,7 +368,7 @@ impl SqlExecutor {
         candidate_rows.sort_unstable();
         candidate_rows.dedup();
 
-        if has_selection && can_use_physical_filter {
+        if has_selection && can_use_physical_filter && !selection_applied_in_scan {
             if let Some(expr) = &physical_selection_expr {
                 candidate_rows = refine_rows_with_vectorized_filter(
                     &self.page_handler,
@@ -540,6 +546,7 @@ impl SqlExecutor {
         };
 
         let mut key_values = Vec::with_capacity(sort_columns.len());
+        let mut selection_applied_in_scan = false;
         let mut candidate_rows = if let Some(filters) = sort_key_filters {
             for column in &sort_columns {
                 let value = filters.get(&column.name).cloned().ok_or_else(|| {
@@ -554,7 +561,7 @@ impl SqlExecutor {
         } else if let Some(prefixes) = sort_key_prefixes {
             self.locate_rows_by_sort_prefixes(&table_name, &sort_columns, &prefixes)?
         } else {
-            self.scan_rows_via_full_table(
+            let stream = self.build_scan_stream(
                 &table_name,
                 &columns,
                 &required_ordinals,
@@ -565,7 +572,11 @@ impl SqlExecutor {
                 },
                 &column_ordinals,
                 catalog.rows_per_page_group,
-            )?
+                None,
+            )?;
+            let batch = merge_stream_to_batch(stream)?;
+            selection_applied_in_scan = has_selection && can_use_physical_filter;
+            batch.row_ids
         };
 
         if candidate_rows.is_empty() {
@@ -575,7 +586,7 @@ impl SqlExecutor {
         candidate_rows.sort_unstable();
         candidate_rows.dedup();
 
-        if has_selection && can_use_physical_filter {
+        if has_selection && can_use_physical_filter && !selection_applied_in_scan {
             if let Some(expr) = &physical_selection_expr {
                 candidate_rows = refine_rows_with_vectorized_filter(
                     &self.page_handler,
