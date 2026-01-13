@@ -4,7 +4,10 @@ use crate::entry::Entry;
 use crate::metadata_store::ColumnCatalog;
 use crate::page::Page;
 use crate::page_handler::PageHandler;
-use crate::pipeline::{Job, PipelineBatch};
+use crate::pipeline::{Job, PipelineBatch, PipelineStep};
+use crate::sql::FilterExpr;
+use crate::sql::physical_plan::PhysicalExpr;
+use std::collections::BTreeSet;
 use crossbeam::channel::Receiver;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -154,6 +157,91 @@ impl BatchStream for PipelineBatchStream {
             Ok(batch) => Ok(Some(batch)),
             Err(_) => Ok(None),
         }
+    }
+}
+
+pub struct PipelineScanBuilder<'a> {
+    page_handler: Arc<PageHandler>,
+    table: &'a str,
+    columns: &'a [ColumnCatalog],
+    scan_ordinals: &'a BTreeSet<usize>,
+    selection_expr: Option<&'a PhysicalExpr>,
+}
+
+impl<'a> PipelineScanBuilder<'a> {
+    pub fn new(
+        page_handler: Arc<PageHandler>,
+        table: &'a str,
+        columns: &'a [ColumnCatalog],
+        scan_ordinals: &'a BTreeSet<usize>,
+        selection_expr: Option<&'a PhysicalExpr>,
+    ) -> Self {
+        Self {
+            page_handler,
+            table,
+            columns,
+            scan_ordinals,
+            selection_expr,
+        }
+    }
+
+    pub fn build(self) -> Result<Option<PipelineBatchStream>, SqlExecutionError> {
+        let mut ordinals: Vec<usize> = self.scan_ordinals.iter().copied().collect();
+        if ordinals.is_empty() {
+            return Ok(None);
+        }
+        ordinals.sort_unstable();
+
+        let mut steps = Vec::new();
+        let (entry_producer, mut previous_receiver) =
+            crossbeam::channel::unbounded::<PipelineBatch>();
+        let mut is_root = true;
+
+        for &ordinal in &ordinals {
+            let column = self.columns.get(ordinal).ok_or_else(|| {
+                SqlExecutionError::OperationFailed("invalid scan ordinal".into())
+            })?;
+            let (current_producer, next_receiver) =
+                crossbeam::channel::unbounded::<PipelineBatch>();
+            steps.push(PipelineStep::new(
+                self.table.to_string(),
+                column.name.clone(),
+                ordinal,
+                Vec::new(),
+                is_root,
+                Arc::clone(&self.page_handler),
+                current_producer,
+                previous_receiver,
+            ));
+            previous_receiver = next_receiver;
+            is_root = false;
+        }
+
+        if let Some(expr) = self.selection_expr {
+            let (current_producer, next_receiver) =
+                crossbeam::channel::unbounded::<PipelineBatch>();
+            let filter_step = PipelineStep::new(
+                self.table.to_string(),
+                self.columns[ordinals[0]].name.clone(),
+                ordinals[0],
+                vec![FilterExpr::leaf(expr.clone())],
+                false,
+                Arc::clone(&self.page_handler),
+                current_producer,
+                previous_receiver,
+            );
+            steps.push(filter_step);
+            previous_receiver = next_receiver;
+        }
+
+        let output_receiver = previous_receiver;
+        let job = Job::new(
+            self.table.to_string(),
+            steps,
+            entry_producer,
+            output_receiver.clone(),
+        );
+        Ok(Some(PipelineBatchStream::new(job, output_receiver)))
     }
 }
 

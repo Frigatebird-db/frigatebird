@@ -110,7 +110,7 @@ fn expression_touches_sort(expr: &Expr, sort_names: &HashSet<&str>) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct SortKeyPrefix {
+pub(crate) struct SortKeyPrefix {
     pub values: Vec<String>,
 }
 
