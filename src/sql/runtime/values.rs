@@ -171,12 +171,12 @@ pub fn cached_to_scalar_with_type(value: &CachedValue, data_type: DataType) -> S
     }
 }
 
-pub(super) fn format_timestamp_micros(micros: i64) -> Option<String> {
+pub(crate) fn format_timestamp_micros(micros: i64) -> Option<String> {
     DateTime::<Utc>::from_timestamp_micros(micros)
         .map(|dt| dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
-pub(super) fn format_float(value: f64) -> String {
+pub(crate) fn format_float(value: f64) -> String {
     if value.is_nan() || value.is_infinite() {
         return value.to_string();
     }
@@ -206,7 +206,7 @@ pub(crate) fn scalar_from_f64(value: f64) -> ScalarValue {
     }
 }
 
-pub(super) fn combine_numeric<F>(
+pub(crate) fn combine_numeric<F>(
     left: &ScalarValue,
     right: &ScalarValue,
     op: F,
@@ -219,7 +219,7 @@ where
     Some(scalar_from_f64(op(lhs, rhs)))
 }
 
-pub(super) fn compare_scalar_values(left: &ScalarValue, right: &ScalarValue) -> Option<Ordering> {
+pub(crate) fn compare_scalar_values(left: &ScalarValue, right: &ScalarValue) -> Option<Ordering> {
     match (left, right) {
         (ScalarValue::String(l), ScalarValue::Int64(r)) => {
             l.parse::<f64>().ok().and_then(|lv| lv.partial_cmp(&(*r as f64)))

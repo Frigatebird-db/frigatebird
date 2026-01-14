@@ -2,11 +2,14 @@ use crate::metadata_store::ColumnCatalog;
 use crate::ops_handler::{delete_row, insert_sorted_row, overwrite_row, read_row};
 use crate::pipeline::planner::plan_row_ids_for_select;
 use crate::pipeline::operators::{FilterOperator, PipelineOperator};
-use crate::sql::executor::helpers::{collect_expr_column_ordinals, expr_to_string, object_name_to_string, table_with_joins_to_name};
-use crate::sql::executor::physical_evaluator::filter_supported;
-use crate::sql::executor::scan_stream::collect_stream_batches;
-use crate::sql::executor::{SqlExecutionError, SqlExecutor};
-use crate::sql::executor::values::compare_strs;
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::helpers::{
+    collect_expr_column_ordinals, expr_to_string, object_name_to_string, table_with_joins_to_name,
+};
+use crate::sql::runtime::physical_evaluator::filter_supported;
+use crate::sql::runtime::scan_stream::collect_stream_batches;
+use crate::sql::runtime::values::compare_strs;
+use crate::sql::runtime::SqlExecutionError;
 use crate::sql::planner::ExpressionPlanner;
 use crate::sql::types::DataType;
 use sqlparser::ast::{
@@ -288,7 +291,9 @@ fn collect_matching_row_ids(
                 column_types,
             );
             let mut results = filter.execute(batch)?;
-            batch = results.pop().unwrap_or_else(crate::sql::executor::batch::ColumnarBatch::new);
+            batch = results
+                .pop()
+                .unwrap_or_else(crate::sql::runtime::batch::ColumnarBatch::new);
         }
         if batch.num_rows > 0 {
             matching_rows.extend(batch.row_ids);

@@ -117,7 +117,7 @@ fn expand_rollup_sets(groups: &[Vec<Expr>]) -> Vec<Vec<Expr>> {
     result
 }
 
-pub(super) fn evaluate_group_key(
+pub(crate) fn evaluate_group_key(
     expressions: &[Expr],
     row_idx: u64,
     dataset: &AggregateDataset,
@@ -130,7 +130,7 @@ pub(super) fn evaluate_group_key(
     Ok(GroupKey::from_values(values))
 }
 
-pub(super) fn evaluate_having(
+pub(crate) fn evaluate_having(
     having: &Option<Expr>,
     dataset: &AggregateDataset,
 ) -> Result<bool, SqlExecutionError> {

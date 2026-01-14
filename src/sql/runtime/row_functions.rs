@@ -6,7 +6,7 @@ use super::values::{ScalarValue, scalar_from_f64};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Value};
 
-pub(super) fn evaluate_row_function(
+pub(crate) fn evaluate_row_function(
     function: &Function,
     row_idx: u64,
     dataset: &AggregateDataset,
@@ -187,7 +187,7 @@ pub(super) fn evaluate_row_function(
     }
 }
 
-pub(super) fn evaluate_time_bucket_row(
+pub(crate) fn evaluate_time_bucket_row(
     function: &Function,
     row_idx: u64,
     dataset: &AggregateDataset,
@@ -270,7 +270,7 @@ pub(super) fn evaluate_time_bucket_row(
     Ok(format_time_value(bucket, value_kind))
 }
 
-pub(super) fn evaluate_date_trunc_row(
+pub(crate) fn evaluate_date_trunc_row(
     function: &Function,
     row_idx: u64,
     dataset: &AggregateDataset,

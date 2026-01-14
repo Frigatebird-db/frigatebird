@@ -9,7 +9,7 @@ pub(crate) struct ProjectionPlan {
 }
 
 impl ProjectionPlan {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             headers: Vec::new(),
             items: Vec::new(),
@@ -17,7 +17,7 @@ impl ProjectionPlan {
         }
     }
 
-    pub(super) fn needs_dataset(&self) -> bool {
+    pub(crate) fn needs_dataset(&self) -> bool {
         self.items
             .iter()
             .any(|item| matches!(item, ProjectionItem::Computed { .. }))
@@ -41,8 +41,8 @@ pub(crate) struct GroupingSetPlan {
 
 #[derive(Clone)]
 pub(crate) struct AggregatedRow {
-    pub(super) order_key: OrderKey,
-    pub(super) values: Vec<Option<String>>,
+    pub(crate) order_key: OrderKey,
+    pub(crate) values: Vec<Option<String>>,
 }
 
 #[derive(Hash, PartialEq, Eq, Clone)]
@@ -64,7 +64,7 @@ impl GroupKey {
     }
 }
 
-pub(super) enum VectorAggregationOutput {
+pub(crate) enum VectorAggregationOutput {
     Aggregate { slot_index: usize },
     GroupExpr { group_index: usize },
     Literal { value: Option<String> },

@@ -1,7 +1,7 @@
 use crate::entry::Entry;
 use crate::metadata_store::DEFAULT_TABLE;
 use crate::page_handler::PageHandler;
-use crate::sql::executor::values::encode_null;
+use crate::sql::runtime::values::encode_null;
 use std::collections::HashMap;
 
 use super::helpers::{binary_search_insert_index, find_insert_position, other_error};

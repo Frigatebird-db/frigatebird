@@ -1,5 +1,5 @@
 use super::{OrderClause, SelectResult, SqlExecutionError, SqlExecutor};
-use super::executor_types::ProjectionPlan;
+use crate::sql::runtime::executor_types::ProjectionPlan;
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
 use crate::pipeline::select_planner::{execute_projection_pipeline, execute_window_pipeline};
 use crate::pipeline::window_helpers::WindowFunctionPlan;

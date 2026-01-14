@@ -1,11 +1,11 @@
 use super::{SqlExecutionError, SqlExecutor};
 use crate::metadata_store::ColumnCatalog;
-use crate::sql::executor::batch::ColumnarBatch;
+use crate::sql::runtime::batch::ColumnarBatch;
 use crate::pipeline::planner::SortKeyPrefix;
-use crate::sql::executor::scan_stream::{
+use crate::sql::runtime::scan_stream::{
     BatchStream, PipelineBatchStream, PipelineScanBuilder, SingleBatchStream,
 };
-use crate::sql::executor::values::compare_strs;
+use crate::sql::runtime::values::compare_strs;
 use crate::sql::physical_plan::PhysicalExpr;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;

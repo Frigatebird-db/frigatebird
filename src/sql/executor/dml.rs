@@ -3,7 +3,7 @@ use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::ColumnCatalog;
 use crate::page::Page;
-use crate::sql::executor::helpers::{expr_to_string, object_name_to_string};
+use crate::sql::runtime::helpers::{expr_to_string, object_name_to_string};
 use sqlparser::ast::{Expr, SetExpr, Statement, Value};
 use std::collections::HashMap;
 

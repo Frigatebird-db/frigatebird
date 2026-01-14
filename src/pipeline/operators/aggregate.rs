@@ -1,7 +1,7 @@
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
-use crate::sql::executor::{
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::{
     AggregatedRow, AggregateProjectionPlan, OrderClause, SelectResult, SqlExecutionError,
-    SqlExecutor,
 };
 use crate::sql::types::DataType;
 use sqlparser::ast::{Expr, Offset};
@@ -70,7 +70,7 @@ impl<'a> AggregateOperator<'a> {
 
     pub(crate) fn execute_simple_from_batch(
         &self,
-        batch: &crate::sql::executor::batch::ColumnarBatch,
+        batch: &crate::sql::runtime::batch::ColumnarBatch,
         group_exprs: &[Expr],
     ) -> Result<SelectResult, SqlExecutionError> {
         // Aggregation outputs are newly generated rows; row_ids are synthetic.
@@ -104,7 +104,7 @@ impl<'a> AggregateOperator<'a> {
 
     pub(crate) fn execute_grouping_set_rows_from_batch(
         &self,
-        batch: &crate::sql::executor::batch::ColumnarBatch,
+        batch: &crate::sql::runtime::batch::ColumnarBatch,
         group_exprs: &[Expr],
         masked_exprs: Option<&[Expr]>,
     ) -> Result<Vec<AggregatedRow>, SqlExecutionError> {

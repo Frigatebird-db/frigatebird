@@ -152,7 +152,7 @@ fn strings_to_text_column(values: Vec<Option<String>>) -> ColumnarPage {
     }
 }
 
-pub(super) fn rows_to_batch(rows: Vec<Vec<Option<String>>>) -> ColumnarBatch {
+pub(crate) fn rows_to_batch(rows: Vec<Vec<Option<String>>>) -> ColumnarBatch {
     if rows.is_empty() {
         return ColumnarBatch::new();
     }

@@ -1,4 +1,5 @@
-use crate::sql::executor::{SqlExecutionError, SqlExecutor};
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::SqlExecutionError;
 
 use super::{PipelineBatch, PipelineOperator};
 

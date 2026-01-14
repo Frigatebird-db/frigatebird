@@ -9,30 +9,31 @@ use crate::pipeline::window_helpers::{
     rewrite_window_expressions,
 };
 use crate::pipeline::filtering::apply_qualify_filter;
-use crate::sql::executor::batch::ColumnarBatch;
+use crate::sql::runtime::batch::ColumnarBatch;
 use crate::pipeline::operators::AggregateOperator;
 use crate::pipeline::planner::plan_row_ids_for_select;
 use crate::pipeline::window_helpers::ensure_common_partition;
-use crate::sql::executor::{
-    AggregateProjectionPlan, OrderClause, ProjectionPlan, SqlExecutionError,
-    SqlExecutor, SelectResult, merge_batches,
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::{
+    AggregateProjectionPlan, OrderClause, ProjectionPlan, SelectResult, SqlExecutionError,
 };
-use crate::sql::executor::select_helpers::GroupByStrategy;
-use crate::sql::executor::aggregates::{
+use crate::sql::runtime::executor_utils::merge_batches;
+use crate::sql::runtime::select_helpers::GroupByStrategy;
+use crate::sql::runtime::aggregates::{
     plan_aggregate_projection, select_item_contains_aggregate,
 };
-use crate::sql::executor::grouping_helpers::validate_group_by;
-use crate::sql::executor::helpers::{
+use crate::sql::runtime::grouping_helpers::validate_group_by;
+use crate::sql::runtime::helpers::{
     collect_expr_column_ordinals, object_name_to_string, parse_limit, parse_offset,
 };
-use crate::sql::executor::projection_helpers::build_projection;
-use crate::sql::executor::select_helpers::{
+use crate::sql::runtime::projection_helpers::build_projection;
+use crate::sql::runtime::select_helpers::{
     build_aggregate_alias_map, build_projection_alias_map, determine_group_by_strategy,
     projection_expressions_from_plan, resolve_group_by_exprs, resolve_order_by_exprs,
     rewrite_aliases_in_expr,
 };
-use crate::sql::executor::physical_evaluator::filter_supported;
-use crate::sql::executor::scan_stream::collect_stream_batches;
+use crate::sql::runtime::physical_evaluator::filter_supported;
+use crate::sql::runtime::scan_stream::collect_stream_batches;
 use crate::sql::PlannerError;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::planner::ExpressionPlanner;

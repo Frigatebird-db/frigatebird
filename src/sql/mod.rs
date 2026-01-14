@@ -3,6 +3,7 @@ pub mod models;
 pub mod parser;
 pub mod physical_plan;
 pub mod planner;
+pub mod runtime;
 pub mod types;
 pub mod utils;
 

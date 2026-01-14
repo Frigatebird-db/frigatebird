@@ -5,7 +5,7 @@ use super::row_functions::{evaluate_date_trunc_row, evaluate_time_bucket_row};
 use super::values::{ScalarValue, scalar_from_f64};
 use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr};
 
-pub(super) fn evaluate_scalar_function(
+pub(crate) fn evaluate_scalar_function(
     function: &Function,
     dataset: &AggregateDataset,
 ) -> Result<ScalarValue, SqlExecutionError> {

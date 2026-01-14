@@ -1,6 +1,6 @@
 use crate::page_handler::PageHandler;
-use crate::sql::executor::batch::{Bitmap, ColumnarBatch, ColumnarPage};
-use crate::sql::executor::physical_evaluator::PhysicalEvaluator;
+use crate::sql::runtime::batch::{Bitmap, ColumnarBatch, ColumnarPage};
+use crate::sql::runtime::physical_evaluator::PhysicalEvaluator;
 use crate::sql::models::FilterExpr;
 use crate::metadata_store::ROWS_PER_PAGE_GROUP;
 use crossbeam::channel::{Receiver, Sender};

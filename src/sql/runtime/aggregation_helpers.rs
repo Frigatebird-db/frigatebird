@@ -1,13 +1,13 @@
-use crate::sql::executor::SqlExecutionError;
-use crate::sql::executor::aggregates::AggregateFunctionPlan;
+use super::aggregates::AggregateFunctionPlan;
+use super::SqlExecutionError;
 use sqlparser::ast::{Expr, Value};
 use std::collections::HashMap;
 
-pub(super) fn find_group_expr_index(expr: &Expr, group_exprs: &[Expr]) -> Option<usize> {
+pub(crate) fn find_group_expr_index(expr: &Expr, group_exprs: &[Expr]) -> Option<usize> {
     group_exprs.iter().position(|candidate| candidate == expr)
 }
 
-pub(super) fn literal_value(expr: &Expr) -> Option<Option<String>> {
+pub(crate) fn literal_value(expr: &Expr) -> Option<Option<String>> {
     match expr {
         Expr::Value(Value::Null) => Some(None),
         Expr::Value(Value::Boolean(flag)) => {
@@ -19,7 +19,7 @@ pub(super) fn literal_value(expr: &Expr) -> Option<Option<String>> {
     }
 }
 
-pub(super) fn ensure_aggregate_plan_for_expr(
+pub(crate) fn ensure_aggregate_plan_for_expr(
     expr: &Expr,
     aggregate_plans: &mut Vec<AggregateFunctionPlan>,
     aggregate_lookup: &mut HashMap<String, usize>,

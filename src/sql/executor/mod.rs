@@ -1,33 +1,19 @@
-pub(crate) mod aggregates;
-mod aggregation_helpers;
 mod aggregation_exec;
-pub mod batch;
-mod executor_types;
-mod executor_utils;
-pub(crate) mod expressions;
-pub(crate) mod grouping_helpers;
-pub(crate) mod helpers;
-mod ordering;
-pub(crate) mod physical_evaluator;
-pub(crate) mod projection_helpers;
-pub(crate) mod scan_stream;
 mod dml;
-mod select;
-mod select_exec;
-pub(crate) mod select_helpers;
-mod scan_helpers_exec;
-mod row_functions;
-mod scalar_functions;
-mod spill;
-mod projection_exec;
 mod limit_exec;
 mod physical_ordinals;
+mod projection_exec;
+mod scan_helpers_exec;
+mod select;
+mod select_exec;
 mod sort_exec;
-pub mod values;
+mod spill;
 
-use self::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
-use executor_types::{GroupByInfo, GroupingSetPlan, VectorAggregationOutput};
-use executor_utils::{rows_to_batch};
+pub use crate::sql::runtime::{RowIter, SelectResult, SqlExecutionError};
+
+use crate::sql::runtime::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
+use crate::sql::runtime::executor_types::{GroupByInfo, GroupingSetPlan, VectorAggregationOutput};
+use crate::sql::runtime::executor_utils::rows_to_batch;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{
@@ -41,8 +27,6 @@ use crate::page::Page;
 use crate::page_handler::PageHandler;
 use crate::sql::FilterExpr;
 use crate::sql::physical_plan::PhysicalExpr;
-use crate::sql::planner::ExpressionPlanner;
-use crate::sql::{CreateTablePlan, PlannerError, plan_create_table_statement};
 use crate::wal::{FsyncSchedule, ReadConsistency, Walrus};
 use crate::writer::{
     ColumnUpdate, DirectBlockAllocator, DirectoryMetadataClient, MetadataClient, PageAllocator,
@@ -52,7 +36,6 @@ use sqlparser::ast::{
     Assignment, BinaryOperator, Expr, FromTable, Ident, ObjectName, Offset, OrderByExpr, Query,
     Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, UnaryOperator, Value,
 };
-use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -61,7 +44,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use crate::sql::types::DataType;
-use aggregates::{
+use crate::sql::runtime::aggregates::{
     AggregateDataset, AggregateFunctionKind, AggregateFunctionPlan, AggregateProjection,
     AggregationHashTable, MaterializedColumns,
     ensure_state_vec, evaluate_aggregate_outputs, plan_aggregate_projection,
@@ -70,151 +53,32 @@ use aggregates::{
     vectorized_count_value_update, vectorized_max_update, vectorized_min_update,
     vectorized_sum_update, vectorized_variance_update,
 };
-use expressions::{evaluate_row_expr, evaluate_scalar_expression};
-use grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
-use helpers::{
+use crate::sql::runtime::expressions::{evaluate_row_expr, evaluate_scalar_expression};
+use crate::sql::runtime::grouping_helpers::{evaluate_group_key, evaluate_having, validate_group_by};
+use crate::sql::runtime::helpers::{
     collect_expr_column_ordinals, column_name_from_expr, expr_to_string, object_name_to_string,
     table_with_joins_to_name,
 };
 
-pub(crate) use aggregates::AggregateProjectionPlan;
-pub(crate) use executor_types::{AggregatedRow, GroupKey, ProjectionItem, ProjectionPlan};
-pub(crate) use executor_utils::{chunk_batch, deduplicate_batches, merge_batches};
-pub(crate) use helpers::{parse_limit, parse_offset};
-pub(crate) use ordering::{
+pub(crate) use crate::sql::runtime::aggregates::AggregateProjectionPlan;
+pub(crate) use crate::sql::runtime::executor_types::{
+    AggregatedRow, GroupKey, ProjectionItem, ProjectionPlan,
+};
+pub(crate) use crate::sql::runtime::executor_utils::{chunk_batch, deduplicate_batches, merge_batches};
+pub(crate) use crate::sql::runtime::helpers::{parse_limit, parse_offset};
+pub(crate) use crate::sql::runtime::ordering::{
     NullsPlacement, OrderClause, OrderKey, build_order_keys_on_batch, compare_order_keys,
     sort_batch_in_memory,
 };
-pub(crate) use expressions::evaluate_expression_on_batch;
-pub(crate) use grouping_helpers::evaluate_group_keys_on_batch;
-use projection_helpers::build_projection;
-use scan_stream::{
+pub(crate) use crate::sql::runtime::expressions::evaluate_expression_on_batch;
+pub(crate) use crate::sql::runtime::grouping_helpers::evaluate_group_keys_on_batch;
+use crate::sql::runtime::projection_helpers::build_projection;
+use crate::sql::runtime::scan_stream::{
     BatchStream, PipelineBatchStream, PipelineScanBuilder, SingleBatchStream,
 };
-use values::{
-    CachedValue, ScalarValue, cached_to_scalar_with_type, compare_strs,
-};
-
-
-#[derive(Debug)]
-pub enum SqlExecutionError {
-    Parse(ParserError),
-    Plan(crate::sql::models::PlannerError),
-    Unsupported(String),
-    TableNotFound(String),
-    ColumnMismatch { table: String, column: String },
-    ValueMismatch(String),
-    OperationFailed(String),
-}
-
-impl std::fmt::Display for SqlExecutionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SqlExecutionError::Parse(err) => write!(f, "failed to parse SQL: {err}"),
-            SqlExecutionError::Plan(err) => write!(f, "{err}"),
-            SqlExecutionError::Unsupported(msg) => write!(f, "unsupported SQL: {msg}"),
-            SqlExecutionError::TableNotFound(table) => write!(f, "unknown table: {table}"),
-            SqlExecutionError::ColumnMismatch { table, column } => {
-                write!(f, "column {column} is not defined on table {table}")
-            }
-            SqlExecutionError::ValueMismatch(msg) => write!(f, "{msg}"),
-            SqlExecutionError::OperationFailed(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-impl std::error::Error for SqlExecutionError {}
-
-impl From<ParserError> for SqlExecutionError {
-    fn from(value: ParserError) -> Self {
-        SqlExecutionError::Parse(value)
-    }
-}
-
-impl From<crate::sql::models::PlannerError> for SqlExecutionError {
-    fn from(value: crate::sql::models::PlannerError) -> Self {
-        SqlExecutionError::Plan(value)
-    }
-}
-
-use std::fmt;
-
-#[derive(Clone)]
-pub struct SelectResult {
-    pub columns: Vec<String>,
-    pub batches: Vec<ColumnarBatch>,
-}
-
-impl SelectResult {
-    pub fn row_iter(&self) -> RowIter<'_> {
-        RowIter {
-            result: self,
-            batch_idx: 0,
-            row_idx: 0,
-        }
-    }
-
-    pub fn row_count(&self) -> usize {
-        self.batches.iter().map(|batch| batch.num_rows).sum()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.batches.iter().all(|batch| batch.num_rows == 0)
-    }
-}
-
-impl fmt::Debug for SelectResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SelectResult")
-            .field("columns", &self.columns)
-            .field("row_count", &self.row_count())
-            .finish()
-    }
-}
-
-impl fmt::Display for SelectResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.columns.is_empty() {
-            writeln!(f, "(0 columns)")?;
-        } else {
-            for (idx, column) in self.columns.iter().enumerate() {
-                if idx > 0 {
-                    write!(f, " | ")?;
-                }
-                write!(f, "{column}")?;
-            }
-            writeln!(f)?;
-        }
-
-        let mut row_count = 0usize;
-        for batch in &self.batches {
-            for row_idx in 0..batch.num_rows {
-                row_count += 1;
-                for col_idx in 0..self.columns.len() {
-                    if col_idx > 0 {
-                        write!(f, " | ")?;
-                    }
-                    let value = batch
-                        .columns
-                        .get(&col_idx)
-                        .ok_or(fmt::Error)?
-                        .value_as_string(row_idx);
-                    match value {
-                        Some(text) => write!(f, "{text}")?,
-                        None => write!(f, "NULL")?,
-                    }
-                }
-                writeln!(f)?;
-            }
-        }
-
-        writeln!(f, "({row_count} rows)")
-    }
-}
 
 
 const FULL_SCAN_BATCH_SIZE: u64 = 4_096;
-pub(crate) const WINDOW_BATCH_CHUNK_SIZE: usize = 1_024;
 const SORT_OUTPUT_BATCH_SIZE: usize = 1_024;
 
 static SQL_EXECUTOR_WAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -487,63 +351,6 @@ fn remove_sql_executor_wal_dir(namespace: &str) {
     let dir = sql_executor_wal_base_dir().join(namespace);
     if dir.exists() {
         let _ = fs::remove_dir_all(dir);
-    }
-}
-
-pub struct RowIter<'a> {
-    result: &'a SelectResult,
-    batch_idx: usize,
-    row_idx: usize,
-}
-
-impl<'a> Iterator for RowIter<'a> {
-    type Item = RowView<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.batch_idx < self.result.batches.len() {
-            let batch = &self.result.batches[self.batch_idx];
-            if self.row_idx >= batch.num_rows {
-                self.batch_idx += 1;
-                self.row_idx = 0;
-                continue;
-            }
-            let view = RowView {
-                batch,
-                row_idx: self.row_idx,
-                column_count: self.result.columns.len(),
-            };
-            self.row_idx += 1;
-            return Some(view);
-        }
-        None
-    }
-}
-
-pub struct RowView<'a> {
-    batch: &'a ColumnarBatch,
-    row_idx: usize,
-    column_count: usize,
-}
-
-impl<'a> RowView<'a> {
-    pub fn value_as_string(&self, column_idx: usize) -> Option<String> {
-        self.batch
-            .columns
-            .get(&column_idx)
-            .and_then(|page| page.value_as_string(self.row_idx))
-    }
-
-    pub fn to_vec(&self) -> Vec<Option<String>> {
-        let mut row = Vec::with_capacity(self.column_count);
-        for column_idx in 0..self.column_count {
-            row.push(
-                self.batch
-                    .columns
-                    .get(&column_idx)
-                    .and_then(|page| page.value_as_string(self.row_idx)),
-            );
-        }
-        row
     }
 }
 

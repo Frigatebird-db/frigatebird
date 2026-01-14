@@ -1,6 +1,6 @@
-use crate::sql::executor::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
-use crate::sql::executor::helpers::{like_match, regex_match};
-use crate::sql::executor::values::ScalarValue;
+use super::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
+use super::helpers::{like_match, regex_match};
+use super::values::ScalarValue;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
 use sqlparser::ast::BinaryOperator;

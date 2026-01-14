@@ -1,7 +1,8 @@
 use crate::metadata_store::ColumnCatalog;
-use crate::sql::executor::helpers::{collect_expr_column_names, column_name_from_expr, expr_to_string};
-use crate::sql::executor::values::compare_strs;
-use crate::sql::executor::{SqlExecutionError, SqlExecutor};
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::helpers::{collect_expr_column_names, column_name_from_expr, expr_to_string};
+use crate::sql::runtime::values::compare_strs;
+use crate::sql::runtime::SqlExecutionError;
 use crate::sql::types::DataType;
 use sqlparser::ast::{BinaryOperator, Expr, Value};
 use std::cmp::Ordering;
@@ -375,14 +376,14 @@ fn selection_uses_numeric_literal_on_string_sort(
     match expr {
         Expr::BinaryOp { left, op, right } => {
             if matches!(op, sqlparser::ast::BinaryOperator::Eq) {
-                if let Some(name) = crate::sql::executor::helpers::column_name_from_expr(left) {
+                if let Some(name) = crate::sql::runtime::helpers::column_name_from_expr(left) {
                     if sort_names.contains(name.as_str()) {
                         if is_numeric_literal(right) {
                             return matches!(column_types.get(&name), Some(DataType::String));
                         }
                     }
                 }
-                if let Some(name) = crate::sql::executor::helpers::column_name_from_expr(right) {
+                if let Some(name) = crate::sql::runtime::helpers::column_name_from_expr(right) {
                     if sort_names.contains(name.as_str()) {
                         if is_numeric_literal(left) {
                             return matches!(column_types.get(&name), Some(DataType::String));

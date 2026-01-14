@@ -10,10 +10,10 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub(crate) type MaterializedColumns = HashMap<usize, HashMap<u64, CachedValue>>;
-pub(super) type AggregationHashTable = HashMap<GroupKey, Vec<AggregateState>>;
+pub(crate) type AggregationHashTable = HashMap<GroupKey, Vec<AggregateState>>;
 
 #[derive(Debug, Clone)]
-pub(super) enum AggregateState {
+pub(crate) enum AggregateState {
     Count(u64),
     CountDistinct(HashSet<String>),
     Sum { total: f64, seen: bool },
@@ -24,7 +24,7 @@ pub(super) enum AggregateState {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum AggregateFunctionKind {
+pub(crate) enum AggregateFunctionKind {
     CountStar,
     CountExpr,
     CountDistinct,
@@ -39,13 +39,13 @@ pub(super) enum AggregateFunctionKind {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct AggregateFunctionPlan {
-    pub(super) kind: AggregateFunctionKind,
-    pub(super) arg: Option<Expr>,
+pub(crate) struct AggregateFunctionPlan {
+    pub(crate) kind: AggregateFunctionKind,
+    pub(crate) arg: Option<Expr>,
 }
 
 impl AggregateFunctionPlan {
-    pub(super) fn from_expr(expr: &Expr) -> Result<Option<Self>, SqlExecutionError> {
+    pub(crate) fn from_expr(expr: &Expr) -> Result<Option<Self>, SqlExecutionError> {
         if let Expr::Function(function) = expr {
             Self::from_function(function).map(Some)
         } else {
@@ -222,7 +222,7 @@ impl AggregateFunctionPlan {
         }
     }
 
-    pub(super) fn initial_state(&self) -> AggregateState {
+    pub(crate) fn initial_state(&self) -> AggregateState {
         match self.kind {
             AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr => {
                 AggregateState::Count(0)
@@ -248,7 +248,7 @@ impl AggregateFunctionPlan {
         }
     }
 
-    pub(super) fn finalize_value(&self, state: &AggregateState) -> Option<String> {
+    pub(crate) fn finalize_value(&self, state: &AggregateState) -> Option<String> {
         match (&self.kind, state) {
             (
                 AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr,
@@ -311,7 +311,7 @@ impl AggregateFunctionPlan {
         }
     }
 
-    pub(super) fn scalar_value(&self, state: &AggregateState) -> Option<ScalarValue> {
+    pub(crate) fn scalar_value(&self, state: &AggregateState) -> Option<ScalarValue> {
         match (&self.kind, state) {
             (
                 AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr,
@@ -391,7 +391,7 @@ fn extract_single_arg(function: &Function) -> Result<Expr, SqlExecutionError> {
     }
 }
 
-pub(super) fn ensure_state_vec<'a>(
+pub(crate) fn ensure_state_vec<'a>(
     hash_table: &'a mut AggregationHashTable,
     key: &GroupKey,
     template: &[AggregateState],
@@ -401,7 +401,7 @@ pub(super) fn ensure_state_vec<'a>(
         .or_insert_with(|| template.to_vec())
 }
 
-pub(super) fn vectorized_count_star_update(
+pub(crate) fn vectorized_count_star_update(
     hash_table: &mut AggregationHashTable,
     agg_index: usize,
     group_keys: &[GroupKey],
@@ -416,7 +416,7 @@ pub(super) fn vectorized_count_star_update(
     }
 }
 
-pub(super) fn vectorized_count_value_update(
+pub(crate) fn vectorized_count_value_update(
     hash_table: &mut AggregationHashTable,
     agg_index: usize,
     group_keys: &[GroupKey],
@@ -435,7 +435,7 @@ pub(super) fn vectorized_count_value_update(
     }
 }
 
-pub(super) fn vectorized_count_distinct_update(
+pub(crate) fn vectorized_count_distinct_update(
     hash_table: &mut AggregationHashTable,
     agg_index: usize,
     group_keys: &[GroupKey],
@@ -454,7 +454,7 @@ pub(super) fn vectorized_count_distinct_update(
     }
 }
 
-pub(super) fn vectorized_sum_update(
+pub(crate) fn vectorized_sum_update(
     hash_table: &mut AggregationHashTable,
     agg_index: usize,
     group_keys: &[GroupKey],
@@ -476,7 +476,7 @@ pub(super) fn vectorized_sum_update(
     }
 }
 
-pub(super) fn vectorized_average_update(
+pub(crate) fn vectorized_average_update(
     hash_table: &mut AggregationHashTable,
     agg_index: usize,
     group_keys: &[GroupKey],
@@ -498,7 +498,7 @@ pub(super) fn vectorized_average_update(
     }
 }
 
-pub(super) fn vectorized_min_update(
+pub(crate) fn vectorized_min_update(
     hash_table: &mut AggregationHashTable,
     agg_index: usize,
     group_keys: &[GroupKey],
@@ -519,7 +519,7 @@ pub(super) fn vectorized_min_update(
     }
 }
 
-pub(super) fn vectorized_max_update(
+pub(crate) fn vectorized_max_update(
     hash_table: &mut AggregationHashTable,
     agg_index: usize,
     group_keys: &[GroupKey],
@@ -540,7 +540,7 @@ pub(super) fn vectorized_max_update(
     }
 }
 
-pub(super) fn vectorized_variance_update(
+pub(crate) fn vectorized_variance_update(
     hash_table: &mut AggregationHashTable,
     agg_index: usize,
     group_keys: &[GroupKey],
@@ -586,12 +586,12 @@ pub(crate) struct AggregateProjection {
 }
 
 pub(crate) struct AggregateDataset<'a> {
-    pub(super) rows: &'a [u64],
-    pub(super) materialized: &'a MaterializedColumns,
-    pub(super) column_ordinals: &'a HashMap<String, usize>,
-    pub(super) column_types: &'a HashMap<String, DataType>,
-    pub(super) masked_exprs: Option<&'a [Expr]>,
-    pub(super) prefer_exact_numeric: bool,
+    pub(crate) rows: &'a [u64],
+    pub(crate) materialized: &'a MaterializedColumns,
+    pub(crate) column_ordinals: &'a HashMap<String, usize>,
+    pub(crate) column_types: &'a HashMap<String, DataType>,
+    pub(crate) masked_exprs: Option<&'a [Expr]>,
+    pub(crate) prefer_exact_numeric: bool,
 }
 
 impl<'a> AggregateDataset<'a> {
@@ -613,24 +613,24 @@ impl<'a> AggregateDataset<'a> {
         }
     }
 
-    pub(super) fn column_value(&self, column: &str, row_idx: u64) -> Option<&CachedValue> {
+    pub(crate) fn column_value(&self, column: &str, row_idx: u64) -> Option<&CachedValue> {
         self.column_ordinals
             .get(column)
             .and_then(|ordinal| self.materialized.get(ordinal))
             .and_then(|map| map.get(&row_idx))
     }
 
-    pub(super) fn column_type(&self, column: &str) -> Option<DataType> {
+    pub(crate) fn column_type(&self, column: &str) -> Option<DataType> {
         self.column_types.get(column).copied()
     }
 
-    pub(super) fn is_expr_masked(&self, expr: &Expr) -> bool {
+    pub(crate) fn is_expr_masked(&self, expr: &Expr) -> bool {
         self.masked_exprs
             .map(|masked| masked.iter().any(|masked_expr| masked_expr == expr))
             .unwrap_or(false)
     }
 
-    pub(super) fn prefer_exact_numeric(&self) -> bool {
+    pub(crate) fn prefer_exact_numeric(&self) -> bool {
         self.prefer_exact_numeric
     }
 }
@@ -643,7 +643,7 @@ pub(crate) fn select_item_contains_aggregate(item: &SelectItem) -> bool {
     }
 }
 
-pub(super) fn expr_contains_aggregate(expr: &Expr) -> bool {
+pub(crate) fn expr_contains_aggregate(expr: &Expr) -> bool {
     match expr {
         Expr::Function(function) => {
             if is_aggregate_function(function) && function.over.is_none() {
@@ -706,7 +706,7 @@ pub(super) fn expr_contains_aggregate(expr: &Expr) -> bool {
     }
 }
 
-pub(super) fn is_aggregate_function(function: &Function) -> bool {
+pub(crate) fn is_aggregate_function(function: &Function) -> bool {
     let name = function
         .name
         .0
@@ -793,7 +793,7 @@ pub(crate) fn plan_aggregate_projection(
     })
 }
 
-pub(super) fn collect_function_order_ordinals(
+pub(crate) fn collect_function_order_ordinals(
     expr: &Expr,
     column_ordinals: &HashMap<String, usize>,
     table: &str,
@@ -871,7 +871,7 @@ pub(super) fn collect_function_order_ordinals(
     Ok(())
 }
 
-pub(super) fn evaluate_aggregate_outputs(
+pub(crate) fn evaluate_aggregate_outputs(
     plan: &AggregateProjectionPlan,
     dataset: &AggregateDataset,
 ) -> Result<Vec<Option<String>>, SqlExecutionError> {
@@ -883,7 +883,7 @@ pub(super) fn evaluate_aggregate_outputs(
     Ok(row)
 }
 
-pub(super) fn evaluate_aggregate_function(
+pub(crate) fn evaluate_aggregate_function(
     function: &Function,
     dataset: &AggregateDataset,
 ) -> Result<ScalarValue, SqlExecutionError> {
@@ -1376,7 +1376,7 @@ fn evaluate_condition(
     Ok(value.as_bool().unwrap_or(false))
 }
 
-pub(super) fn extract_single_argument<'a>(
+pub(crate) fn extract_single_argument<'a>(
     function: &'a Function,
 ) -> Result<&'a Expr, SqlExecutionError> {
     if function.args.len() != 1 {

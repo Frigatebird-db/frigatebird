@@ -1,6 +1,7 @@
 use crate::metadata_store::ColumnCatalog;
 use crate::ops_handler::insert_sorted_row;
-use crate::sql::executor::{SqlExecutionError, SqlExecutor};
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::SqlExecutionError;
 use crate::writer::{ColumnUpdate, UpdateJob, UpdateOp};
 use sqlparser::ast::Statement;
 

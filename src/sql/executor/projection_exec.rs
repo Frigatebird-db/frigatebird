@@ -1,6 +1,6 @@
-use super::batch::ColumnarBatch;
-use super::executor_types::ProjectionPlan;
-use super::expressions::evaluate_expression_on_batch;
+use crate::sql::runtime::batch::ColumnarBatch;
+use crate::sql::runtime::executor_types::ProjectionPlan;
+use crate::sql::runtime::expressions::evaluate_expression_on_batch;
 use super::{ProjectionItem, SqlExecutionError, SqlExecutor};
 use crate::metadata_store::TableCatalog;
 

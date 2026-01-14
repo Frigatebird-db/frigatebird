@@ -1,6 +1,7 @@
 use crate::metadata_store::{JournalColumnDef, MetaRecord, ROWS_PER_PAGE_GROUP};
 use crate::ops_handler::create_table_from_plan;
-use crate::sql::executor::{SqlExecutionError, SqlExecutor};
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::SqlExecutionError;
 use crate::sql::{CreateTablePlan, plan_create_table_statement};
 use sqlparser::ast::Statement;
 

@@ -200,7 +200,7 @@ fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {
     }
 }
 
-pub(super) struct MergeOperator {
+pub(crate) struct MergeOperator {
     runs: Vec<MergeRun>,
     heap: BinaryHeap<HeapItem>,
     batch_capacity: usize,

@@ -1,4 +1,5 @@
-use crate::sql::executor::{SqlExecutionError, SqlExecutor, SelectResult};
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::{SelectResult, SqlExecutionError};
 use sqlparser::ast::Statement;
 
 pub(crate) fn execute_statement(

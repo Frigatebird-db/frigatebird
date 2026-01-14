@@ -70,7 +70,7 @@ pub(crate) fn parse_offset(offset: Option<Offset>) -> Result<usize, SqlExecution
     }
 }
 
-pub(super) fn parse_usize_literal(expr: &Expr, context: &str) -> Result<usize, SqlExecutionError> {
+pub(crate) fn parse_usize_literal(expr: &Expr, context: &str) -> Result<usize, SqlExecutionError> {
     match expr {
         Expr::Value(Value::Number(value, _)) => value.parse::<usize>().map_err(|_| {
             SqlExecutionError::Unsupported(format!(
@@ -167,7 +167,7 @@ fn interval_unit_multiplier(field: DateTimeField) -> Result<f64, ()> {
     }
 }
 
-pub(super) fn extract_equality_filters(
+pub(crate) fn extract_equality_filters(
     expr: &Expr,
 ) -> Result<HashMap<String, String>, SqlExecutionError> {
     let mut filters = HashMap::new();
@@ -350,14 +350,14 @@ pub(crate) fn collect_expr_column_names(expr: &Expr, columns: &mut BTreeSet<Stri
     }
 }
 
-pub(super) fn wildcard_options_supported(options: &WildcardAdditionalOptions) -> bool {
+pub(crate) fn wildcard_options_supported(options: &WildcardAdditionalOptions) -> bool {
     options.opt_exclude.is_none()
         && options.opt_except.is_none()
         && options.opt_rename.is_none()
         && options.opt_replace.is_none()
 }
 
-pub(super) fn object_name_matches_table(
+pub(crate) fn object_name_matches_table(
     object_name: &ObjectName,
     table_name: &str,
     table_alias: Option<&str>,
@@ -374,7 +374,7 @@ pub(super) fn object_name_matches_table(
         .unwrap_or(false)
 }
 
-pub(super) fn is_null_value(value: &str) -> bool {
+pub(crate) fn is_null_value(value: &str) -> bool {
     value.is_empty()
         || value.eq_ignore_ascii_case("null")
         || value.eq_ignore_ascii_case("nil")
@@ -452,7 +452,7 @@ fn like_match_dfs(value: &[char], pattern: &[char], mut v_idx: usize, mut p_idx:
     v_idx == v_len
 }
 
-pub(super) fn regex_match(value: &str, pattern: &str) -> bool {
+pub(crate) fn regex_match(value: &str, pattern: &str) -> bool {
     match Regex::new(pattern) {
         Ok(re) => re.is_match(value),
         Err(_) => false,

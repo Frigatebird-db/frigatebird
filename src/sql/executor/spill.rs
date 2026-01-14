@@ -1,4 +1,4 @@
-use super::batch::ColumnarBatch;
+use crate::sql::runtime::batch::ColumnarBatch;
 use std::io;
 
 pub struct SpillManager {

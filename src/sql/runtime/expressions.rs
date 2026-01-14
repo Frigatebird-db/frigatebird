@@ -18,7 +18,7 @@ use sqlparser::ast::{
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-pub(super) fn evaluate_scalar_expression(
+pub(crate) fn evaluate_scalar_expression(
     expr: &Expr,
     dataset: &AggregateDataset,
 ) -> Result<ScalarValue, SqlExecutionError> {

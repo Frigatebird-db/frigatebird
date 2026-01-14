@@ -7,7 +7,7 @@ use crate::metadata_store::{
 };
 use crate::page::Page;
 use crate::page_handler::{PageHandler, page_io::PageIO};
-use crate::sql::executor::batch::{ColumnData, ColumnarPage};
+use crate::sql::runtime::batch::{ColumnData, ColumnarPage};
 use crate::sql::types::DataType;
 use crate::wal::Walrus;
 use crate::writer::GLOBAL_WRITER_SHARD_COUNT;
@@ -1060,7 +1060,7 @@ fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
 #[cfg(test)]
 mod writer_stats_tests {
     use super::*;
-    use crate::sql::executor::batch::Bitmap;
+    use crate::sql::runtime::batch::Bitmap;
 
     fn make_bitmap(len: usize, null_indices: &[usize]) -> Bitmap {
         let mut bitmap = Bitmap::new(len);
@@ -1102,7 +1102,7 @@ mod writer_stats_tests {
 
     #[test]
     fn derive_stats_tracks_all_null_pages() {
-        use crate::sql::executor::batch::BytesColumn;
+        use crate::sql::runtime::batch::BytesColumn;
         let mut col = BytesColumn::new();
         col.push("a");
         col.push("b");

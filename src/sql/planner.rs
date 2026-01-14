@@ -1,5 +1,5 @@
 use crate::metadata_store::{PageDirectory, TableCatalog};
-use crate::sql::executor::values::ScalarValue;
+use crate::sql::runtime::values::ScalarValue;
 use crate::sql::models::{
     ColumnSpec, CreateTablePlan, FilterExpr, PlannerError, PlannerResult, QueryPlan, TableAccess,
 };

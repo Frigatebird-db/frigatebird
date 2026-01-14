@@ -1,6 +1,7 @@
 use crate::metadata_store::ColumnCatalog;
 use crate::pipeline::filtering::apply_filter_expr;
-use crate::sql::executor::{SqlExecutionError, SqlExecutor};
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::SqlExecutionError;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
 use crate::metadata_store::TableCatalog;

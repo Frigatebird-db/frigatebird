@@ -1,6 +1,6 @@
 use crate::entry::current_epoch_millis;
 use crate::page::Page;
-use crate::sql::executor::batch::ColumnarPage;
+use crate::sql::runtime::batch::ColumnarPage;
 use crate::sql::types::DataType;
 use std::collections::BTreeSet;
 use std::collections::HashMap;

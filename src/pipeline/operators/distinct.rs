@@ -1,4 +1,5 @@
-use crate::sql::executor::{deduplicate_batches, SqlExecutionError};
+use crate::sql::runtime::executor_utils::deduplicate_batches;
+use crate::sql::runtime::SqlExecutionError;
 
 use super::{PipelineBatch, PipelineOperator};
 

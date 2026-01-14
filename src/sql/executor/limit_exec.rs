@@ -1,4 +1,4 @@
-use super::batch::ColumnarBatch;
+use crate::sql::runtime::batch::ColumnarBatch;
 use super::{SqlExecutionError, SqlExecutor};
 
 impl SqlExecutor {

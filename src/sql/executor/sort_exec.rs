@@ -1,5 +1,5 @@
-use super::batch::ColumnarBatch;
-use super::ordering::{MergeOperator, OrderClause, sort_batch_in_memory};
+use crate::sql::runtime::batch::ColumnarBatch;
+use crate::sql::runtime::ordering::{MergeOperator, OrderClause, sort_batch_in_memory};
 use super::spill::SpillManager;
 use super::{SqlExecutionError, SqlExecutor, SORT_OUTPUT_BATCH_SIZE};
 use crate::metadata_store::TableCatalog;

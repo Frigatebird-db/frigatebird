@@ -1,10 +1,11 @@
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
-use crate::sql::executor::aggregates::MaterializedColumns;
-use crate::sql::executor::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
-use crate::sql::executor::evaluate_expression_on_batch;
-use crate::sql::executor::physical_evaluator::PhysicalEvaluator;
-use crate::sql::executor::projection_helpers::materialize_columns;
-use crate::sql::executor::{SqlExecutionError, SqlExecutor};
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::aggregates::MaterializedColumns;
+use crate::sql::runtime::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
+use crate::sql::runtime::expressions::evaluate_expression_on_batch;
+use crate::sql::runtime::physical_evaluator::PhysicalEvaluator;
+use crate::sql::runtime::projection_helpers::materialize_columns;
+use crate::sql::runtime::SqlExecutionError;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
 use sqlparser::ast::Expr;
@@ -52,7 +53,7 @@ pub(crate) fn apply_filter_expr(
             Ok(batch.filter_by_bitmap(&bitmap))
         }
         Err(SqlExecutionError::Unsupported(_)) => {
-            let ordinals = crate::sql::executor::helpers::collect_expr_column_ordinals(
+            let ordinals = crate::sql::runtime::helpers::collect_expr_column_ordinals(
                 expr,
                 column_ordinals,
                 table,
@@ -122,7 +123,7 @@ fn filter_rows_with_expr(
         return Ok(Vec::new());
     }
 
-    let dataset = crate::sql::executor::aggregates::AggregateDataset::new(
+    let dataset = crate::sql::runtime::aggregates::AggregateDataset::new(
         rows,
         materialized,
         column_ordinals,
@@ -133,7 +134,11 @@ fn filter_rows_with_expr(
 
     let mut filtered = Vec::with_capacity(rows.len());
     for &row_idx in rows {
-        let value = crate::sql::executor::expressions::evaluate_row_expr(expr, row_idx, &dataset)?;
+        let value = crate::sql::runtime::expressions::evaluate_row_expr(
+            expr,
+            row_idx,
+            &dataset,
+        )?;
         if value.as_bool().unwrap_or(false) {
             filtered.push(row_idx);
         }

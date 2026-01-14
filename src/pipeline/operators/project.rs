@@ -1,5 +1,6 @@
 use crate::metadata_store::TableCatalog;
-use crate::sql::executor::{ProjectionPlan, SqlExecutionError, SqlExecutor};
+use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::{ProjectionPlan, SqlExecutionError};
 
 use super::{PipelineBatch, PipelineOperator};
 
