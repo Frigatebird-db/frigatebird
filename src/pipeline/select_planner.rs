@@ -603,8 +603,12 @@ pub(crate) fn execute_select_plan(
 
     let apply_selection_late = !window_plans.is_empty();
     let row_id_selection = selection_expr_opt;
-    let scan_selection_expr = None;
-    let mut selection_applied_in_scan = false;
+    let mut scan_selection_expr = if has_selection && can_use_physical_filter {
+        physical_selection_expr.as_ref()
+    } else {
+        None
+    };
+    let mut selection_applied_in_scan = scan_selection_expr.is_some();
     let selection_expr_full = if has_selection {
         Some(&selection_expr)
     } else {

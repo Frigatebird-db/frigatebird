@@ -257,7 +257,9 @@ fn dataset(config: &MassiveFixtureConfig) -> Arc<BigFixtureDataset> {
         }
     }
 
-    let mut guard = cache.write().expect("massive dataset cache poisoned");
+    let mut guard = cache
+        .write()
+        .unwrap_or_else(|poison| poison.into_inner());
     Arc::clone(
         guard
             .entry(config.row_count)
@@ -424,7 +426,7 @@ impl SerialFixtureGuard {
     fn new() -> Self {
         let guard = MASSIVE_FIXTURE_SERIAL_LOCK
             .lock()
-            .expect("massive fixture lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         SerialFixtureGuard { _guard: guard }
     }
 }
