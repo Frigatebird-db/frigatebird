@@ -1,6 +1,4 @@
-use idk_uwu_ig::cache::page_cache::{
-    PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
-};
+use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{
@@ -11,7 +9,6 @@ use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
 
 fn create_test_page(entries: usize) -> Page {
     let mut page = Page::new();

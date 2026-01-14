@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::io::{Error as IoError, ErrorKind};
 
 pub fn other_error(msg: impl Into<String>) -> Box<dyn std::error::Error> {
-    Box::new(IoError::new(ErrorKind::Other, msg.into()))
+    Box::new(IoError::other(msg.into()))
 }
 
 pub fn find_insert_position(

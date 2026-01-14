@@ -118,7 +118,7 @@ impl DirectBlockAllocator {
     }
 
     pub fn with_data_dir(data_dir: impl Into<String>) -> io::Result<Self> {
-        if BLOCK_SIZE % ALIGN_4K != 0 {
+        if !BLOCK_SIZE.is_multiple_of(ALIGN_4K) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "BLOCK_SIZE must be 4K aligned",

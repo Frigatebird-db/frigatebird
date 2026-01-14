@@ -65,7 +65,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
 
     for i in 0..500 {
         let user_id = format!("user{:02}", i % 37);
-        let ts_numeric = 10_000 + i as i32;
+        let ts_numeric = 10_000 + i;
         let ts_text = format!("{:05}", ts_numeric);
         let category = categories[(i as usize) % categories.len()].to_string();
         let region = regions[(i as usize) % regions.len()].to_string();
@@ -367,7 +367,7 @@ fn test_sql_feature_matrix_with_large_dataset() {
     assert_eq!(sliding_result.row_count(), 8);
     for (idx, row) in sliding_result.rows().iter().enumerate() {
         let current = alpha_rows_ts[idx];
-        let start = if idx >= 2 { idx - 2 } else { 0 };
+        let start = idx.saturating_sub(2);
         let mut sum: i64 = 0;
         let mut non_null = 0;
         for candidate in &alpha_rows_ts[start..=idx] {

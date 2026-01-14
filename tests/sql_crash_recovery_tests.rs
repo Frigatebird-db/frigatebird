@@ -116,7 +116,7 @@ fn new_executor(
     (executor, handler, directory)
 }
 
-fn reapply_table_schema(
+fn _reapply_table_schema(
     directory: &Arc<PageDirectory>,
     table: &str,
     columns: &[(&str, &str)],

@@ -51,11 +51,8 @@ impl ThreadPool {
             let receiver = receiver.clone();
 
             let thread = thread::spawn(move || {
-                loop {
-                    match receiver.recv() {
-                        Ok(job) => job(),
-                        Err(_) => break, // channel closed, exit loop
-                    }
+                while let Ok(job) = receiver.recv() {
+                    job();
                 }
             });
 

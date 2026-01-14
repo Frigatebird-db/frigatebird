@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 use crate::metadata_store::ColumnCatalog;
 use crate::ops_handler::{delete_row, insert_sorted_row, overwrite_row, read_row};
 use crate::pipeline::operators::{FilterOperator, PipelineOperator};
@@ -227,7 +228,7 @@ fn collect_matching_row_ids(
     column_ordinals: &HashMap<String, usize>,
     column_types: &HashMap<String, DataType>,
 ) -> Result<Vec<u64>, SqlExecutionError> {
-    let selection_expr = selection.unwrap_or_else(|| Expr::Value(Value::Boolean(true)));
+    let selection_expr = selection.unwrap_or(Expr::Value(Value::Boolean(true)));
     let has_selection = !matches!(selection_expr, Expr::Value(Value::Boolean(true)));
 
     let expr_planner = ExpressionPlanner::new(catalog);
@@ -243,7 +244,7 @@ fn collect_matching_row_ids(
 
     let can_use_physical_filter = physical_selection_expr
         .as_ref()
-        .map_or(false, filter_supported);
+        .is_some_and(filter_supported);
 
     let mut required_ordinals: BTreeSet<usize> =
         sort_columns.iter().map(|col| col.ordinal).collect();

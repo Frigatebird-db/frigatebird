@@ -40,10 +40,12 @@ fn run_random_suite(iterations: usize) {
 
     for (idx, case) in queries.iter().enumerate() {
         eprintln!("Random case #{idx}: {}", case.sql);
-        let mut options = QueryOptions::default();
-        options.duckdb_sql = case.duckdb_sql.as_deref();
-        options.order_matters = case.order_matters;
-        options.skip_if_unsupported = true;
+        let options = QueryOptions {
+            duckdb_sql: case.duckdb_sql.as_deref(),
+            order_matters: case.order_matters,
+            skip_if_unsupported: true,
+            ..Default::default()
+        };
         assert_query_matches(&executor, &fixture, &case.sql, options);
     }
 }
@@ -81,8 +83,10 @@ fn debug_distinct_nullable_text_case() {
 #[ignore]
 fn debug_window_case() {
     let harness = setup_executor();
-    let mut config = MassiveFixtureConfig::default();
-    config.row_count = 2_000;
+    let config = MassiveFixtureConfig {
+        row_count: 2_000,
+        ..Default::default()
+    };
     let fixture = MassiveFixture::install_with_config(&harness.executor, config);
     let ExecutorHarness { executor, .. } = harness;
     let sql = "SELECT tenant, quantity, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY created_at) AS rn, SUM(quantity) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_qty, LAG(price, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lag_price, LEAD(net_amount, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lead_net FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL QUALIFY rn <= 8 ORDER BY tenant, rn";
@@ -769,7 +773,7 @@ fn glue_predicates(predicates: &[String], rng: &mut StdRng) -> String {
     }
 }
 
-fn random_predicate(row_count: i64, rng: &mut StdRng) -> String {
+fn random_predicate(_row_count: i64, rng: &mut StdRng) -> String {
     let column = MASSIVE_COLUMNS.choose(rng).unwrap();
     match (column.name, column.kind) {
         ("tenant", ColumnKind::Text) => {
@@ -808,7 +812,7 @@ fn random_predicate(row_count: i64, rng: &mut StdRng) -> String {
         ("nullable_text", ColumnKind::Text) => match rng.gen_range(0..3) {
             0 => "nullable_text IS NULL".into(),
             1 => "nullable_text = ''".into(),
-            _ => format!("nullable_text LIKE 'note-%'"),
+            _ => "nullable_text LIKE 'note-%'".to_string(),
         },
         ("description", ColumnKind::Text) => {
             if rng.gen_bool(0.5) {

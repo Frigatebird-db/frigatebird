@@ -17,7 +17,7 @@ impl LimitOperator {
         &mut self,
         batches: Vec<PipelineBatch>,
     ) -> Result<Vec<PipelineBatch>, SqlExecutionError> {
-        apply_limit_offset(batches.into_iter(), self.offset, self.limit)
+        apply_limit_offset(batches, self.offset, self.limit)
     }
 }
 

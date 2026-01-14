@@ -18,7 +18,7 @@ impl<'a> SortOperator<'a> {
         &mut self,
         batches: Vec<PipelineBatch>,
     ) -> Result<Vec<PipelineBatch>, SqlExecutionError> {
-        execute_sort(batches.into_iter(), self.clauses, self.catalog)
+        execute_sort(batches, self.clauses, self.catalog)
     }
 }
 

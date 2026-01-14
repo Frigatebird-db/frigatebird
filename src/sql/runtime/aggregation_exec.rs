@@ -19,6 +19,7 @@ use crate::sql::types::DataType;
 use sqlparser::ast::{Expr, Offset};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_grouping_set_aggregation_rows_from_batch(
     page_handler: &PageHandler,
     batch: &ColumnarBatch,

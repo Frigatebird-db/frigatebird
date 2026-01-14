@@ -164,10 +164,10 @@ fn plan_query(query: &Query, directory: &PageDirectory) -> PlannerResult<QueryPl
         if let Some(offset) = &query.offset {
             collect_expr_columns(&offset.value, &mut table.read_columns)?;
         }
-        if let Some(fetch) = &query.fetch {
-            if let Some(quantity) = &fetch.quantity {
-                collect_expr_columns(quantity, &mut table.read_columns)?;
-            }
+        if let Some(fetch) = &query.fetch
+            && let Some(quantity) = &fetch.quantity
+        {
+            collect_expr_columns(quantity, &mut table.read_columns)?;
         }
     }
 
@@ -376,20 +376,19 @@ fn filter_expr_from_physical(expr: PhysicalExpr) -> FilterExpr {
 }
 
 fn collect_select_columns(select: &Select, columns: &mut BTreeSet<String>) -> PlannerResult<()> {
-    if let Some(distinct) = &select.distinct {
-        if let sqlparser::ast::Distinct::On(exprs) = distinct {
-            for expr in exprs {
-                collect_expr_columns(expr, columns)?;
-            }
+    if let Some(distinct) = &select.distinct
+        && let sqlparser::ast::Distinct::On(exprs) = distinct
+    {
+        for expr in exprs {
+            collect_expr_columns(expr, columns)?;
         }
     }
 
-    if let Some(top) = &select.top {
-        if let Some(quantity) = &top.quantity {
-            if let sqlparser::ast::TopQuantity::Expr(expr) = quantity {
-                collect_expr_columns(expr, columns)?;
-            }
-        }
+    if let Some(top) = &select.top
+        && let Some(quantity) = &top.quantity
+        && let sqlparser::ast::TopQuantity::Expr(expr) = quantity
+    {
+        collect_expr_columns(expr, columns)?;
     }
 
     for item in &select.projection {
@@ -697,14 +696,14 @@ fn collect_function_columns(
         collect_expr_columns(filter, columns)?;
     }
 
-    if let Some(window) = &function.over {
-        if let WindowType::WindowSpec(spec) = window {
-            for expr in &spec.partition_by {
-                collect_expr_columns(expr, columns)?;
-            }
-            for expr in &spec.order_by {
-                collect_expr_columns(&expr.expr, columns)?;
-            }
+    if let Some(window) = &function.over
+        && let WindowType::WindowSpec(spec) = window
+    {
+        for expr in &spec.partition_by {
+            collect_expr_columns(expr, columns)?;
+        }
+        for expr in &spec.order_by {
+            collect_expr_columns(&expr.expr, columns)?;
         }
     }
 

@@ -36,11 +36,11 @@ pub fn upsert_data_into_table_column(
 
     let page_meta = handler
         .locate_latest_in_table(table, col)
-        .ok_or_else(|| "missing page metadata for column")?;
+        .ok_or("missing page metadata for column")?;
 
     let page_arc = handler
         .get_page(page_meta.clone())
-        .ok_or_else(|| "unable to load page")?;
+        .ok_or("unable to load page")?;
 
     let mut updated = (*page_arc).clone();
     updated.mutate_disk_page(
@@ -70,11 +70,11 @@ pub fn sorted_insert_single_column(
         .unwrap_or(crate::sql::types::DataType::String);
     let page_meta = handler
         .locate_latest_in_table(table, col)
-        .ok_or_else(|| "missing page metadata for column")?;
+        .ok_or("missing page metadata for column")?;
 
     let page_arc = handler
         .get_page(page_meta.clone())
-        .ok_or_else(|| "unable to load page")?;
+        .ok_or("unable to load page")?;
 
     let mut updated = (*page_arc).clone();
     let mut new_entry_count = page_meta.entry_count;

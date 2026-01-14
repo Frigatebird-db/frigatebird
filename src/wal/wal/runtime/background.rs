@@ -83,11 +83,11 @@ pub(super) fn start_background_workers(fsync_schedule: FsyncSchedule) -> Arc<mps
                     let mut fsync_batch = Vec::new();
 
                     for path in unique.iter() {
-                        if let Some(storage) = pool.get(path) {
-                            if let Some(fd_backend) = storage.as_fd() {
-                                let raw_fd = fd_backend.file().as_raw_fd();
-                                fsync_batch.push((raw_fd, path.clone()));
-                            }
+                        if let Some(storage) = pool.get(path)
+                            && let Some(fd_backend) = storage.as_fd()
+                        {
+                            let raw_fd = fd_backend.file().as_raw_fd();
+                            fsync_batch.push((raw_fd, path.clone()));
                         }
                     }
 
@@ -144,10 +144,10 @@ pub(super) fn start_background_workers(fsync_schedule: FsyncSchedule) -> Arc<mps
                     }
                 } else {
                     for path in unique.iter() {
-                        if let Some(storage) = pool.get_mut(path) {
-                            if let Err(e) = storage.flush() {
-                                debug_print!("[flush] flush error for {}: {}", path, e);
-                            }
+                        if let Some(storage) = pool.get_mut(path)
+                            && let Err(e) = storage.flush()
+                        {
+                            debug_print!("[flush] flush error for {}: {}", path, e);
                         }
                     }
                 }

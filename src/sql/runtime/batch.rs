@@ -15,7 +15,7 @@ pub struct Bitmap {
 
 impl Bitmap {
     pub fn new(len: usize) -> Self {
-        let words = if len == 0 { 0 } else { (len + 63) / 64 };
+        let words = if len == 0 { 0 } else { len.div_ceil(64) };
         Self {
             bits: vec![0; words],
             len,
@@ -109,7 +109,7 @@ impl Bitmap {
             bits: &self.bits,
             len: self.len,
             word_idx: 0,
-            current_word: self.bits.get(0).copied().unwrap_or(0),
+            current_word: self.bits.first().copied().unwrap_or(0),
         }
     }
 
@@ -119,7 +119,11 @@ impl Bitmap {
         }
         let original_len = self.len;
         let new_len = original_len + other.len;
-        let new_words = if new_len == 0 { 0 } else { (new_len + 63) / 64 };
+        let new_words = if new_len == 0 {
+            0
+        } else {
+            new_len.div_ceil(64)
+        };
         if self.bits.len() < new_words {
             self.bits.resize(new_words, 0);
         }
@@ -826,6 +830,10 @@ impl ColumnarPage {
         self.num_rows
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.num_rows == 0
+    }
+
     pub fn load(page: Page, dtype: DataType) -> Self {
         let num_rows = page.entries.len();
         let mut null_bitmap = Bitmap::new(num_rows);
@@ -1006,7 +1014,7 @@ impl ColumnarPage {
         if idx >= self.num_rows {
             return None;
         }
-        let value = self.value_as_string(idx).unwrap_or_else(|| encode_null());
+        let value = self.value_as_string(idx).unwrap_or_else(encode_null);
         Some(Entry::new(&value))
     }
 

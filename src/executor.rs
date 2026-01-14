@@ -97,7 +97,7 @@ fn select_heaviest(board: &SkipSet<JobHandle>) -> Option<Arc<Job>> {
 }
 
 fn split_threads(total: usize) -> (usize, usize) {
-    let mut main = (total * 85 + 99) / 100; // round up
+    let mut main = (total * 85).div_ceil(100); // round up
     if main == 0 {
         main = 1;
     }

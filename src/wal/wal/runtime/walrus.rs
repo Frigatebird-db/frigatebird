@@ -126,17 +126,19 @@ impl Walrus {
 
     pub(super) fn get_or_create_writer(&self, col_name: &str) -> std::io::Result<Arc<Writer>> {
         if let Some(writer) = {
-            let map = self.writers.read().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "writers read lock poisoned")
-            })?;
+            let map = self
+                .writers
+                .read()
+                .map_err(|_| std::io::Error::other("writers read lock poisoned"))?;
             map.get(col_name).cloned()
         } {
             return Ok(writer);
         }
 
-        let mut map = self.writers.write().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::Other, "writers write lock poisoned")
-        })?;
+        let mut map = self
+            .writers
+            .write()
+            .map_err(|_| std::io::Error::other("writers write lock poisoned"))?;
 
         if let Some(writer) = map.get(col_name).cloned() {
             return Ok(writer);
@@ -170,10 +172,10 @@ impl Walrus {
                 Err(_) => continue,
             };
             let path = entry.path();
-            if let Ok(ft) = entry.file_type() {
-                if ft.is_dir() {
-                    continue;
-                }
+            if let Ok(ft) = entry.file_type()
+                && ft.is_dir()
+            {
+                continue;
             }
             if let Some(s) = path.to_str() {
                 // skip index files
@@ -247,16 +249,11 @@ impl Walrus {
                     used: 0,
                 };
                 let mut in_block_off: u64 = 0;
-                loop {
-                    match block_stub.read(in_block_off) {
-                        Ok((_entry, consumed)) => {
-                            used += consumed as u64;
-                            in_block_off += consumed as u64;
-                            if in_block_off >= DEFAULT_BLOCK_SIZE {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+                while let Ok((_entry, consumed)) = block_stub.read(in_block_off) {
+                    used += consumed as u64;
+                    in_block_off += consumed as u64;
+                    if in_block_off >= DEFAULT_BLOCK_SIZE {
+                        break;
                     }
                 }
                 if used == 0 {

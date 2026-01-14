@@ -28,15 +28,15 @@ fn range_query_exact_boundary() {
 
     // Test exact boundary: should this include the entry at [0,3)?
     let results = directory.range("col1", 0, 3, u64::MAX);
-    assert!(results.len() > 0, "Range [0,3) should find entry [0,3)");
+    assert!(!results.is_empty(), "Range [0,3) should find entry [0,3)");
 
     // Test one before boundary
     let results = directory.range("col1", 0, 2, u64::MAX);
-    assert!(results.len() > 0, "Range [0,2) should find entry [0,3)");
+    assert!(!results.is_empty(), "Range [0,2) should find entry [0,3)");
 
     // Test one after start
     let results = directory.range("col1", 1, 3, u64::MAX);
-    assert!(results.len() > 0, "Range [1,3) should find entry [0,3)");
+    assert!(!results.is_empty(), "Range [1,3) should find entry [0,3)");
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn mvcc_multiple_versions_same_timestamp() {
 
     // Should still be able to query even if timestamps collide
     let results = directory.range("col1", 0, 10, u64::MAX);
-    assert!(results.len() > 0, "Should find at least one version");
+    assert!(!results.is_empty(), "Should find at least one version");
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn mvcc_timestamp_boundary_exact_match() {
 
     // Query with exact timestamp - should find the first page only
     let results = directory.range("col1", 0, 10, timestamp);
-    assert!(results.len() > 0, "Should find version before timestamp");
+    assert!(!results.is_empty(), "Should find version before timestamp");
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn mvcc_timestamp_before_all_versions() {
 
     // Timestamps are ignored in the simplified metadata store; expect latest.
     let results = directory.range("col1", 0, 10, old_timestamp);
-    assert!(results.len() > 0, "Should return current versions");
+    assert!(!results.is_empty(), "Should return current versions");
 }
 
 #[test]
@@ -251,17 +251,17 @@ fn entry_unicode_boundary_cases() {
     // Emoji and multi-byte characters
     let entry = Entry::new("👍🏽🎉🚀");
     let serialized = bincode::serialize(&entry).unwrap();
-    assert!(serialized.len() > 0);
+    assert!(!serialized.is_empty());
 
     // Mix of ASCII and unicode
     let entry = Entry::new("Hello 世界 мир");
     let serialized = bincode::serialize(&entry).unwrap();
-    assert!(serialized.len() > 0);
+    assert!(!serialized.is_empty());
 
     // Zero-width joiners and combining characters
     let entry = Entry::new("e\u{0301}"); // é with combining acute
     let serialized = bincode::serialize(&entry).unwrap();
-    assert!(serialized.len() > 0);
+    assert!(!serialized.is_empty());
 }
 
 #[test]
@@ -285,7 +285,7 @@ fn concurrent_register_same_column() {
 
     // Should be able to query the column
     let results = directory.range("col1", 0, 100, u64::MAX);
-    assert!(results.len() > 0, "Should find at least one page");
+    assert!(!results.is_empty(), "Should find at least one page");
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn concurrent_register_and_query() {
     let reader = thread::spawn(move || {
         for _ in 0..20 {
             let results = dir2.range("col1", 0, 100, u64::MAX);
-            assert!(results.len() > 0, "Should always find at least one page");
+            assert!(!results.is_empty(), "Should always find at least one page");
             thread::sleep(Duration::from_millis(1));
         }
     });
@@ -341,7 +341,7 @@ fn page_directory_lookup_after_many_versions() {
 
     // Query should still work with MVCC max versions (8)
     let results = directory.range("col1", 0, 10, u64::MAX);
-    assert!(results.len() > 0, "Should find at least one version");
+    assert!(!results.is_empty(), "Should find at least one version");
 }
 
 #[test]
@@ -355,7 +355,7 @@ fn cache_update_same_key_rapidly() {
 
     // Should have the latest version
     let page = cache.get("page1").unwrap();
-    assert!(page.entries.len() > 0);
+    assert!(!page.entries.is_empty());
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn max_u64_timestamp_query() {
     // Query with maximum possible timestamp
     let results = directory.range("col1", 0, 10, u64::MAX);
     assert!(
-        results.len() > 0,
+        !results.is_empty(),
         "u64::MAX timestamp should find all versions"
     );
 }
@@ -417,7 +417,7 @@ fn zero_timestamp_query() {
     // Timestamp filtering is not supported; expect data.
     let results = directory.range("col1", 0, 10, 0);
     assert!(
-        results.len() > 0,
+        !results.is_empty(),
         "Timestamp 0 should return current versions"
     );
 }

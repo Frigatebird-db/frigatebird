@@ -142,10 +142,12 @@ fn aggregate_projections_align() {
     ];
 
     for case in &cases {
-        let mut options = QueryOptions::default();
-        options.duckdb_sql = case.duckdb_sql.as_deref();
-        options.order_matters = case.order_matters;
-        options.skip_if_unsupported = true;
+        let options = QueryOptions {
+            duckdb_sql: case.duckdb_sql.as_deref(),
+            order_matters: case.order_matters,
+            skip_if_unsupported: true,
+            ..Default::default()
+        };
         assert_query_matches(&executor, &fixture, &case.sql, options);
     }
 }

@@ -89,7 +89,7 @@ impl BlockAllocator {
                 "invalid allocation size, a single entry can't be more than 1gb",
             ));
         }
-        let alloc_units = (want_bytes + DEFAULT_BLOCK_SIZE - 1) / DEFAULT_BLOCK_SIZE;
+        let alloc_units = want_bytes.div_ceil(DEFAULT_BLOCK_SIZE);
         let alloc_size = alloc_units * DEFAULT_BLOCK_SIZE;
         debug_print!(
             "[alloc] alloc_block: want_bytes={}, units={}, size={}",
@@ -173,10 +173,8 @@ pub(super) fn flush_check(file_path: String) {
         FileStateTracker::get_state_snapshot(&file_path)
     {
         let ready_to_delete = fully_allocated && locked == 0 && total > 0 && checkpointed >= total;
-        if ready_to_delete {
-            if let Some(tx) = DELETION_TX.get() {
-                let _ = tx.send(file_path);
-            }
+        if ready_to_delete && let Some(tx) = DELETION_TX.get() {
+            let _ = tx.send(file_path);
         }
     }
 }
@@ -261,20 +259,20 @@ impl FileStateTracker {
     pub(super) fn add_block_to_file_state(file_path: &str) {
         Self::register_file_if_absent(file_path);
         let map = Self::map();
-        if let Ok(r) = map.read() {
-            if let Some(st) = r.get(file_path) {
-                st.total_blocks.fetch_add(1, Ordering::AcqRel);
-            }
+        if let Ok(r) = map.read()
+            && let Some(st) = r.get(file_path)
+        {
+            st.total_blocks.fetch_add(1, Ordering::AcqRel);
         }
     }
 
     pub(super) fn set_fully_allocated(file_path: String) {
         Self::register_file_if_absent(&file_path);
         let map = Self::map();
-        if let Ok(r) = map.read() {
-            if let Some(st) = r.get(&file_path) {
-                st.is_fully_allocated.store(true, Ordering::Release);
-            }
+        if let Ok(r) = map.read()
+            && let Some(st) = r.get(&file_path)
+        {
+            st.is_fully_allocated.store(true, Ordering::Release);
         }
         flush_check(file_path);
     }
@@ -282,10 +280,10 @@ impl FileStateTracker {
     pub(super) fn set_block_locked(block_id: usize) {
         if let Some(path) = BlockStateTracker::get_file_path_for_block(block_id) {
             let map = Self::map();
-            if let Ok(r) = map.read() {
-                if let Some(st) = r.get(&path) {
-                    st.locked_block_ctr.fetch_add(1, Ordering::AcqRel);
-                }
+            if let Ok(r) = map.read()
+                && let Some(st) = r.get(&path)
+            {
+                st.locked_block_ctr.fetch_add(1, Ordering::AcqRel);
             }
         }
     }
@@ -293,10 +291,10 @@ impl FileStateTracker {
     pub(super) fn set_block_unlocked(block_id: usize) {
         if let Some(path) = BlockStateTracker::get_file_path_for_block(block_id) {
             let map = Self::map();
-            if let Ok(r) = map.read() {
-                if let Some(st) = r.get(&path) {
-                    st.locked_block_ctr.fetch_sub(1, Ordering::AcqRel);
-                }
+            if let Ok(r) = map.read()
+                && let Some(st) = r.get(&path)
+            {
+                st.locked_block_ctr.fetch_sub(1, Ordering::AcqRel);
             }
             flush_check(path);
         }
@@ -304,10 +302,10 @@ impl FileStateTracker {
 
     pub(super) fn inc_checkpoint_for_file(file_path: &str) {
         let map = Self::map();
-        if let Ok(r) = map.read() {
-            if let Some(st) = r.get(file_path) {
-                st.checkpoint_block_ctr.fetch_add(1, Ordering::AcqRel);
-            }
+        if let Ok(r) = map.read()
+            && let Some(st) = r.get(file_path)
+        {
+            st.checkpoint_block_ctr.fetch_add(1, Ordering::AcqRel);
         }
     }
 

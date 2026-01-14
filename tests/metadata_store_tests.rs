@@ -132,7 +132,7 @@ fn page_directory_range_query() {
     directory.register_page("col1", "test.db".to_string(), 2048);
 
     let results = directory.range("col1", 0, 10, u64::MAX);
-    assert!(results.len() >= 1);
+    assert!(!results.is_empty());
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn page_directory_range_with_timestamp_bound() {
     directory.register_page("col1", "test.db".to_string(), 1024);
 
     let results = directory.range("col1", 0, 199, timestamp_bound);
-    assert!(results.len() >= 1);
+    assert!(!results.is_empty());
 }
 
 #[test]
@@ -712,15 +712,15 @@ fn meta_journal_randomized_sequences_survive_replay() {
         let table = format!("table_{}", next_rand(&mut seed) % 3);
         let column = format!("column_{}", next_rand(&mut seed) % 5);
         let descriptor_id = format!("{:016x}", step + 1);
-        let entry_count = (next_rand(&mut seed) % 50 + 1) as u64;
-        let actual_len = (next_rand(&mut seed) % 3072 + 256) as u64;
-        let offset = (next_rand(&mut seed) % 1_000) as u64;
+        let entry_count = next_rand(&mut seed) % 50 + 1;
+        let actual_len = next_rand(&mut seed) % 3072 + 256;
+        let offset = next_rand(&mut seed) % 1_000;
         let replace_last = (next_rand(&mut seed) & 1) == 0;
         let stats = if (next_rand(&mut seed) & 1) == 0 {
             Some(ColumnStats {
                 min_value: Some(format!("min_{step}")),
                 max_value: Some(format!("max_{step}")),
-                null_count: (next_rand(&mut seed) % 3) as u64,
+                null_count: (next_rand(&mut seed) % 3),
                 kind: ColumnStatsKind::Text,
             })
         } else {

@@ -55,30 +55,28 @@ fn build_prunable_comparison(
     right: &Expr,
     acc: &mut Vec<PagePrunePredicate>,
 ) -> bool {
-    if let Some(column) = column_name_from_expr(left) {
-        if let Some(value) = parse_numeric_literal(right) {
-            if let Some(comparison) = comparison_for_operator(op, true) {
-                acc.push(PagePrunePredicate {
-                    column,
-                    comparison,
-                    value: Some(value),
-                });
-                return true;
-            }
-        }
+    if let Some(column) = column_name_from_expr(left)
+        && let Some(value) = parse_numeric_literal(right)
+        && let Some(comparison) = comparison_for_operator(op, true)
+    {
+        acc.push(PagePrunePredicate {
+            column,
+            comparison,
+            value: Some(value),
+        });
+        return true;
     }
 
-    if let Some(column) = column_name_from_expr(right) {
-        if let Some(value) = parse_numeric_literal(left) {
-            if let Some(comparison) = comparison_for_operator(op, false) {
-                acc.push(PagePrunePredicate {
-                    column,
-                    comparison,
-                    value: Some(value),
-                });
-                return true;
-            }
-        }
+    if let Some(column) = column_name_from_expr(right)
+        && let Some(value) = parse_numeric_literal(left)
+        && let Some(comparison) = comparison_for_operator(op, false)
+    {
+        acc.push(PagePrunePredicate {
+            column,
+            comparison,
+            value: Some(value),
+        });
+        return true;
     }
 
     false

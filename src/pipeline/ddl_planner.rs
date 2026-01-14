@@ -22,7 +22,7 @@ fn execute_create(executor: &SqlExecutor, statement: Statement) -> Result<(), Sq
     create_table_from_plan(executor.page_directory(), &plan)
         .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
 
-    if let Some(ref journal) = executor.meta_journal() {
+    if let Some(journal) = executor.meta_journal() {
         let columns: Vec<JournalColumnDef> = plan
             .columns
             .iter()

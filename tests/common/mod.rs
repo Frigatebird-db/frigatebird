@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, clippy::type_complexity)]
 use chrono::NaiveDateTime;
 use duckdb::Connection;
 use duckdb::types::ValueRef;
@@ -18,10 +19,6 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 // Re-export commonly used types for test modules
-pub use idk_uwu_ig::sql::executor::{
-    SelectResult as PublicSelectResult, SqlExecutionError as PublicSqlExecutionError,
-    SqlExecutor as PublicSqlExecutor,
-};
 pub use result_rows_ext::SelectResultRowsExt;
 
 mod result_rows_ext {
@@ -251,10 +248,10 @@ static MASSIVE_DATASETS: OnceCell<RwLock<HashMap<usize, Arc<BigFixtureDataset>>>
 
 fn dataset(config: &MassiveFixtureConfig) -> Arc<BigFixtureDataset> {
     let cache = MASSIVE_DATASETS.get_or_init(|| RwLock::new(HashMap::new()));
-    if let Ok(guard) = cache.read() {
-        if let Some(existing) = guard.get(&config.row_count) {
-            return Arc::clone(existing);
-        }
+    if let Ok(guard) = cache.read()
+        && let Some(existing) = guard.get(&config.row_count)
+    {
+        return Arc::clone(existing);
     }
 
     let mut guard = cache.write().unwrap_or_else(|poison| poison.into_inner());
@@ -609,6 +606,7 @@ impl PartialEq for NormalizedRow {
 
 impl Eq for NormalizedRow {}
 
+#[allow(clippy::non_canonical_partial_ord_impl)]
 impl PartialOrd for NormalizedRow {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.key.cmp(&other.key))

@@ -74,29 +74,27 @@ pub(crate) fn execute_projection_pipeline(
     )?;
     let mut batches = collect_stream_batches(stream)?;
 
-    if !selection_applied_in_scan {
-        if let Some(expr) = selection_expr {
-            let mut filtered = Vec::new();
-            for batch in batches {
-                let mut filter = FilterOperator::new(
-                    executor.page_handler().as_ref(),
-                    expr,
-                    selection_physical_expr,
-                    catalog,
-                    table,
-                    columns,
-                    column_ordinals,
-                    column_types,
-                );
-                let results = filter.execute(batch)?;
-                for result in results {
-                    if result.num_rows > 0 {
-                        filtered.push(result);
-                    }
+    if !selection_applied_in_scan && let Some(expr) = selection_expr {
+        let mut filtered = Vec::new();
+        for batch in batches {
+            let mut filter = FilterOperator::new(
+                executor.page_handler().as_ref(),
+                expr,
+                selection_physical_expr,
+                catalog,
+                table,
+                columns,
+                column_ordinals,
+                column_types,
+            );
+            let results = filter.execute(batch)?;
+            for result in results {
+                if result.num_rows > 0 {
+                    filtered.push(result);
                 }
             }
-            batches = filtered;
         }
+        batches = filtered;
     }
 
     if batches.is_empty() {
@@ -253,34 +251,32 @@ pub(crate) fn execute_window_pipeline(
         });
     }
 
-    if !selection_applied_in_scan {
-        if let Some(expr) = selection_expr {
-            let mut filtered = Vec::new();
-            for batch in batches {
-                let mut filter = FilterOperator::new(
-                    executor.page_handler().as_ref(),
-                    expr,
-                    selection_physical_expr,
-                    catalog,
-                    table,
-                    columns,
-                    column_ordinals,
-                    column_types,
-                );
-                let results = filter.execute(batch)?;
-                for result in results {
-                    if result.num_rows > 0 {
-                        filtered.push(result);
-                    }
+    if !selection_applied_in_scan && let Some(expr) = selection_expr {
+        let mut filtered = Vec::new();
+        for batch in batches {
+            let mut filter = FilterOperator::new(
+                executor.page_handler().as_ref(),
+                expr,
+                selection_physical_expr,
+                catalog,
+                table,
+                columns,
+                column_ordinals,
+                column_types,
+            );
+            let results = filter.execute(batch)?;
+            for result in results {
+                if result.num_rows > 0 {
+                    filtered.push(result);
                 }
             }
-            batches = filtered;
-            if batches.is_empty() {
-                return Ok(SelectResult {
-                    columns: result_columns,
-                    batches: Vec::new(),
-                });
-            }
+        }
+        batches = filtered;
+        if batches.is_empty() {
+            return Ok(SelectResult {
+                columns: result_columns,
+                batches: Vec::new(),
+            });
         }
     }
 
@@ -471,7 +467,7 @@ pub(crate) fn execute_select_plan(
     };
     let can_use_physical_filter = physical_selection_expr
         .as_ref()
-        .map_or(false, filter_supported);
+        .is_some_and(filter_supported);
 
     let sort_columns_refs = catalog.sort_key();
     if sort_columns_refs.is_empty() {
@@ -481,9 +477,7 @@ pub(crate) fn execute_select_plan(
     }
     let sort_columns: Vec<ColumnCatalog> = sort_columns_refs.into_iter().cloned().collect();
 
-    let aggregate_query = projection_items
-        .iter()
-        .any(|item| select_item_contains_aggregate(item));
+    let aggregate_query = projection_items.iter().any(select_item_contains_aggregate);
 
     let has_grouping = matches!(
         &group_by,
@@ -727,29 +721,30 @@ pub(crate) fn execute_select_plan(
         row_ids.clone(),
     )?;
     let mut base_batches = collect_stream_batches(stream)?;
-    if has_selection && !selection_applied_in_scan {
-        if let Some(expr) = selection_expr_full {
-            let mut filtered = Vec::new();
-            for batch in base_batches {
-                let mut filter = FilterOperator::new(
-                    executor.page_handler().as_ref(),
-                    expr,
-                    scan_selection_expr,
-                    &catalog,
-                    &table_name,
-                    &columns,
-                    &column_ordinals,
-                    &column_types,
-                );
-                let results = filter.execute(batch)?;
-                for result in results {
-                    if result.num_rows > 0 {
-                        filtered.push(result);
-                    }
+    if has_selection
+        && !selection_applied_in_scan
+        && let Some(expr) = selection_expr_full
+    {
+        let mut filtered = Vec::new();
+        for batch in base_batches {
+            let mut filter = FilterOperator::new(
+                executor.page_handler().as_ref(),
+                expr,
+                scan_selection_expr,
+                &catalog,
+                &table_name,
+                &columns,
+                &column_ordinals,
+                &column_types,
+            );
+            let results = filter.execute(batch)?;
+            for result in results {
+                if result.num_rows > 0 {
+                    filtered.push(result);
                 }
             }
-            base_batches = filtered;
         }
+        base_batches = filtered;
     }
     let base_batch = merge_batches(base_batches);
 
@@ -757,7 +752,7 @@ pub(crate) fn execute_select_plan(
         let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");
         let prefer_exact_numeric = group_strategy
             .as_ref()
-            .map_or(false, GroupByStrategy::prefer_exact_numeric);
+            .is_some_and(GroupByStrategy::prefer_exact_numeric);
         let aggregate_operator = AggregateOperator::new(
             executor.page_handler().as_ref(),
             &table_name,
@@ -783,7 +778,7 @@ pub(crate) fn execute_select_plan(
         let aggregate_plan = aggregate_plan_opt.expect("aggregate plan must exist");
         let prefer_exact_numeric = group_strategy
             .as_ref()
-            .map_or(false, GroupByStrategy::prefer_exact_numeric);
+            .is_some_and(GroupByStrategy::prefer_exact_numeric);
         let aggregate_operator = AggregateOperator::new(
             executor.page_handler().as_ref(),
             &table_name,

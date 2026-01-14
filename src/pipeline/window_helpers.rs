@@ -50,10 +50,10 @@ fn rewrite_aliases(expr: &Expr, alias_map: &HashMap<String, Expr>) -> Expr {
             .cloned()
             .unwrap_or_else(|| Identifier(ident.clone())),
         CompoundIdentifier(idents) => {
-            if idents.len() == 1 {
-                if let Some(replacement) = alias_map.get(&idents[0].value) {
-                    return replacement.clone();
-                }
+            if idents.len() == 1
+                && let Some(replacement) = alias_map.get(&idents[0].value)
+            {
+                return replacement.clone();
             }
             CompoundIdentifier(idents.clone())
         }
@@ -63,7 +63,7 @@ fn rewrite_aliases(expr: &Expr, alias_map: &HashMap<String, Expr>) -> Expr {
             right: Box::new(rewrite_aliases(right, alias_map)),
         },
         UnaryOp { op, expr } => Expr::UnaryOp {
-            op: op.clone(),
+            op: *op,
             expr: Box::new(rewrite_aliases(expr, alias_map)),
         },
         Nested(inner) => Expr::Nested(Box::new(rewrite_aliases(inner, alias_map))),
@@ -79,7 +79,7 @@ fn rewrite_aliases(expr: &Expr, alias_map: &HashMap<String, Expr>) -> Expr {
                 }
             }
             if let Some(filter) = &mut function.filter {
-                *filter = Box::new(rewrite_aliases(filter, alias_map));
+                **filter = rewrite_aliases(filter, alias_map);
             }
             for order in &mut function.order_by {
                 order.expr = rewrite_aliases(&order.expr, alias_map);
@@ -209,10 +209,10 @@ pub(crate) fn assign_window_display_aliases(
                 continue;
             }
             let key = function.to_string();
-            if let Some(indices) = key_to_indices.get_mut(&key) {
-                if let Some(plan_idx) = indices.pop_front() {
-                    plans[plan_idx].display_alias = Some(projection_plan.headers[idx].clone());
-                }
+            if let Some(indices) = key_to_indices.get_mut(&key)
+                && let Some(plan_idx) = indices.pop_front()
+            {
+                plans[plan_idx].display_alias = Some(projection_plan.headers[idx].clone());
             }
         }
     }
@@ -471,9 +471,8 @@ pub(crate) fn extract_window_plan(
             let frame = if let Some(frame) = &over.window_frame {
                 match frame.units {
                     WindowFrameUnits::Rows => {
-                        let preceding;
-                        match &frame.start_bound {
-                            WindowFrameBound::Preceding(None) => preceding = None,
+                        let preceding = match &frame.start_bound {
+                            WindowFrameBound::Preceding(None) => None,
                             WindowFrameBound::Preceding(Some(expr)) => {
                                 let value = parse_usize_literal(expr).ok_or_else(|| {
                                     SqlExecutionError::Unsupported(
@@ -481,7 +480,7 @@ pub(crate) fn extract_window_plan(
                                             .into(),
                                     )
                                 })?;
-                                preceding = Some(value as usize);
+                                Some(value as usize)
                             }
                             _ => {
                                 return Err(SqlExecutionError::Unsupported(
@@ -489,7 +488,7 @@ pub(crate) fn extract_window_plan(
                                         .into(),
                                 ));
                             }
-                        }
+                        };
                         if let Some(end_bound) = &frame.end_bound {
                             match end_bound {
                                 WindowFrameBound::CurrentRow => {}
@@ -1040,7 +1039,7 @@ where
                         {
                             current_rank = (idx + 1) as i64;
                         }
-                        values[*position] = ScalarValue::Int64(current_rank as i64);
+                        values[*position] = ScalarValue::Int64(current_rank);
                     }
                     let column = scalars_to_column(values, WindowResultType::Int)?;
                     batch.columns.insert(plan.result_ordinal, column);
@@ -1058,7 +1057,7 @@ where
                         {
                             current_rank += 1;
                         }
-                        values[*position] = ScalarValue::Int64(current_rank as i64);
+                        values[*position] = ScalarValue::Int64(current_rank);
                     }
                     let column = scalars_to_column(values, WindowResultType::Int)?;
                     batch.columns.insert(plan.result_ordinal, column);
@@ -1099,13 +1098,13 @@ where
                             for key in &sorted_keys {
                                 let value = key
                                     .values
-                                    .get(0)
+                                    .first()
                                     .and_then(|scalar| scalar.as_f64())
                                     .ok_or_else(|| {
-                                        SqlExecutionError::Unsupported(
-                                            "SUM RANGE frame requires numeric ORDER BY".into(),
-                                        )
-                                    })?;
+                                    SqlExecutionError::Unsupported(
+                                        "SUM RANGE frame requires numeric ORDER BY".into(),
+                                    )
+                                })?;
                                 order_values.push(value);
                             }
 
@@ -1294,12 +1293,11 @@ fn sorted_positions_for_plan(
         let ordering = compare_order_keys(&keys[*left], &keys[*right], clauses);
         if ordering == Ordering::Equal {
             // Use timestamp as tie-breaker to match DuckDB's evaluation order
-            if let Some(ref ts_values) = timestamp_values {
-                if let (Some(&left_ts), Some(&right_ts)) =
+            if let Some(ref ts_values) = timestamp_values
+                && let (Some(&left_ts), Some(&right_ts)) =
                     (ts_values.get(*left), ts_values.get(*right))
-                {
-                    return left_ts.cmp(&right_ts);
-                }
+            {
+                return left_ts.cmp(&right_ts);
             }
             // Fall back to row_ids
             let left_id = batch.row_ids.get(*left).copied().unwrap_or(*left as u64);
@@ -1415,7 +1413,7 @@ fn scalars_to_column(
                         null_bitmap.set(idx);
                         data.push(0);
                     }
-                    ScalarValue::Int64(int_value) => data.push(*int_value as i64),
+                    ScalarValue::Int64(int_value) => data.push(*int_value),
                     _ => {
                         return Err(SqlExecutionError::Unsupported(
                             "expected integer window result".into(),
@@ -1471,7 +1469,7 @@ fn scalars_to_column(
                                     null_bitmap.set(idx);
                                     data.push(0);
                                 }
-                                ScalarValue::Int64(int_value) => data.push(*int_value as i64),
+                                ScalarValue::Int64(int_value) => data.push(*int_value),
                                 _ => {
                                     return Err(SqlExecutionError::Unsupported(
                                         "window result type mismatch".into(),

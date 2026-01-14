@@ -69,7 +69,7 @@ fn metadata_stress_concurrent_registration_same_column() {
     // Should be able to query without deadlock or corruption
     let results = directory.range("hot_column", 0, 100, u64::MAX);
     assert!(
-        results.len() > 0,
+        !results.is_empty(),
         "Should find pages after concurrent registration"
     );
 }
@@ -85,7 +85,7 @@ fn metadata_stress_concurrent_registration_different_columns() {
         let dir = Arc::clone(&directory);
         let handle = thread::spawn(move || {
             for j in 0..100 {
-                dir.register_page(&format!("col{}", i), format!("file.db"), j as u64);
+                dir.register_page(&format!("col{}", i), "file.db".to_string(), j as u64);
             }
         });
         handles.push(handle);
@@ -98,7 +98,7 @@ fn metadata_stress_concurrent_registration_different_columns() {
     // Verify all columns
     for i in 0..50 {
         let results = directory.range(&format!("col{}", i), 0, 100, u64::MAX);
-        assert!(results.len() > 0, "Each column should have pages");
+        assert!(!results.is_empty(), "Each column should have pages");
     }
 }
 
@@ -139,7 +139,7 @@ fn metadata_stress_interleaved_register_and_query() {
             for _ in 0..200 {
                 let results = dir.range("col1", 0, 1000, u64::MAX);
                 assert!(
-                    results.len() > 0,
+                    !results.is_empty(),
                     "Should always find at least initial pages"
                 );
             }
@@ -188,11 +188,11 @@ fn metadata_stress_mvcc_version_churn() {
     // Note: Old versions are pruned due to MAX_VERSIONS_PER_PAGE (8)
     // Only the most recent ~8 versions should be findable
     let latest_results = directory.range("time_col", 0, 10, u64::MAX);
-    assert!(latest_results.len() > 0, "Should find latest version");
+    assert!(!latest_results.is_empty(), "Should find latest version");
 
     // Verify version pruning is working correctly
     let very_old_ts = timestamps[0]; // First timestamp
-    let very_old_results = directory.range("time_col", 0, 10, very_old_ts);
+    let _very_old_results = directory.range("time_col", 0, 10, very_old_ts);
     // Old versions should be pruned (test passes whether 0 or some found)
 }
 
@@ -393,7 +393,7 @@ fn compressor_stress_concurrent_operations() {
     for i in 0..50 {
         let comp = Arc::clone(&compressor);
         let handle = thread::spawn(move || {
-            for j in 0..100 {
+            for _j in 0..100 {
                 let page = create_page(i % 20 + 1);
                 let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
                     page,
@@ -684,7 +684,7 @@ fn entry_stress_unicode_combinations() {
         let serialized = bincode::serialize(&entry).unwrap();
         let deserialized: Entry = bincode::deserialize(&serialized).unwrap();
         let _ = deserialized;
-        assert!(serialized.len() > 0);
+        assert!(!serialized.is_empty());
     }
 }
 

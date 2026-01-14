@@ -456,13 +456,12 @@ pub(crate) fn vectorized_sum_update(
         if values_page.null_bitmap.is_set(row_idx) {
             continue;
         }
-        if let Some(value) = numeric_value(values_page, row_idx) {
-            if let Some(AggregateState::Sum { total, seen }) =
+        if let Some(value) = numeric_value(values_page, row_idx)
+            && let Some(AggregateState::Sum { total, seen }) =
                 ensure_state_vec(hash_table, key, template).get_mut(agg_index)
-            {
-                *total += value;
-                *seen = true;
-            }
+        {
+            *total += value;
+            *seen = true;
         }
     }
 }
@@ -478,13 +477,12 @@ pub(crate) fn vectorized_average_update(
         if values_page.null_bitmap.is_set(row_idx) {
             continue;
         }
-        if let Some(value) = numeric_value(values_page, row_idx) {
-            if let Some(AggregateState::Average { sum, count }) =
+        if let Some(value) = numeric_value(values_page, row_idx)
+            && let Some(AggregateState::Average { sum, count }) =
                 ensure_state_vec(hash_table, key, template).get_mut(agg_index)
-            {
-                *sum += value;
-                *count += 1;
-            }
+        {
+            *sum += value;
+            *count += 1;
         }
     }
 }
@@ -500,12 +498,11 @@ pub(crate) fn vectorized_min_update(
         if values_page.null_bitmap.is_set(row_idx) {
             continue;
         }
-        if let Some(value) = numeric_value(values_page, row_idx) {
-            if let Some(AggregateState::Min { value: min_value }) =
+        if let Some(value) = numeric_value(values_page, row_idx)
+            && let Some(AggregateState::Min { value: min_value }) =
                 ensure_state_vec(hash_table, key, template).get_mut(agg_index)
-            {
-                *min_value = Some(min_value.map(|current| current.min(value)).unwrap_or(value));
-            }
+        {
+            *min_value = Some(min_value.map(|current| current.min(value)).unwrap_or(value));
         }
     }
 }
@@ -521,12 +518,11 @@ pub(crate) fn vectorized_max_update(
         if values_page.null_bitmap.is_set(row_idx) {
             continue;
         }
-        if let Some(value) = numeric_value(values_page, row_idx) {
-            if let Some(AggregateState::Max { value: max_value }) =
+        if let Some(value) = numeric_value(values_page, row_idx)
+            && let Some(AggregateState::Max { value: max_value }) =
                 ensure_state_vec(hash_table, key, template).get_mut(agg_index)
-            {
-                *max_value = Some(max_value.map(|current| current.max(value)).unwrap_or(value));
-            }
+        {
+            *max_value = Some(max_value.map(|current| current.max(value)).unwrap_or(value));
         }
     }
 }
@@ -542,16 +538,15 @@ pub(crate) fn vectorized_variance_update(
         if values_page.null_bitmap.is_set(row_idx) {
             continue;
         }
-        if let Some(value) = numeric_value(values_page, row_idx) {
-            if let Some(AggregateState::Variance { count, mean, m2 }) =
+        if let Some(value) = numeric_value(values_page, row_idx)
+            && let Some(AggregateState::Variance { count, mean, m2 }) =
                 ensure_state_vec(hash_table, key, template).get_mut(agg_index)
-            {
-                *count += 1;
-                let delta = value - *mean;
-                *mean += delta / *count as f64;
-                let delta2 = value - *mean;
-                *m2 += delta * delta2;
-            }
+        {
+            *count += 1;
+            let delta = value - *mean;
+            *mean += delta / *count as f64;
+            let delta2 = value - *mean;
+            *m2 += delta * delta2;
         }
     }
 }
@@ -909,7 +904,7 @@ fn evaluate_count(
     let filter = function.filter.as_deref();
     if function.args.is_empty()
         || matches!(
-            function.args.get(0),
+            function.args.first(),
             Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard))
         )
     {
@@ -1367,9 +1362,7 @@ fn evaluate_condition(
     Ok(value.as_bool().unwrap_or(false))
 }
 
-pub(crate) fn extract_single_argument<'a>(
-    function: &'a Function,
-) -> Result<&'a Expr, SqlExecutionError> {
+pub(crate) fn extract_single_argument(function: &Function) -> Result<&Expr, SqlExecutionError> {
     if function.args.len() != 1 {
         return Err(SqlExecutionError::Unsupported(format!(
             "function {} requires exactly one argument",

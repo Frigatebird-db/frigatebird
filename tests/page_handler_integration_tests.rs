@@ -73,7 +73,7 @@ fn page_locator_range_for_column() {
     let locator = PageLocator::new(Arc::clone(&directory));
     let range = locator.range_for_column("col1", 0, 10, u64::MAX);
 
-    assert!(range.len() >= 1);
+    assert!(!range.is_empty());
 }
 
 #[test]

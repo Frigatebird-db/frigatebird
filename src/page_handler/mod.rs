@@ -8,7 +8,6 @@ use crate::metadata_store::{
 };
 use crate::page_handler::page_io::PageIO;
 use crate::sql::types::DataType;
-use bincode;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -183,7 +182,7 @@ impl PageFetcher {
         for (idx, meta) in metas.iter().enumerate() {
             by_path
                 .entry(meta.disk_path.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push((idx, meta));
         }
 
@@ -502,12 +501,8 @@ impl PageHandler {
         page: &PageCacheEntryUncompressed,
     ) -> io::Result<()> {
         let disk_page = page.as_disk_page();
-        let serialized = bincode::serialize(&disk_page).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("serialize page failed: {err}"),
-            )
-        })?;
+        let serialized = bincode::serialize(&disk_page)
+            .map_err(|err| io::Error::other(format!("serialize page failed: {err}")))?;
         self.fetcher
             .page_io
             .write_to_path(&descriptor.disk_path, descriptor.offset, serialized)?;
@@ -534,7 +529,7 @@ impl PageHandler {
             if let Some(meta) = self.locator.lookup(&id) {
                 by_path
                     .entry(meta.disk_path)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((meta.offset, compressed_page.page.to_vec()));
             }
         }

@@ -7,6 +7,12 @@ pub struct Page {
     pub entries: Vec<entry::Entry>,
 }
 
+impl Default for Page {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Page {
     pub fn new() -> Self {
         Self {

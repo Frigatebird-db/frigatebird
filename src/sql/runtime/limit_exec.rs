@@ -18,10 +18,10 @@ where
             continue;
         }
 
-        if let Some(limit_value) = limit {
-            if rows_emitted >= limit_value {
-                break;
-            }
+        if let Some(limit_value) = limit
+            && rows_emitted >= limit_value
+        {
+            break;
         }
 
         let batch_end = rows_seen + batch.num_rows;
@@ -56,10 +56,10 @@ where
         }
         rows_seen = batch_end;
 
-        if let Some(limit_value) = limit {
-            if rows_emitted >= limit_value {
-                break;
-            }
+        if let Some(limit_value) = limit
+            && rows_emitted >= limit_value
+        {
+            break;
         }
     }
 

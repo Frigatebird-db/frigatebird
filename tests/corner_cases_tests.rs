@@ -80,7 +80,7 @@ fn page_empty_entries_vector() {
 
     // Should be serializable
     let serialized = bincode::serialize(&page).unwrap();
-    assert!(serialized.len() > 0);
+    assert!(!serialized.is_empty());
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn metadata_range_boundary_exact_match() {
 
     // Query with exact boundaries
     let results = directory.range("col1", 0, 1, u64::MAX);
-    assert!(results.len() > 0);
+    assert!(!results.is_empty());
 }
 
 #[test]
@@ -282,7 +282,7 @@ fn cache_add_same_key_repeatedly() {
     // Should only have one entry
     assert!(cache.has("same_key"));
     let page = cache.get("same_key").unwrap();
-    assert!(page.entries.len() > 0);
+    assert!(!page.entries.is_empty());
 }
 
 #[test]
@@ -634,7 +634,7 @@ fn range_query_large_range() {
 
     // Very large range
     let results = directory.range("col1", 0, u64::MAX, u64::MAX);
-    assert!(results.len() > 0);
+    assert!(!results.is_empty());
 }
 
 #[test]
@@ -645,7 +645,7 @@ fn range_query_max_timestamp() {
     directory.register_page("col1", "test.db".to_string(), 0);
 
     let results = directory.range("col1", 0, 10, u64::MAX);
-    assert!(results.len() > 0);
+    assert!(!results.is_empty());
 }
 
 #[test]
@@ -657,7 +657,7 @@ fn range_query_min_timestamp() {
 
     // Timestamp is ignored in the simplified metadata store, so this should still return results.
     let results = directory.range("col1", 0, 10, 0);
-    assert!(results.len() > 0);
+    assert!(!results.is_empty());
 }
 
 #[test]
@@ -677,7 +677,7 @@ fn concurrent_range_queries_same_column() {
         let handle = thread::spawn(move || {
             for _ in 0..50 {
                 let results = dir.range("col1", 0, 100, u64::MAX);
-                assert!(results.len() > 0);
+                assert!(!results.is_empty());
             }
         });
         handles.push(handle);

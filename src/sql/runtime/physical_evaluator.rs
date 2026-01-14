@@ -109,16 +109,16 @@ impl PhysicalEvaluator {
             } => evaluate_in_list(expr, list, *negated, batch),
             PhysicalExpr::Column { index, .. } => {
                 // Boolean column used directly as predicate
-                if let Some(page) = batch.columns.get(index) {
-                    if let ColumnData::Boolean(values) = &page.data {
-                        let mut bitmap = Bitmap::new(batch.num_rows);
-                        for (i, &v) in values.iter().enumerate() {
-                            if v {
-                                bitmap.set(i);
-                            }
+                if let Some(page) = batch.columns.get(index)
+                    && let ColumnData::Boolean(values) = &page.data
+                {
+                    let mut bitmap = Bitmap::new(batch.num_rows);
+                    for (i, &v) in values.iter().enumerate() {
+                        if v {
+                            bitmap.set(i);
                         }
-                        return bitmap;
                     }
+                    return bitmap;
                 }
                 Bitmap::new(batch.num_rows)
             }
@@ -161,33 +161,30 @@ impl PhysicalEvaluator {
         // Most common case: Column <Op> Literal
         if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(val)) =
             (left_unwrapped, right_unwrapped)
+            && let Some(col_page) = batch.columns.get(index)
         {
-            if let Some(col_page) = batch.columns.get(index) {
-                return evaluate_col_lit(
-                    &col_page.data,
-                    &col_page.null_bitmap,
-                    op,
-                    val,
-                    batch.num_rows,
-                );
-            }
+            return evaluate_col_lit(
+                &col_page.data,
+                &col_page.null_bitmap,
+                op,
+                val,
+                batch.num_rows,
+            );
         }
 
         // Handle Literal <Op> Column (Flip it)
         if let (PhysicalExpr::Literal(val), PhysicalExpr::Column { index, .. }) =
             (left_unwrapped, right_unwrapped)
+            && let Some(col_page) = batch.columns.get(index)
+            && let Some(rev_op) = reverse_operator(op)
         {
-            if let Some(col_page) = batch.columns.get(index) {
-                if let Some(rev_op) = reverse_operator(op) {
-                    return evaluate_col_lit(
-                        &col_page.data,
-                        &col_page.null_bitmap,
-                        &rev_op,
-                        val,
-                        batch.num_rows,
-                    );
-                }
-            }
+            return evaluate_col_lit(
+                &col_page.data,
+                &col_page.null_bitmap,
+                &rev_op,
+                val,
+                batch.num_rows,
+            );
         }
 
         Bitmap::new(batch.num_rows) // Fallback empty
@@ -843,10 +840,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
         ColumnData::Int64(values) => {
             let mut set = HashSet::new();
             for item in list {
-                if let PhysicalExpr::Literal(val) = item {
-                    if let Some(i) = scalar_to_i64(val) {
-                        set.insert(i);
-                    }
+                if let PhysicalExpr::Literal(val) = item
+                    && let Some(i) = scalar_to_i64(val)
+                {
+                    set.insert(i);
                 }
             }
             for (idx, &value) in values.iter().enumerate() {
@@ -862,10 +859,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
         ColumnData::Float64(values) => {
             let mut set = HashSet::new();
             for item in list {
-                if let PhysicalExpr::Literal(val) = item {
-                    if let Some(f) = scalar_to_f64(val) {
-                        set.insert(f.to_bits());
-                    }
+                if let PhysicalExpr::Literal(val) = item
+                    && let Some(f) = scalar_to_f64(val)
+                {
+                    set.insert(f.to_bits());
                 }
             }
             for (idx, &value) in values.iter().enumerate() {
@@ -881,10 +878,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
         ColumnData::Boolean(values) => {
             let mut set = HashSet::new();
             for item in list {
-                if let PhysicalExpr::Literal(val) = item {
-                    if let ScalarValue::Boolean(b) = val {
-                        set.insert(*b);
-                    }
+                if let PhysicalExpr::Literal(val) = item
+                    && let ScalarValue::Boolean(b) = val
+                {
+                    set.insert(*b);
                 }
             }
             for (idx, &value) in values.iter().enumerate() {
@@ -900,10 +897,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
         ColumnData::Timestamp(values) => {
             let mut set = HashSet::new();
             for item in list {
-                if let PhysicalExpr::Literal(val) = item {
-                    if let ScalarValue::Timestamp(ts) = val {
-                        set.insert(*ts);
-                    }
+                if let PhysicalExpr::Literal(val) = item
+                    && let ScalarValue::Timestamp(ts) = val
+                {
+                    set.insert(*ts);
                 }
             }
             for (idx, &value) in values.iter().enumerate() {
@@ -920,10 +917,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
             // Build HashSet of literal values as bytes for fast comparison
             let mut set: HashSet<Vec<u8>> = HashSet::new();
             for item in list {
-                if let PhysicalExpr::Literal(val) = item {
-                    if let Some(text) = scalar_to_string(val) {
-                        set.insert(text.into_bytes());
-                    }
+                if let PhysicalExpr::Literal(val) = item
+                    && let Some(text) = scalar_to_string(val)
+                {
+                    set.insert(text.into_bytes());
                 }
             }
             for idx in 0..col.len() {
@@ -941,10 +938,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
             // Dictionary optimization: check dictionary values once, then scan keys
             let mut set: HashSet<Vec<u8>> = HashSet::new();
             for item in list {
-                if let PhysicalExpr::Literal(val) = item {
-                    if let Some(text) = scalar_to_string(val) {
-                        set.insert(text.into_bytes());
-                    }
+                if let PhysicalExpr::Literal(val) = item
+                    && let Some(text) = scalar_to_string(val)
+                {
+                    set.insert(text.into_bytes());
                 }
             }
             // Pre-compute which dictionary keys match
@@ -1010,22 +1007,20 @@ fn evaluate_like(
 ) -> Bitmap {
     if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(ScalarValue::String(pat))) =
         (expr, pattern)
+        && let Some(page) = batch.columns.get(index)
+        && let ColumnData::Text(col) = &page.data
     {
-        if let Some(page) = batch.columns.get(index) {
-            if let ColumnData::Text(col) = &page.data {
-                let mut bitmap = Bitmap::new(batch.num_rows);
-                for i in 0..col.len() {
-                    // LIKE requires string semantics, so we use get_string here
-                    // TODO: optimize with byte-level pattern matching
-                    let value = col.get_string(i);
-                    let matches = like_match(&value, pat, !case_insensitive);
-                    if if negated { !matches } else { matches } {
-                        bitmap.set(i);
-                    }
-                }
-                return bitmap;
+        let mut bitmap = Bitmap::new(batch.num_rows);
+        for i in 0..col.len() {
+            // LIKE requires string semantics, so we use get_string here
+            // TODO: optimize with byte-level pattern matching
+            let value = col.get_string(i);
+            let matches = like_match(&value, pat, !case_insensitive);
+            if if negated { !matches } else { matches } {
+                bitmap.set(i);
             }
         }
+        return bitmap;
     }
     Bitmap::new(batch.num_rows)
 }
@@ -1038,29 +1033,27 @@ fn evaluate_rlike(
 ) -> Bitmap {
     if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(ScalarValue::String(pat))) =
         (expr, pattern)
+        && let Some(page) = batch.columns.get(index)
+        && let ColumnData::Text(col) = &page.data
     {
-        if let Some(page) = batch.columns.get(index) {
-            if let ColumnData::Text(col) = &page.data {
-                let mut bitmap = Bitmap::new(batch.num_rows);
-                for i in 0..col.len() {
-                    let value = col.get_string(i);
-                    let matches = regex_match(&value, pat);
-                    if if negated { !matches } else { matches } {
-                        bitmap.set(i);
-                    }
-                }
-                return bitmap;
+        let mut bitmap = Bitmap::new(batch.num_rows);
+        for i in 0..col.len() {
+            let value = col.get_string(i);
+            let matches = regex_match(&value, pat);
+            if if negated { !matches } else { matches } {
+                bitmap.set(i);
             }
         }
+        return bitmap;
     }
     Bitmap::new(batch.num_rows)
 }
 
 fn evaluate_is_null(expr: &PhysicalExpr, batch: &ColumnarBatch) -> Bitmap {
-    if let PhysicalExpr::Column { index, .. } = expr {
-        if let Some(page) = batch.columns.get(index) {
-            return page.null_bitmap.clone();
-        }
+    if let PhysicalExpr::Column { index, .. } = expr
+        && let Some(page) = batch.columns.get(index)
+    {
+        return page.null_bitmap.clone();
     }
     // For literals, they are never null in our system (ScalarValue::Null is handled but usually we don't IS NULL a literal in WHERE)
     // If we support complex expressions in IS NULL, we'd need full evaluation.

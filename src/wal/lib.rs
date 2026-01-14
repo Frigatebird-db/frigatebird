@@ -251,6 +251,7 @@
 
 #[cfg(doc)]
 extern crate self as walrus_rust;
+#[allow(clippy::module_inception)]
 pub mod wal;
 pub use wal::{
     Entry, FsyncSchedule, ReadConsistency, WalIndex, Walrus, disable_fd_backend, enable_fd_backend,

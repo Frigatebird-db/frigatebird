@@ -1296,7 +1296,7 @@ fn long_end_to_end_stress_many_inserts_updates_deletes() {
             .execute(&format!(
                 "INSERT INTO stress (id, value) VALUES ('id{i}', '{value}')"
             ))
-            .expect(&format!("insert {i}"));
+            .unwrap_or_else(|_| panic!("insert {i}"));
 
         if i % 10 == 9 {
             // Verify order every 10 inserts
@@ -1318,7 +1318,7 @@ fn long_end_to_end_stress_many_inserts_updates_deletes() {
             .execute(&format!(
                 "UPDATE stress SET value = '{new_value}' WHERE value = '{old_value}'"
             ))
-            .expect(&format!("update {i}"));
+            .unwrap_or_else(|_| panic!("update {i}"));
 
         if i % 5 == 4 {
             let rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);
@@ -1340,7 +1340,7 @@ fn long_end_to_end_stress_many_inserts_updates_deletes() {
         };
         executor
             .execute(&format!("DELETE FROM stress WHERE value = '{value}'"))
-            .expect(&format!("delete {i}"));
+            .unwrap_or_else(|_| panic!("delete {i}"));
 
         if i % 5 == 4 {
             let rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);
@@ -1361,7 +1361,7 @@ fn long_end_to_end_stress_many_inserts_updates_deletes() {
                 "INSERT INTO stress (id, value) VALUES ('new{i}', '{}')",
                 i * 5
             ))
-            .expect(&format!("new insert {i}"));
+            .unwrap_or_else(|_| panic!("new insert {i}"));
     }
 
     let final_rows = collect_table_rows(&handler, &directory, "stress", &["id", "value"]);

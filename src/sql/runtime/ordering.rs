@@ -242,10 +242,10 @@ impl MergeOperator {
                 keys,
                 row_ids,
             });
-            let key = merge_runs[run_idx].keys.get(0).cloned().ok_or_else(|| {
+            let key = merge_runs[run_idx].keys.first().cloned().ok_or_else(|| {
                 SqlExecutionError::OperationFailed("missing order key for merge run".into())
             })?;
-            let row_id = merge_runs[run_idx].row_ids.get(0).copied().unwrap_or(0);
+            let row_id = merge_runs[run_idx].row_ids.first().copied().unwrap_or(0);
             heap.push(HeapItem::new(
                 run_idx,
                 0,

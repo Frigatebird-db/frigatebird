@@ -22,6 +22,7 @@ pub struct FilterOperator<'a> {
 }
 
 impl<'a> FilterOperator<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         page_handler: &'a PageHandler,
         expr: &'a Expr,

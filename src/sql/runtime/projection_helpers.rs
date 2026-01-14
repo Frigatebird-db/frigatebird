@@ -104,14 +104,14 @@ fn push_expression_item(
     table_name: &str,
     plan: &mut ProjectionPlan,
 ) -> Result<(), SqlExecutionError> {
-    if let Some(column_name) = column_name_from_expr(&expr) {
-        if let Some(&ordinal) = column_ordinals.get(&column_name) {
-            let header = alias.unwrap_or_else(|| column_name.clone());
-            plan.headers.push(header);
-            plan.items.push(ProjectionItem::Direct { ordinal });
-            plan.required_ordinals.insert(ordinal);
-            return Ok(());
-        }
+    if let Some(column_name) = column_name_from_expr(&expr)
+        && let Some(&ordinal) = column_ordinals.get(&column_name)
+    {
+        let header = alias.unwrap_or_else(|| column_name.clone());
+        plan.headers.push(header);
+        plan.items.push(ProjectionItem::Direct { ordinal });
+        plan.required_ordinals.insert(ordinal);
+        return Ok(());
     }
 
     let ordinals = collect_expr_column_ordinals(&expr, column_ordinals, table_name)?;

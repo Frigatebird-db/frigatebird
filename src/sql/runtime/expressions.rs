@@ -895,8 +895,8 @@ fn evaluate_case_expression_vectorized(
         None
     };
 
-    let numeric_output = result_pages.iter().all(page_is_numeric)
-        && else_page.as_ref().map_or(true, page_is_numeric);
+    let numeric_output =
+        result_pages.iter().all(page_is_numeric) && else_page.as_ref().is_none_or(page_is_numeric);
 
     if numeric_output {
         let mut values: Vec<f64> = Vec::with_capacity(batch.num_rows);
@@ -1121,8 +1121,8 @@ fn evaluate_row_case_expr(
                 .unwrap_or(false)
         } else {
             let cond = evaluate_row_expr(condition, row_idx, dataset)?;
-            let cond_bool = cond.as_bool().unwrap_or(false);
-            cond_bool
+
+            cond.as_bool().unwrap_or(false)
         };
 
         if matches {
@@ -1246,10 +1246,7 @@ where
         }
         let lhs = numeric_value_at(left, idx)?;
         let rhs = numeric_value_at(right, idx)?;
-        let matches = lhs
-            .partial_cmp(&rhs)
-            .map(|ord| predicate(ord))
-            .unwrap_or(false);
+        let matches = lhs.partial_cmp(&rhs).map(&predicate).unwrap_or(false);
         col.push(&bool_to_text(matches));
     }
 

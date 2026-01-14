@@ -82,6 +82,7 @@ impl std::fmt::Debug for PipelineStep {
 }
 
 impl PipelineStep {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         table: String,
         column: String,
@@ -141,10 +142,8 @@ impl PipelineStep {
             let bitmap = evaluate_filters(&self.filters, &batch);
             let filtered_batch = batch.filter_by_bitmap(&bitmap);
 
-            if filtered_batch.num_rows > 0 {
-                if self.current_producer.send(filtered_batch).is_err() {
-                    return;
-                }
+            if filtered_batch.num_rows > 0 && self.current_producer.send(filtered_batch).is_err() {
+                return;
             }
 
             base_row += page_len;
@@ -185,10 +184,8 @@ impl PipelineStep {
             let bitmap = evaluate_filters(&self.filters, &batch);
             let filtered_batch = batch.filter_by_bitmap(&bitmap);
 
-            if filtered_batch.num_rows > 0 {
-                if self.current_producer.send(filtered_batch).is_err() {
-                    return;
-                }
+            if filtered_batch.num_rows > 0 && self.current_producer.send(filtered_batch).is_err() {
+                return;
             }
 
             idx = end;
@@ -226,11 +223,9 @@ impl PipelineStep {
             let bitmap = evaluate_filters(&self.filters, &batch);
             let filtered_batch = batch.filter_by_bitmap(&bitmap);
 
-            if filtered_batch.num_rows > 0 {
-                if self.current_producer.send(filtered_batch).is_err() {
-                    sent_termination = true;
-                    break;
-                }
+            if filtered_batch.num_rows > 0 && self.current_producer.send(filtered_batch).is_err() {
+                sent_termination = true;
+                break;
             }
         }
         if !sent_termination {

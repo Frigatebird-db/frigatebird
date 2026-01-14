@@ -1,4 +1,4 @@
-use idk_uwu_ig::cache::page_cache::{PageCacheEntryCompressed, PageCacheEntryUncompressed};
+use idk_uwu_ig::cache::page_cache::PageCacheEntryUncompressed;
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::page::Page;

@@ -94,6 +94,12 @@ pub struct PageCache<T> {
     lifecycle: Option<Arc<dyn CacheLifecycle<T>>>,
 }
 
+impl<T> Default for PageCache<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> PageCache<T> {
     pub fn new() -> Self {
         PageCache {
@@ -109,6 +115,10 @@ impl<T> PageCache<T> {
 
     pub fn len(&self) -> usize {
         self.store.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.store.is_empty()
     }
 
     pub fn with_lifecycle(lifecycle: Option<Arc<dyn CacheLifecycle<T>>>) -> Self {
@@ -132,7 +142,7 @@ impl<T> PageCache<T> {
 
         let entry = PageCacheEntry {
             page: Arc::new(page),
-            used_time: used_time,
+            used_time,
         };
 
         self.store.insert(id.to_string(), entry);

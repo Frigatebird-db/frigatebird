@@ -9,6 +9,12 @@ a dumb helper, nothing else
 */
 pub struct Compressor {}
 
+impl Default for Compressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compressor {
     pub fn new() -> Self {
         Compressor {}

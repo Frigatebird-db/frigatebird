@@ -2,7 +2,6 @@ use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
 use idk_uwu_ig::entry::Entry;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{MetaJournal, PageDirectory, TableMetaStore};
-use idk_uwu_ig::page::Page;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use idk_uwu_ig::wal::{FsyncSchedule, ReadConsistency, Walrus};
@@ -136,7 +135,7 @@ fn setup_writer_components() -> (
     let allocator: Arc<dyn PageAllocator> =
         Arc::new(DirectBlockAllocator::new().expect("allocator creation failed"));
     let wal = test_wal_instance();
-    let wal_arc = wal.wal();
+    let _wal_arc = wal.wal();
     let meta_wal = wal.meta_wal();
     let meta_journal = Arc::new(MetaJournal::new(meta_wal, 16));
     meta_journal
@@ -499,7 +498,7 @@ fn writer_submit_sequential_jobs_ordering() {
 
 #[test]
 fn writer_write_back_populates_cache() {
-    let (writer, page_handler, _, _wal_guard) = setup_writer();
+    let (writer, _page_handler, _, _wal_guard) = setup_writer();
 
     let job = UpdateJob::new(
         "users",
@@ -594,7 +593,7 @@ fn writer_submit_after_shutdown_returns_error() {
 
 #[test]
 fn writer_concurrent_submits() {
-    let (writer, page_handler, directory, _wal_guard) = setup_writer();
+    let (writer, _page_handler, directory, _wal_guard) = setup_writer();
     let writer_clone1 = Arc::clone(&writer);
     let writer_clone2 = Arc::clone(&writer);
     let writer_clone3 = Arc::clone(&writer);
@@ -997,14 +996,14 @@ fn integration_concurrent_writes_different_tables() {
 
 #[test]
 fn integration_write_with_cache_eviction() {
-    let (writer, page_handler, directory, _wal_guard) = setup_writer();
+    let (writer, _page_handler, directory, _wal_guard) = setup_writer();
 
     // Write more than cache size (10 pages) to trigger evictions
     for i in 0..15 {
         let job = UpdateJob::new(
             "users",
             vec![ColumnUpdate::new(
-                &format!("col_{}", i),
+                format!("col_{}", i),
                 vec![UpdateOp::Append {
                     entry: Entry::new(&format!("data_{}", i)),
                 }],

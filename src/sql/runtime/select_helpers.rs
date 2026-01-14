@@ -21,13 +21,13 @@ pub(crate) fn build_projection_alias_map(
             .expect("projection items and headers must align")
         {
             ProjectionItem::Direct { ordinal } => {
-                if let Some(column) = columns.get(*ordinal) {
-                    if header != &column.name {
-                        map.insert(
-                            header.clone(),
-                            Expr::Identifier(Ident::new(column.name.clone())),
-                        );
-                    }
+                if let Some(column) = columns.get(*ordinal)
+                    && header != &column.name
+                {
+                    map.insert(
+                        header.clone(),
+                        Expr::Identifier(Ident::new(column.name.clone())),
+                    );
                 }
             }
             ProjectionItem::Computed { expr } => {
@@ -188,10 +188,10 @@ pub(crate) fn rewrite_aliases_in_expr(expr: &Expr, alias_map: &HashMap<String, E
             .cloned()
             .unwrap_or_else(|| Identifier(ident.clone())),
         CompoundIdentifier(idents) => {
-            if idents.len() == 1 {
-                if let Some(replacement) = alias_map.get(&idents[0].value) {
-                    return replacement.clone();
-                }
+            if idents.len() == 1
+                && let Some(replacement) = alias_map.get(&idents[0].value)
+            {
+                return replacement.clone();
             }
             CompoundIdentifier(idents.clone())
         }
@@ -201,7 +201,7 @@ pub(crate) fn rewrite_aliases_in_expr(expr: &Expr, alias_map: &HashMap<String, E
             right: Box::new(rewrite_aliases_in_expr(right, alias_map)),
         },
         UnaryOp { op, expr } => Expr::UnaryOp {
-            op: op.clone(),
+            op: *op,
             expr: Box::new(rewrite_aliases_in_expr(expr, alias_map)),
         },
         Nested(inner) => Expr::Nested(Box::new(rewrite_aliases_in_expr(inner, alias_map))),
@@ -217,7 +217,7 @@ pub(crate) fn rewrite_aliases_in_expr(expr: &Expr, alias_map: &HashMap<String, E
                 }
             }
             if let Some(filter) = &mut function.filter {
-                *filter = Box::new(rewrite_aliases_in_expr(filter, alias_map));
+                **filter = rewrite_aliases_in_expr(filter, alias_map);
             }
             for order in &mut function.order_by {
                 order.expr = rewrite_aliases_in_expr(&order.expr, alias_map);

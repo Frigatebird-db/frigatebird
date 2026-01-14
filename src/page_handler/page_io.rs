@@ -41,7 +41,7 @@ impl AlignedBuffer {
     fn new(capacity: usize) -> Self {
         let capacity = if capacity == 0 { ALIGNMENT } else { capacity };
         // Ensure capacity is a multiple of alignment for O_DIRECT length requirements
-        let aligned_capacity = (capacity + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
+        let aligned_capacity = capacity.div_ceil(ALIGNMENT) * ALIGNMENT;
 
         let layout = Layout::from_size_align(aligned_capacity, ALIGNMENT).unwrap();
         let ptr = unsafe { alloc(layout) };
@@ -302,10 +302,10 @@ impl PageIO {
 }
 
 fn ensure_parent_dir(path: &str) -> io::Result<()> {
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
     Ok(())
 }
@@ -365,7 +365,7 @@ where
     while processed < expected {
         ring.submit_and_wait(1)?;
         let mut cq = ring.completion();
-        while let Some(cqe) = cq.next() {
+        for cqe in cq {
             processed += 1;
             let idx = cqe.user_data() as usize;
             on_complete(idx, cqe.result())?;

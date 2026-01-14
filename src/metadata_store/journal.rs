@@ -60,12 +60,8 @@ impl MetaJournal {
     }
 
     pub fn append_commit(&self, table: &str, record: &MetaRecord) -> io::Result<()> {
-        let bytes = to_bytes::<_, 512>(record).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("journal serialize failed: {err:?}"),
-            )
-        })?;
+        let bytes = to_bytes::<_, 512>(record)
+            .map_err(|err| io::Error::other(format!("journal serialize failed: {err:?}")))?;
         let topic = self.topic_for_table(table);
         self.wal.append_for_topic(&topic, &bytes)
     }
@@ -83,9 +79,9 @@ impl MetaJournal {
                         let mut aligned = AlignedVec::with_capacity(entry.data.len());
                         aligned.extend_from_slice(&entry.data);
                         let archived = unsafe { archived_root::<MetaRecord>(&aligned) };
-                        let record = archived.deserialize(&mut Infallible).map_err(|_| {
-                            io::Error::new(io::ErrorKind::Other, "journal deserialize failed")
-                        })?;
+                        let record = archived
+                            .deserialize(&mut Infallible)
+                            .map_err(|_| io::Error::other("journal deserialize failed"))?;
                         self.apply_record(directory, record);
                     }
                     Ok(None) => break,

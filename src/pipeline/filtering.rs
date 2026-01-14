@@ -27,6 +27,7 @@ pub(crate) fn apply_qualify_filter(
     Ok(batch.filter_by_bitmap(&bitmap))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_filter_expr(
     page_handler: &PageHandler,
     batch: ColumnarBatch,

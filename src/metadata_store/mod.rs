@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 use crate::sql::types::DataType;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use std::collections::{HashMap, HashSet};
@@ -98,37 +99,23 @@ pub struct ColumnCatalog {
 /// Supported statistic kinds emitted by the writer.
 #[derive(Clone, Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 #[archive(check_bytes)]
+#[derive(Default)]
 pub enum ColumnStatsKind {
     Int64,
     Float64,
+    #[default]
     Text,
-}
-
-impl Default for ColumnStatsKind {
-    fn default() -> Self {
-        ColumnStatsKind::Text
-    }
 }
 
 /// Lightweight per-column statistics tracked for each physical page.
 #[derive(Clone, Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 #[archive(check_bytes)]
+#[derive(Default)]
 pub struct ColumnStats {
     pub min_value: Option<String>,
     pub max_value: Option<String>,
     pub null_count: u64,
     pub kind: ColumnStatsKind,
-}
-
-impl Default for ColumnStats {
-    fn default() -> Self {
-        ColumnStats {
-            min_value: None,
-            max_value: None,
-            null_count: 0,
-            kind: ColumnStatsKind::default(),
-        }
-    }
 }
 
 /// Catalog entry describing a table schema.
@@ -369,10 +356,10 @@ impl TableMetaStore {
     }
 
     fn bump_next_page_id(&mut self, id: &str) {
-        if let Ok(value) = u64::from_str_radix(id, 16) {
-            if value >= self.next_page_id {
-                self.next_page_id = value.wrapping_add(1);
-            }
+        if let Ok(value) = u64::from_str_radix(id, 16)
+            && value >= self.next_page_id
+        {
+            self.next_page_id = value.wrapping_add(1);
         }
     }
 
@@ -403,15 +390,14 @@ impl TableMetaStore {
             return;
         }
 
-        if let Some(catalog) = self.tables.get_mut(DEFAULT_TABLE) {
-            if catalog.column(column).is_none() {
-                if catalog.insert_column(column.to_string(), DataType::String) {
-                    self.column_chains.insert(
-                        TableColumnKey::new(DEFAULT_TABLE, column),
-                        ColumnChain::new(),
-                    );
-                }
-            }
+        if let Some(catalog) = self.tables.get_mut(DEFAULT_TABLE)
+            && catalog.column(column).is_none()
+            && catalog.insert_column(column.to_string(), DataType::String)
+        {
+            self.column_chains.insert(
+                TableColumnKey::new(DEFAULT_TABLE, column),
+                ColumnChain::new(),
+            );
         }
     }
 

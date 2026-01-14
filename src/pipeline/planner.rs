@@ -126,37 +126,37 @@ fn extract_sort_key_filters(
                 Ok(left_ok && right_ok)
             }
             BinaryOperator::Eq => {
-                if let Some(column_name) = column_name_from_expr(left) {
-                    if sort_names.contains(column_name.as_str()) {
-                        let value = match expr_to_string(right) {
-                            Ok(value) => value,
-                            Err(_) => return Ok(false),
-                        };
-                        if let Some(existing) = filters.get(&column_name) {
-                            if compare_strs(existing, &value) != Ordering::Equal {
-                                return Ok(false);
-                            }
-                        } else {
-                            filters.insert(column_name.clone(), value);
+                if let Some(column_name) = column_name_from_expr(left)
+                    && sort_names.contains(column_name.as_str())
+                {
+                    let value = match expr_to_string(right) {
+                        Ok(value) => value,
+                        Err(_) => return Ok(false),
+                    };
+                    if let Some(existing) = filters.get(&column_name) {
+                        if compare_strs(existing, &value) != Ordering::Equal {
+                            return Ok(false);
                         }
-                        return Ok(true);
+                    } else {
+                        filters.insert(column_name.clone(), value);
                     }
+                    return Ok(true);
                 }
-                if let Some(column_name) = column_name_from_expr(right) {
-                    if sort_names.contains(column_name.as_str()) {
-                        let value = match expr_to_string(left) {
-                            Ok(value) => value,
-                            Err(_) => return Ok(false),
-                        };
-                        if let Some(existing) = filters.get(&column_name) {
-                            if compare_strs(existing, &value) != Ordering::Equal {
-                                return Ok(false);
-                            }
-                        } else {
-                            filters.insert(column_name.clone(), value);
+                if let Some(column_name) = column_name_from_expr(right)
+                    && sort_names.contains(column_name.as_str())
+                {
+                    let value = match expr_to_string(left) {
+                        Ok(value) => value,
+                        Err(_) => return Ok(false),
+                    };
+                    if let Some(existing) = filters.get(&column_name) {
+                        if compare_strs(existing, &value) != Ordering::Equal {
+                            return Ok(false);
                         }
-                        return Ok(true);
+                    } else {
+                        filters.insert(column_name.clone(), value);
                     }
+                    return Ok(true);
                 }
                 Ok(true)
             }
@@ -273,18 +273,22 @@ fn build_prefix_from_clause(
 
 fn extract_sort_equality(expr: &Expr, sort_names: &HashSet<&str>) -> Option<(String, String)> {
     match expr {
-        Expr::BinaryOp { left, op, right } if matches!(op, BinaryOperator::Eq) => {
-            if let Some(column) = column_name_from_expr(left) {
-                if sort_names.contains(column.as_str()) {
-                    let value = expr_to_string(right).ok()?;
-                    return Some((column, value));
-                }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => {
+            if let Some(column) = column_name_from_expr(left)
+                && sort_names.contains(column.as_str())
+            {
+                let value = expr_to_string(right).ok()?;
+                return Some((column, value));
             }
-            if let Some(column) = column_name_from_expr(right) {
-                if sort_names.contains(column.as_str()) {
-                    let value = expr_to_string(left).ok()?;
-                    return Some((column, value));
-                }
+            if let Some(column) = column_name_from_expr(right)
+                && sort_names.contains(column.as_str())
+            {
+                let value = expr_to_string(left).ok()?;
+                return Some((column, value));
             }
             None
         }
@@ -383,19 +387,17 @@ fn selection_uses_numeric_literal_on_string_sort(
     match expr {
         Expr::BinaryOp { left, op, right } => {
             if matches!(op, sqlparser::ast::BinaryOperator::Eq) {
-                if let Some(name) = crate::sql::runtime::helpers::column_name_from_expr(left) {
-                    if sort_names.contains(name.as_str()) {
-                        if is_numeric_literal(right) {
-                            return matches!(column_types.get(&name), Some(DataType::String));
-                        }
-                    }
+                if let Some(name) = crate::sql::runtime::helpers::column_name_from_expr(left)
+                    && sort_names.contains(name.as_str())
+                    && is_numeric_literal(right)
+                {
+                    return matches!(column_types.get(&name), Some(DataType::String));
                 }
-                if let Some(name) = crate::sql::runtime::helpers::column_name_from_expr(right) {
-                    if sort_names.contains(name.as_str()) {
-                        if is_numeric_literal(left) {
-                            return matches!(column_types.get(&name), Some(DataType::String));
-                        }
-                    }
+                if let Some(name) = crate::sql::runtime::helpers::column_name_from_expr(right)
+                    && sort_names.contains(name.as_str())
+                    && is_numeric_literal(left)
+                {
+                    return matches!(column_types.get(&name), Some(DataType::String));
                 }
             }
             selection_uses_numeric_literal_on_string_sort(left, sort_columns, column_types)

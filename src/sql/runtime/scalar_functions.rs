@@ -46,7 +46,7 @@ pub(crate) fn evaluate_scalar_function(
 
     match name.as_str() {
         "ABS" => {
-            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+            let value = args.first().and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("ABS requires numeric argument".into())
             })?;
             Ok(scalar_from_f64(value.abs()))
@@ -60,7 +60,7 @@ pub(crate) fn evaluate_scalar_function(
             if dataset.prefer_exact_numeric() {
                 return Ok(args.into_iter().next().unwrap());
             }
-            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+            let value = args.first().and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("ROUND requires numeric argument".into())
             })?;
             let digits = args
@@ -72,37 +72,37 @@ pub(crate) fn evaluate_scalar_function(
             Ok(scalar_from_f64((value * factor).round() / factor))
         }
         "CEIL" | "CEILING" => {
-            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+            let value = args.first().and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("CEIL requires numeric argument".into())
             })?;
             Ok(scalar_from_f64(value.ceil()))
         }
         "FLOOR" => {
-            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+            let value = args.first().and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("FLOOR requires numeric argument".into())
             })?;
             Ok(scalar_from_f64(value.floor()))
         }
         "EXP" => {
-            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+            let value = args.first().and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("EXP requires numeric argument".into())
             })?;
             Ok(scalar_from_f64(value.exp()))
         }
         "LN" if args.len() == 1 => {
-            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+            let value = args.first().and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("LN requires numeric argument".into())
             })?;
             Ok(scalar_from_f64(value.ln()))
         }
         "LOG" if args.len() == 1 => {
-            let value = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+            let value = args.first().and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("LOG requires numeric argument".into())
             })?;
             Ok(scalar_from_f64(value.log10()))
         }
         "LOG" if args.len() == 2 => {
-            let base = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+            let base = args.first().and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("LOG requires numeric base".into())
             })?;
             let value = args.get(1).and_then(|v| v.as_f64()).ok_or_else(|| {
@@ -111,7 +111,7 @@ pub(crate) fn evaluate_scalar_function(
             Ok(scalar_from_f64(value.log(base)))
         }
         "POWER" => {
-            let base = args.get(0).and_then(|v| v.as_f64()).ok_or_else(|| {
+            let base = args.first().and_then(|v| v.as_f64()).ok_or_else(|| {
                 SqlExecutionError::Unsupported("POWER requires numeric base".into())
             })?;
             let exponent = args.get(1).and_then(|v| v.as_f64()).ok_or_else(|| {

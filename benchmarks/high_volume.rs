@@ -302,10 +302,9 @@ fn main() {
             values.join(", ")
         );
 
-        executor.execute(&insert_sql).expect(&format!(
-            "Failed to insert batch starting at {}",
-            batch_start
-        ));
+        executor
+            .execute(&insert_sql)
+            .unwrap_or_else(|_| panic!("Failed to insert batch starting at {}", batch_start));
 
         total_inserted += batch_end - batch_start;
 

@@ -8,6 +8,7 @@ use sqlparser::ast::{Expr, SetExpr, Statement, Value};
 use std::collections::HashMap;
 
 impl SqlExecutor {
+    #[allow(clippy::type_complexity)]
     pub(crate) fn parse_insert_values(
         &self,
         statement: Statement,

@@ -220,17 +220,14 @@ impl WorkerContext {
     fn handle_job(&mut self, job: UpdateJob) {
         let UpdateJob { table, mut columns } = job;
 
-        if columns.len() == 1 {
-            if let Some(column_update) = columns.get_mut(0) {
-                if column_update.operations.len() == 1 {
-                    if matches!(column_update.operations[0], UpdateOp::BufferRow { .. }) {
-                        if let UpdateOp::BufferRow { row } = column_update.operations.remove(0) {
-                            self.buffer_row(&table, row);
-                            return;
-                        }
-                    }
-                }
-            }
+        if columns.len() == 1
+            && let Some(column_update) = columns.get_mut(0)
+            && column_update.operations.len() == 1
+            && matches!(column_update.operations[0], UpdateOp::BufferRow { .. })
+            && let UpdateOp::BufferRow { row } = column_update.operations.remove(0)
+        {
+            self.buffer_row(&table, row);
+            return;
         }
 
         let mut staged = Vec::with_capacity(columns.len());
@@ -376,16 +373,13 @@ impl WorkerContext {
             .map(|catalog| catalog.rows_per_page_group)
             .unwrap_or(ROWS_PER_PAGE_GROUP);
 
-        let entry = self
-            .buffered_rows
-            .entry(table.to_string())
-            .or_insert_with(Vec::new);
+        let entry = self.buffered_rows.entry(table.to_string()).or_default();
         entry.push(row);
 
-        if entry.len() >= rows_per_group as usize {
-            if let Some(rows_to_flush) = self.buffered_rows.remove(table) {
-                self.flush_page_group(table, rows_to_flush);
-            }
+        if entry.len() >= rows_per_group as usize
+            && let Some(rows_to_flush) = self.buffered_rows.remove(table)
+        {
+            self.flush_page_group(table, rows_to_flush);
         }
     }
 
@@ -622,7 +616,7 @@ impl WorkerContext {
         }
 
         let row_count = column_pages
-            .get(0)
+            .first()
             .map(|page| page.page.len() as u64)
             .unwrap_or(0);
         if row_count == 0 {

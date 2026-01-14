@@ -1,15 +1,9 @@
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
-use idk_uwu_ig::entry::Entry;
+use idk_uwu_ig::cache::page_cache::PageCache;
 use idk_uwu_ig::helpers::compressor::Compressor;
 use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
-use idk_uwu_ig::ops_handler::{
-    create_table_from_plan, delete_row, insert_sorted_row, overwrite_row, read_row,
-};
-use idk_uwu_ig::page::Page;
+use idk_uwu_ig::ops_handler::read_row;
 use idk_uwu_ig::page_handler::page_io::PageIO;
 use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::ColumnSpec;
-use idk_uwu_ig::sql::CreateTablePlan;
 use idk_uwu_ig::sql::executor::SqlExecutor;
 use std::sync::{Arc, RwLock};
 
@@ -67,7 +61,7 @@ fn test_rapid_insert_delete_insert_same_value() {
         .expect("delete");
 
     // Verify table is empty
-    let count = executor
+    executor
         .execute("INSERT INTO flip_flop (id, value) VALUES ('r2', '100')")
         .expect("insert to get count");
     let row = read_row(&handler, "flip_flop", 0).expect("read");
@@ -155,7 +149,7 @@ fn test_many_duplicates_sort_stability() {
 
     // Verify all 20 rows exist
     for i in 0..20 {
-        let row = read_row(&handler, "dupes", i).expect(&format!("read row {i}"));
+        let row = read_row(&handler, "dupes", i).unwrap_or_else(|_| panic!("read row {i}"));
         let score: i32 = row[1].parse().expect("parse score");
         assert!(score == 100 || score == 200 || score == 300);
     }
@@ -181,7 +175,7 @@ fn test_many_duplicates_sort_stability() {
 
     // Verify all rows still exist and are sorted
     for i in 0..20 {
-        let row = read_row(&handler, "dupes", i).expect(&format!("read row {i}"));
+        let row = read_row(&handler, "dupes", i).unwrap_or_else(|_| panic!("read row {i}"));
         let score: i32 = row[1].parse().expect("parse score");
 
         if i > 0 {
@@ -293,7 +287,7 @@ fn test_special_characters_and_edge_values() {
             .execute(&format!(
                 "INSERT INTO special (id, val) VALUES ('{id}', '{escaped_val}')"
             ))
-            .expect(&format!("insert {id}"));
+            .unwrap_or_else(|_| panic!("insert {id}"));
     }
 
     // Verify all rows inserted
@@ -393,7 +387,7 @@ fn test_numeric_edge_cases() {
             .execute(&format!(
                 "INSERT INTO numbers (id, val) VALUES ('{id}', '{val}')"
             ))
-            .expect(&format!("insert {id}"));
+            .unwrap_or_else(|_| panic!("insert {id}"));
     }
 
     // Verify all rows are sorted numerically (not lexicographically)
@@ -438,7 +432,7 @@ fn test_mixed_numeric_string_sorting() {
             .execute(&format!(
                 "INSERT INTO mixed (id, val) VALUES ('{id}', '{val}')"
             ))
-            .expect(&format!("insert {id}"));
+            .unwrap_or_else(|_| panic!("insert {id}"));
     }
 
     // Just verify no panics and we can read all rows
@@ -466,7 +460,7 @@ fn test_update_same_row_multiple_times() {
             .execute(&format!(
                 "UPDATE updates SET val = 'v{i}', counter = '{i}' WHERE id = 'r1'"
             ))
-            .expect(&format!("update {i}"));
+            .unwrap_or_else(|_| panic!("update {i}"));
 
         // Verify update took effect
         let row = read_row(&handler, "updates", 0).expect("read");
@@ -593,7 +587,7 @@ fn test_delete_all_rows_one_by_one() {
     for i in 0..count {
         executor
             .execute(&format!("DELETE FROM delete_all WHERE val = '{i}'"))
-            .expect(&format!("delete {i}"));
+            .unwrap_or_else(|_| panic!("delete {i}"));
 
         // Verify count decreases
         let remaining = count - i - 1;
@@ -643,9 +637,9 @@ fn test_insert_after_delete_all() {
 
     // Verify new rows exist
     for i in 0..5 {
-        let row = read_row(&handler, "reset", i).expect(&format!("read {i}"));
+        let row = read_row(&handler, "reset", i).unwrap_or_else(|_| panic!("read {i}"));
         let val: i32 = row[1].parse().unwrap();
-        assert!(val >= 10 && val < 15);
+        assert!((10..15).contains(&val));
     }
 }
 
