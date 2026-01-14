@@ -368,7 +368,7 @@ fn evaluate_case_expression(
     }
 }
 
-pub(super) fn evaluate_row_expr(
+pub(crate) fn evaluate_row_expr(
     expr: &Expr,
     row_idx: u64,
     dataset: &AggregateDataset,

@@ -29,23 +29,6 @@ impl BatchStream for SingleBatchStream {
     }
 }
 
-// Legacy batch merge helper (unused after streaming refactor).
-/*
-pub fn merge_stream_to_batch(
-    mut stream: Box<dyn BatchStream>,
-) -> Result<ColumnarBatch, SqlExecutionError> {
-    let mut merged = ColumnarBatch::new();
-    while let Some(batch) = stream.next_batch()? {
-        if merged.num_rows == 0 && merged.columns.is_empty() {
-            merged = batch;
-        } else {
-            merged.append(&batch);
-        }
-    }
-    Ok(merged)
-}
-*/
-
 pub fn collect_stream_batches(
     mut stream: Box<dyn BatchStream>,
 ) -> Result<Vec<ColumnarBatch>, SqlExecutionError> {

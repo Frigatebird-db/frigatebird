@@ -4,7 +4,7 @@ mod aggregation_exec;
 pub mod batch;
 mod executor_types;
 mod executor_utils;
-mod expressions;
+pub(crate) mod expressions;
 pub(crate) mod grouping_helpers;
 pub(crate) mod helpers;
 mod ordering;
@@ -18,14 +18,16 @@ pub(crate) mod select_helpers;
 mod scan_helpers_exec;
 mod row_functions;
 mod scalar_functions;
-pub(crate) mod scan_helpers;
 mod spill;
+mod projection_exec;
+mod limit_exec;
+mod physical_ordinals;
+mod sort_exec;
 pub mod values;
 
 use self::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
 use executor_types::{GroupByInfo, GroupingSetPlan, VectorAggregationOutput};
 use executor_utils::{rows_to_batch};
-use self::spill::SpillManager;
 use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{
@@ -37,7 +39,6 @@ use crate::ops_handler::{
 };
 use crate::page::Page;
 use crate::page_handler::PageHandler;
-use crate::pipeline::{Job, PipelineBatch, PipelineStep};
 use crate::sql::FilterExpr;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::planner::ExpressionPlanner;
@@ -53,7 +54,7 @@ use sqlparser::ast::{
 };
 use sqlparser::parser::ParserError;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -75,7 +76,6 @@ use helpers::{
     collect_expr_column_ordinals, column_name_from_expr, expr_to_string, object_name_to_string,
     table_with_joins_to_name,
 };
-use ordering::{MergeOperator, build_group_order_key};
 
 pub(crate) use aggregates::AggregateProjectionPlan;
 pub(crate) use executor_types::{AggregatedRow, GroupKey, ProjectionItem, ProjectionPlan};
@@ -87,12 +87,10 @@ pub(crate) use ordering::{
 };
 pub(crate) use expressions::evaluate_expression_on_batch;
 pub(crate) use grouping_helpers::evaluate_group_keys_on_batch;
-use physical_evaluator::PhysicalEvaluator;
-use projection_helpers::{build_projection, materialize_columns};
+use projection_helpers::build_projection;
 use scan_stream::{
     BatchStream, PipelineBatchStream, PipelineScanBuilder, SingleBatchStream,
 };
-use scan_helpers::{SortKeyPrefix, collect_sort_key_filters, collect_sort_key_prefixes};
 use values::{
     CachedValue, ScalarValue, cached_to_scalar_with_type, compare_strs,
 };
@@ -237,6 +235,26 @@ impl SqlExecutor {
     pub(crate) fn table_catalog(&self, table: &str) -> Option<TableCatalog> {
         self.page_directory.table_catalog(table)
     }
+
+    pub(crate) fn page_handler(&self) -> &Arc<PageHandler> {
+        &self.page_handler
+    }
+
+    pub(crate) fn writer(&self) -> &Writer {
+        &self.writer
+    }
+
+    pub(crate) fn use_writer_inserts(&self) -> bool {
+        self.use_writer_inserts
+    }
+
+    pub(crate) fn page_directory(&self) -> &Arc<PageDirectory> {
+        &self.page_directory
+    }
+
+    pub(crate) fn meta_journal(&self) -> Option<&MetaJournal> {
+        self.meta_journal.as_ref().map(|journal| journal.as_ref())
+    }
     pub fn new(page_handler: Arc<PageHandler>, page_directory: Arc<PageDirectory>) -> Self {
         Self::new_with_writer_mode(page_handler, page_directory, true)
     }
@@ -346,31 +364,8 @@ impl SqlExecutor {
             ));
         }
         let statement = statements.remove(0);
-        match statement {
-            Statement::CreateTable { .. } => self.execute_create(statement),
-            Statement::Insert { .. } => self.execute_insert(statement),
-            Statement::Update {
-                table,
-                assignments,
-                selection,
-                returning,
-                from,
-                ..
-            } => self.execute_update(table, assignments, selection, returning, from),
-            Statement::Delete {
-                tables,
-                from,
-                using,
-                selection,
-                returning,
-                order_by,
-                limit,
-                ..
-            } => self.execute_delete(tables, from, using, selection, returning, order_by, limit),
-            other => Err(SqlExecutionError::Unsupported(format!(
-                "{other:?} is not supported yet"
-            ))),
-        }
+        crate::pipeline::dispatcher::execute_statement(self, statement)?;
+        Ok(())
     }
 
     pub fn query(&self, sql: &str) -> Result<SelectResult, SqlExecutionError> {
@@ -384,260 +379,16 @@ impl SqlExecutor {
             ));
         }
 
-        match statements.remove(0) {
-            Statement::Query(query) => self.execute_select(*query),
-            other => Err(SqlExecutionError::Unsupported(format!(
-                "{other:?} is not supported yet"
-            ))),
+        let statement = statements.remove(0);
+        match crate::pipeline::dispatcher::execute_statement(self, statement)? {
+            Some(result) => Ok(result),
+            None => Err(SqlExecutionError::Unsupported(
+                "expected query statement".into(),
+            )),
         }
     }
 
     // select.rs and select_exec.rs provide the SELECT flow.
-
-    pub(crate) fn build_projection_batch(
-        &self,
-        batch: &ColumnarBatch,
-        projection_plan: &ProjectionPlan,
-        catalog: &TableCatalog,
-    ) -> Result<ColumnarBatch, SqlExecutionError> {
-        let mut final_batch = ColumnarBatch::with_capacity(projection_plan.items.len());
-        final_batch.num_rows = batch.num_rows;
-        final_batch.row_ids = batch.row_ids.clone();
-        for (idx, item) in projection_plan.items.iter().enumerate() {
-            let column_page = match item {
-                ProjectionItem::Direct { ordinal } => {
-                    batch.columns.get(ordinal).cloned().ok_or_else(|| {
-                        SqlExecutionError::OperationFailed(format!(
-                            "missing column ordinal {ordinal} in vectorized batch"
-                        ))
-                    })?
-                }
-                ProjectionItem::Computed { expr } => {
-                    evaluate_expression_on_batch(expr, batch, catalog)?
-                }
-            };
-            final_batch.columns.insert(idx, column_page);
-        }
-        Ok(final_batch)
-    }
-
-    pub(crate) fn apply_qualify_filter(
-        &self,
-        batch: ColumnarBatch,
-        expr: &Expr,
-        catalog: &TableCatalog,
-    ) -> Result<ColumnarBatch, SqlExecutionError> {
-        let filter_page = evaluate_expression_on_batch(expr, &batch, catalog)?;
-        let bitmap = boolean_bitmap_from_page(&filter_page)?;
-        if bitmap.count_ones() == batch.num_rows {
-            return Ok(batch);
-        }
-        if bitmap.count_ones() == 0 {
-            return Ok(ColumnarBatch::new());
-        }
-        Ok(batch.filter_by_bitmap(&bitmap))
-    }
-
-    pub(crate) fn apply_filter_expr(
-        &self,
-        batch: ColumnarBatch,
-        expr: &Expr,
-        physical_expr: Option<&PhysicalExpr>,
-        catalog: &TableCatalog,
-        table: &str,
-        columns: &[ColumnCatalog],
-        column_ordinals: &HashMap<String, usize>,
-        column_types: &HashMap<String, DataType>,
-    ) -> Result<ColumnarBatch, SqlExecutionError> {
-        if batch.num_rows == 0 {
-            return Ok(batch);
-        }
-
-        if let Some(physical_expr) = physical_expr {
-            let bitmap = PhysicalEvaluator::evaluate_filter(physical_expr, &batch);
-            return Ok(batch.filter_by_bitmap(&bitmap));
-        }
-
-        match evaluate_expression_on_batch(expr, &batch, catalog) {
-            Ok(filter_page) => {
-                let bitmap = boolean_bitmap_from_page(&filter_page)?;
-                Ok(batch.filter_by_bitmap(&bitmap))
-            }
-            Err(SqlExecutionError::Unsupported(_)) => {
-                let ordinals = collect_expr_column_ordinals(expr, column_ordinals, table)?;
-                let materialized = materialize_columns(
-                    &self.page_handler,
-                    table,
-                    columns,
-                    &ordinals,
-                    &batch.row_ids,
-                )?;
-                let matching_rows = filter_rows_with_expr(
-                    expr,
-                    &batch.row_ids,
-                    &materialized,
-                    column_ordinals,
-                    column_types,
-                    false,
-                )?;
-                if matching_rows.is_empty() {
-                    return Ok(ColumnarBatch::new());
-                }
-                let matching: HashSet<u64> = matching_rows.into_iter().collect();
-                let mut bitmap = Bitmap::new(batch.num_rows);
-                for (idx, row_id) in batch.row_ids.iter().enumerate() {
-                    if matching.contains(row_id) {
-                        bitmap.set(idx);
-                    }
-                }
-                Ok(batch.filter_by_bitmap(&bitmap))
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    pub(crate) fn execute_sort<I>(
-        &self,
-        batches: I,
-        clauses: &[OrderClause],
-        catalog: &TableCatalog,
-    ) -> Result<Vec<ColumnarBatch>, SqlExecutionError>
-    where
-        I: IntoIterator<Item = ColumnarBatch>,
-    {
-        if clauses.is_empty() {
-            return Ok(batches
-                .into_iter()
-                .filter(|batch| batch.num_rows > 0)
-                .collect());
-        }
-
-        let mut spill_manager = SpillManager::new()
-            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
-
-        for batch in batches.into_iter() {
-            if batch.num_rows == 0 {
-                continue;
-            }
-            let sorted = sort_batch_in_memory(&batch, clauses, catalog)?;
-            spill_manager
-                .spill_batch(sorted)
-                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
-        }
-
-        let runs = spill_manager
-            .finish()
-            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
-        if runs.len() <= 1 {
-            return Ok(runs);
-        }
-
-        let mut merge_operator =
-            MergeOperator::new(runs, clauses, catalog, SORT_OUTPUT_BATCH_SIZE)?;
-        let mut merged_batches = Vec::new();
-        while let Some(batch) = merge_operator.next_batch()? {
-            if batch.num_rows > 0 {
-                merged_batches.push(batch);
-            }
-        }
-        Ok(merged_batches)
-    }
-
-    pub(crate) fn apply_limit_offset<I>(
-        &self,
-        batches: I,
-        offset: usize,
-        limit: Option<usize>,
-    ) -> Result<Vec<ColumnarBatch>, SqlExecutionError>
-    where
-        I: IntoIterator<Item = ColumnarBatch>,
-    {
-        let mut rows_seen = 0usize;
-        let mut rows_emitted = 0usize;
-        let mut limited_batches = Vec::new();
-
-        for batch in batches.into_iter() {
-            if batch.num_rows == 0 {
-                continue;
-            }
-
-            if let Some(limit_value) = limit {
-                if rows_emitted >= limit_value {
-                    break;
-                }
-            }
-
-            let batch_end = rows_seen + batch.num_rows;
-            if batch_end <= offset {
-                rows_seen = batch_end;
-                continue;
-            }
-
-            let mut start_in_batch = 0usize;
-            if offset > rows_seen {
-                start_in_batch = offset - rows_seen;
-            }
-
-            let mut end_in_batch = batch.num_rows;
-            if let Some(limit_value) = limit {
-                let remaining = limit_value.saturating_sub(rows_emitted);
-                if remaining == 0 {
-                    break;
-                }
-                end_in_batch = (start_in_batch + remaining).min(batch.num_rows);
-            }
-
-            if start_in_batch >= end_in_batch {
-                rows_seen = batch_end;
-                continue;
-            }
-
-            let slice = batch.slice(start_in_batch, end_in_batch);
-            if slice.num_rows > 0 {
-                rows_emitted += slice.num_rows;
-                limited_batches.push(slice);
-            }
-            rows_seen = batch_end;
-
-            if let Some(limit_value) = limit {
-                if rows_emitted >= limit_value {
-                    break;
-                }
-            }
-        }
-
-        Ok(limited_batches)
-    }
-
-    fn execute_create(&self, statement: Statement) -> Result<(), SqlExecutionError> {
-        let plan: CreateTablePlan = plan_create_table_statement(&statement)?;
-        create_table_from_plan(&self.page_directory, &plan)
-            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
-
-        // Write table schema to metadata journal for crash recovery
-        if let Some(ref journal) = self.meta_journal {
-            let columns: Vec<JournalColumnDef> = plan
-                .columns
-                .iter()
-                .map(|spec| JournalColumnDef {
-                    name: spec.name.clone(),
-                    data_type: crate::sql::types::DataType::from_sql(&spec.data_type)
-                        .unwrap_or(crate::sql::types::DataType::String),
-                })
-                .collect();
-            let record = MetaRecord::CreateTable {
-                name: plan.table_name.clone(),
-                columns,
-                sort_key: plan.order_by.clone(),
-                rows_per_page_group: ROWS_PER_PAGE_GROUP,
-            };
-            journal
-                .append_commit(&plan.table_name, &record)
-                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
-        }
-
-        Ok(())
-    }
 
     // dml.rs provides impl SqlExecutor for DML flow.
     // scan_helpers_exec.rs provides impl SqlExecutor for scan/index helpers.
@@ -657,83 +408,6 @@ impl SqlExecutor {
         }
         Ok(0)
     }
-}
-
-fn collect_physical_ordinals(expr: &PhysicalExpr, ordinals: &mut BTreeSet<usize>) {
-    match expr {
-        PhysicalExpr::Column { index, .. } => {
-            ordinals.insert(*index);
-        }
-        PhysicalExpr::BinaryOp { left, right, .. } => {
-            collect_physical_ordinals(left, ordinals);
-            collect_physical_ordinals(right, ordinals);
-        }
-        PhysicalExpr::UnaryOp { expr, .. } => {
-            collect_physical_ordinals(expr, ordinals);
-        }
-        PhysicalExpr::Like {
-            expr,
-            pattern,
-            case_insensitive: _,
-            negated: _,
-        } => {
-            collect_physical_ordinals(expr, ordinals);
-            collect_physical_ordinals(pattern, ordinals);
-        }
-        PhysicalExpr::RLike {
-            expr,
-            pattern,
-            negated: _,
-        } => {
-            collect_physical_ordinals(expr, ordinals);
-            collect_physical_ordinals(pattern, ordinals);
-        }
-        PhysicalExpr::InList { expr, list, .. } => {
-            collect_physical_ordinals(expr, ordinals);
-            for item in list {
-                collect_physical_ordinals(item, ordinals);
-            }
-        }
-        PhysicalExpr::Cast { expr, .. } => {
-            collect_physical_ordinals(expr, ordinals);
-        }
-        PhysicalExpr::IsNull(expr) | PhysicalExpr::IsNotNull(expr) => {
-            collect_physical_ordinals(expr, ordinals);
-        }
-        PhysicalExpr::Literal(_) => {}
-    }
-}
-
-fn filter_rows_with_expr(
-    expr: &Expr,
-    rows: &[u64],
-    materialized: &MaterializedColumns,
-    column_ordinals: &HashMap<String, usize>,
-    column_types: &HashMap<String, DataType>,
-    prefer_exact_numeric: bool,
-) -> Result<Vec<u64>, SqlExecutionError> {
-    if rows.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let dataset = AggregateDataset {
-        rows,
-        materialized,
-        column_ordinals,
-        column_types,
-        masked_exprs: None,
-        prefer_exact_numeric,
-    };
-
-    let mut filtered = Vec::with_capacity(rows.len());
-    for &row_idx in rows {
-        let value = evaluate_row_expr(expr, row_idx, &dataset)?;
-        if value.as_bool().unwrap_or(false) {
-            filtered.push(row_idx);
-        }
-    }
-
-    Ok(filtered)
 }
 
 // Legacy row-id refinement path removed after pipeline refactor.
@@ -813,27 +487,6 @@ fn remove_sql_executor_wal_dir(namespace: &str) {
     let dir = sql_executor_wal_base_dir().join(namespace);
     if dir.exists() {
         let _ = fs::remove_dir_all(dir);
-    }
-}
-
-fn boolean_bitmap_from_page(page: &ColumnarPage) -> Result<Bitmap, SqlExecutionError> {
-    match &page.data {
-        ColumnData::Text(col) => {
-            let mut bitmap = Bitmap::new(page.len());
-            for idx in 0..col.len() {
-                if page.null_bitmap.is_set(idx) {
-                    continue;
-                }
-                let value = col.get_bytes(idx);
-                if value.eq_ignore_ascii_case(b"true") {
-                    bitmap.set(idx);
-                }
-            }
-            Ok(bitmap)
-        }
-        _ => Err(SqlExecutionError::Unsupported(
-            "QUALIFY expressions must produce boolean results".into(),
-        )),
     }
 }
 

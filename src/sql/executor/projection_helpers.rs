@@ -134,7 +134,7 @@ fn collect_all_columns(table_columns: &[ColumnCatalog]) -> ProjectionPlan {
     plan
 }
 
-pub(super) fn materialize_columns(
+pub(crate) fn materialize_columns(
     page_handler: &PageHandler,
     table: &str,
     table_columns: &[ColumnCatalog],

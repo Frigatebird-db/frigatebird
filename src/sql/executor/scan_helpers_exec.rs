@@ -1,7 +1,7 @@
 use super::{SqlExecutionError, SqlExecutor};
 use crate::metadata_store::ColumnCatalog;
 use crate::sql::executor::batch::ColumnarBatch;
-use crate::sql::executor::scan_helpers::SortKeyPrefix;
+use crate::pipeline::planner::SortKeyPrefix;
 use crate::sql::executor::scan_stream::{
     BatchStream, PipelineBatchStream, PipelineScanBuilder, SingleBatchStream,
 };

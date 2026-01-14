@@ -8,6 +8,7 @@ use crate::pipeline::window_helpers::{
     collect_window_plans_from_expr, plan_order_clauses, rewrite_projection_plan_for_windows,
     rewrite_window_expressions,
 };
+use crate::pipeline::filtering::apply_qualify_filter;
 use crate::sql::executor::batch::ColumnarBatch;
 use crate::pipeline::operators::AggregateOperator;
 use crate::pipeline::planner::plan_row_ids_for_select;
@@ -300,7 +301,7 @@ pub(crate) fn execute_window_pipeline(
     let mut processed_batch = merge_batches(processed_batches);
 
     if let Some(expr) = qualify_expr {
-        processed_batch = executor.apply_qualify_filter(processed_batch, &expr, catalog)?;
+        processed_batch = apply_qualify_filter(processed_batch, &expr, catalog)?;
         if processed_batch.num_rows == 0 {
             return Ok(SelectResult {
                 columns: result_columns,
@@ -601,7 +602,6 @@ pub(crate) fn execute_select_plan(
         required_ordinals.extend(predicate_ordinals);
     }
 
-    let apply_selection_late = !window_plans.is_empty();
     let row_id_selection = selection_expr_opt;
     let mut scan_selection_expr = if has_selection && can_use_physical_filter {
         physical_selection_expr.as_ref()

@@ -9,7 +9,7 @@ use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, SelectItem};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-pub(super) type MaterializedColumns = HashMap<usize, HashMap<u64, CachedValue>>;
+pub(crate) type MaterializedColumns = HashMap<usize, HashMap<u64, CachedValue>>;
 pub(super) type AggregationHashTable = HashMap<GroupKey, Vec<AggregateState>>;
 
 #[derive(Debug, Clone)]
@@ -585,7 +585,7 @@ pub(crate) struct AggregateProjection {
     pub(crate) expr: Expr,
 }
 
-pub(super) struct AggregateDataset<'a> {
+pub(crate) struct AggregateDataset<'a> {
     pub(super) rows: &'a [u64],
     pub(super) materialized: &'a MaterializedColumns,
     pub(super) column_ordinals: &'a HashMap<String, usize>,
@@ -595,6 +595,24 @@ pub(super) struct AggregateDataset<'a> {
 }
 
 impl<'a> AggregateDataset<'a> {
+    pub(crate) fn new(
+        rows: &'a [u64],
+        materialized: &'a MaterializedColumns,
+        column_ordinals: &'a HashMap<String, usize>,
+        column_types: &'a HashMap<String, DataType>,
+        masked_exprs: Option<&'a [Expr]>,
+        prefer_exact_numeric: bool,
+    ) -> Self {
+        Self {
+            rows,
+            materialized,
+            column_ordinals,
+            column_types,
+            masked_exprs,
+            prefer_exact_numeric,
+        }
+    }
+
     pub(super) fn column_value(&self, column: &str, row_idx: u64) -> Option<&CachedValue> {
         self.column_ordinals
             .get(column)

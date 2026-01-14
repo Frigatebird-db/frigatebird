@@ -15,7 +15,7 @@ pub(crate) fn object_name_to_string(name: &ObjectName) -> String {
         .join(".")
 }
 
-pub(super) fn table_with_joins_to_name(
+pub(crate) fn table_with_joins_to_name(
     table: &TableWithJoins,
 ) -> Result<String, SqlExecutionError> {
     if !table.joins.is_empty() {
@@ -31,7 +31,7 @@ pub(super) fn table_with_joins_to_name(
     }
 }
 
-pub(super) fn expr_to_string(expr: &Expr) -> Result<String, SqlExecutionError> {
+pub(crate) fn expr_to_string(expr: &Expr) -> Result<String, SqlExecutionError> {
     match expr {
         Expr::Value(Value::SingleQuotedString(s)) => Ok(s.clone()),
         Expr::Value(Value::Number(n, _)) => Ok(n.clone()),
@@ -232,7 +232,7 @@ pub(crate) fn collect_expr_column_ordinals(
     Ok(ordinals)
 }
 
-pub(super) fn collect_expr_column_names(expr: &Expr, columns: &mut BTreeSet<String>) {
+pub(crate) fn collect_expr_column_names(expr: &Expr, columns: &mut BTreeSet<String>) {
     use sqlparser::ast::*;
 
     match expr {

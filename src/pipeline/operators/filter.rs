@@ -1,4 +1,5 @@
 use crate::metadata_store::ColumnCatalog;
+use crate::pipeline::filtering::apply_filter_expr;
 use crate::sql::executor::{SqlExecutionError, SqlExecutor};
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
@@ -49,7 +50,8 @@ impl<'a> PipelineOperator for FilterOperator<'a> {
     }
 
     fn execute(&mut self, input: PipelineBatch) -> Result<Vec<PipelineBatch>, SqlExecutionError> {
-        let filtered = self.executor.apply_filter_expr(
+        let filtered = apply_filter_expr(
+            self.executor,
             input,
             self.expr,
             self.physical_expr,

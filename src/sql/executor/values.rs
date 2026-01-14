@@ -240,7 +240,7 @@ pub(super) fn compare_scalar_values(left: &ScalarValue, right: &ScalarValue) -> 
     }
 }
 
-pub(super) fn compare_strs(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_strs(left: &str, right: &str) -> Ordering {
     if is_encoded_null(left) && is_encoded_null(right) {
         return Ordering::Equal;
     }
