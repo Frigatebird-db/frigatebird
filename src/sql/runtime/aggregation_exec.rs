@@ -1,11 +1,9 @@
 use crate::sql::runtime::aggregates::{
     AggregateDataset, AggregateFunctionPlan, AggregateProjectionPlan, evaluate_aggregate_outputs,
 };
-use crate::sql::runtime::aggregation_helpers::{
-    ensure_aggregate_plan_for_expr, find_group_expr_index, literal_value,
-};
+use crate::sql::runtime::aggregation_helpers::ensure_aggregate_plan_for_expr;
 use crate::sql::runtime::batch::ColumnarBatch;
-use crate::sql::runtime::executor_types::{AggregatedRow, GroupKey, VectorAggregationOutput};
+use crate::sql::runtime::executor_types::{AggregatedRow, GroupKey};
 use crate::sql::runtime::expressions::evaluate_scalar_expression;
 use crate::sql::runtime::grouping_helpers::{evaluate_group_keys_on_batch, evaluate_having};
 use crate::sql::runtime::helpers::{parse_limit, parse_offset};
@@ -69,42 +67,15 @@ pub(crate) fn execute_grouping_set_aggregation_rows_from_batch(
 
     let mut aggregate_plans: Vec<AggregateFunctionPlan> = Vec::new();
     let mut aggregate_expr_lookup: HashMap<String, usize> = HashMap::new();
-    let mut output_kinds: Vec<VectorAggregationOutput> =
-        Vec::with_capacity(aggregate_plan.outputs.len());
-
     for projection in &aggregate_plan.outputs {
         match ensure_aggregate_plan_for_expr(
             &projection.expr,
             &mut aggregate_plans,
             &mut aggregate_expr_lookup,
         ) {
-            Ok(Some(slot_index)) => {
-                output_kinds.push(VectorAggregationOutput::Aggregate { slot_index });
-                continue;
-            }
-            Ok(None) => {}
-            Err(SqlExecutionError::Unsupported(_)) => {
-                output_kinds.push(VectorAggregationOutput::ScalarExpr {
-                    expr: projection.expr.clone(),
-                });
-                continue;
-            }
+            Ok(_) | Err(SqlExecutionError::Unsupported(_)) => {}
             Err(err) => return Err(err),
-        }
-
-        if let Some(idx) = find_group_expr_index(&projection.expr, group_exprs) {
-            output_kinds.push(VectorAggregationOutput::GroupExpr { group_index: idx });
-            continue;
-        }
-
-        if let Some(value) = literal_value(&projection.expr) {
-            output_kinds.push(VectorAggregationOutput::Literal { value });
-            continue;
-        }
-
-        output_kinds.push(VectorAggregationOutput::ScalarExpr {
-            expr: projection.expr.clone(),
-        });
+        };
     }
 
     let mut aggregated_rows: Vec<AggregatedRow> = Vec::new();
