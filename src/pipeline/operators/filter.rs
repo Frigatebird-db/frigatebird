@@ -1,17 +1,17 @@
 use crate::metadata_store::ColumnCatalog;
 use crate::pipeline::filtering::apply_filter_expr;
-use crate::sql::executor::SqlExecutor;
 use crate::sql::runtime::SqlExecutionError;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
 use crate::metadata_store::TableCatalog;
+use crate::page_handler::PageHandler;
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 
 use super::{PipelineBatch, PipelineOperator};
 
 pub struct FilterOperator<'a> {
-    executor: &'a SqlExecutor,
+    page_handler: &'a PageHandler,
     expr: &'a Expr,
     physical_expr: Option<&'a PhysicalExpr>,
     catalog: &'a TableCatalog,
@@ -23,7 +23,7 @@ pub struct FilterOperator<'a> {
 
 impl<'a> FilterOperator<'a> {
     pub(crate) fn new(
-        executor: &'a SqlExecutor,
+        page_handler: &'a PageHandler,
         expr: &'a Expr,
         physical_expr: Option<&'a PhysicalExpr>,
         catalog: &'a TableCatalog,
@@ -33,7 +33,7 @@ impl<'a> FilterOperator<'a> {
         column_types: &'a HashMap<String, DataType>,
     ) -> Self {
         Self {
-            executor,
+            page_handler,
             expr,
             physical_expr,
             catalog,
@@ -52,7 +52,7 @@ impl<'a> PipelineOperator for FilterOperator<'a> {
 
     fn execute(&mut self, input: PipelineBatch) -> Result<Vec<PipelineBatch>, SqlExecutionError> {
         let filtered = apply_filter_expr(
-            self.executor,
+            self.page_handler,
             input,
             self.expr,
             self.physical_expr,

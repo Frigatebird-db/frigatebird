@@ -7,6 +7,7 @@ use crate::sql::runtime::helpers::{
     collect_expr_column_ordinals, expr_to_string, object_name_to_string, table_with_joins_to_name,
 };
 use crate::sql::runtime::physical_evaluator::filter_supported;
+use crate::sql::runtime::scan_helpers::build_scan_stream;
 use crate::sql::runtime::scan_stream::collect_stream_batches;
 use crate::sql::runtime::values::compare_strs;
 use crate::sql::runtime::SqlExecutionError;
@@ -267,7 +268,8 @@ fn collect_matching_row_ids(
     } else {
         None
     };
-    let stream = executor.build_scan_stream(
+    let stream = build_scan_stream(
+        executor.page_handler(),
         table_name,
         columns,
         &required_ordinals,
@@ -281,7 +283,7 @@ fn collect_matching_row_ids(
         let mut batch = batch;
         if has_selection && !selection_applied_in_scan {
             let mut filter = FilterOperator::new(
-                executor,
+                executor.page_handler().as_ref(),
                 &selection_expr,
                 vectorized_selection_expr,
                 catalog,

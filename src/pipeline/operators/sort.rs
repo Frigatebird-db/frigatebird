@@ -1,34 +1,27 @@
 use crate::metadata_store::TableCatalog;
-use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::sort_exec::execute_sort;
 use crate::sql::runtime::{OrderClause, SqlExecutionError};
 
 use super::{PipelineBatch, PipelineOperator};
 
 pub struct SortOperator<'a> {
-    executor: &'a SqlExecutor,
     clauses: &'a [OrderClause],
     catalog: &'a TableCatalog,
 }
 
 impl<'a> SortOperator<'a> {
     pub(crate) fn new(
-        executor: &'a SqlExecutor,
         clauses: &'a [OrderClause],
         catalog: &'a TableCatalog,
     ) -> Self {
-        Self {
-            executor,
-            clauses,
-            catalog,
-        }
+        Self { clauses, catalog }
     }
 
     pub(crate) fn execute_batches(
         &mut self,
         batches: Vec<PipelineBatch>,
     ) -> Result<Vec<PipelineBatch>, SqlExecutionError> {
-        self.executor
-            .execute_sort(batches.into_iter(), self.clauses, self.catalog)
+        execute_sort(batches.into_iter(), self.clauses, self.catalog)
     }
 }
 

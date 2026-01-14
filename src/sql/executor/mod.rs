@@ -1,13 +1,5 @@
-mod aggregation_exec;
 mod dml;
-mod limit_exec;
-mod physical_ordinals;
-mod projection_exec;
-mod scan_helpers_exec;
 mod select;
-mod select_exec;
-mod sort_exec;
-mod spill;
 
 pub use crate::sql::runtime::{RowIter, SelectResult, SqlExecutionError};
 

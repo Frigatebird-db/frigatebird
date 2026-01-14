@@ -1,8 +1,11 @@
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
-use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::aggregation_exec::{
+    execute_grouping_set_aggregation_rows_from_batch, finalize_aggregation_rows,
+};
 use crate::sql::runtime::{
     AggregatedRow, AggregateProjectionPlan, OrderClause, SelectResult, SqlExecutionError,
 };
+use crate::page_handler::PageHandler;
 use crate::sql::types::DataType;
 use sqlparser::ast::{Expr, Offset};
 use std::collections::{BTreeSet, HashMap};
@@ -10,7 +13,7 @@ use std::collections::{BTreeSet, HashMap};
 use super::PipelineOperator;
 
 pub struct AggregateOperator<'a> {
-    executor: &'a SqlExecutor,
+    page_handler: &'a PageHandler,
     table: &'a str,
     catalog: &'a TableCatalog,
     columns: &'a [ColumnCatalog],
@@ -31,7 +34,7 @@ pub struct AggregateOperator<'a> {
 impl<'a> AggregateOperator<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        executor: &'a SqlExecutor,
+        page_handler: &'a PageHandler,
         table: &'a str,
         catalog: &'a TableCatalog,
         columns: &'a [ColumnCatalog],
@@ -49,7 +52,7 @@ impl<'a> AggregateOperator<'a> {
         distinct_flag: bool,
     ) -> Self {
         Self {
-            executor,
+            page_handler,
             table,
             catalog,
             columns,
@@ -74,25 +77,24 @@ impl<'a> AggregateOperator<'a> {
         group_exprs: &[Expr],
     ) -> Result<SelectResult, SqlExecutionError> {
         // Aggregation outputs are newly generated rows; row_ids are synthetic.
-        let aggregated_rows = self
-            .executor
-            .execute_grouping_set_aggregation_rows_from_batch(
-                batch,
-                self.table,
-                self.catalog,
-                self.columns,
-                self.aggregate_plan,
-                group_exprs,
-                self.required_ordinals,
-                self.column_ordinals,
-                self.column_types,
-                self.prefer_exact_numeric,
-                self.having,
-                self.qualify_expr,
-                self.order_clauses,
-                None,
-            )?;
-        self.executor.finalize_aggregation_rows(
+        let aggregated_rows = execute_grouping_set_aggregation_rows_from_batch(
+            self.page_handler,
+            batch,
+            self.table,
+            self.catalog,
+            self.columns,
+            self.aggregate_plan,
+            group_exprs,
+            self.required_ordinals,
+            self.column_ordinals,
+            self.column_types,
+            self.prefer_exact_numeric,
+            self.having,
+            self.qualify_expr,
+            self.order_clauses,
+            None,
+        )?;
+        finalize_aggregation_rows(
             aggregated_rows,
             self.order_clauses,
             self.distinct_flag,
@@ -109,7 +111,8 @@ impl<'a> AggregateOperator<'a> {
         masked_exprs: Option<&[Expr]>,
     ) -> Result<Vec<AggregatedRow>, SqlExecutionError> {
         // Aggregation outputs are new grouped rows; row_ids do not map to source rows.
-        self.executor.execute_grouping_set_aggregation_rows_from_batch(
+        execute_grouping_set_aggregation_rows_from_batch(
+            self.page_handler,
             batch,
             self.table,
             self.catalog,

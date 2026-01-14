@@ -1,33 +1,27 @@
-use crate::sql::executor::SqlExecutor;
+use crate::sql::runtime::limit_exec::apply_limit_offset;
 use crate::sql::runtime::SqlExecutionError;
 
 use super::{PipelineBatch, PipelineOperator};
 
-pub struct LimitOperator<'a> {
-    executor: &'a SqlExecutor,
+pub struct LimitOperator {
     offset: usize,
     limit: Option<usize>,
 }
 
-impl<'a> LimitOperator<'a> {
-    pub(crate) fn new(executor: &'a SqlExecutor, offset: usize, limit: Option<usize>) -> Self {
-        Self {
-            executor,
-            offset,
-            limit,
-        }
+impl LimitOperator {
+    pub(crate) fn new(offset: usize, limit: Option<usize>) -> Self {
+        Self { offset, limit }
     }
 
     pub(crate) fn execute_batches(
         &mut self,
         batches: Vec<PipelineBatch>,
     ) -> Result<Vec<PipelineBatch>, SqlExecutionError> {
-        self.executor
-            .apply_limit_offset(batches.into_iter(), self.offset, self.limit)
+        apply_limit_offset(batches.into_iter(), self.offset, self.limit)
     }
 }
 
-impl<'a> PipelineOperator for LimitOperator<'a> {
+impl PipelineOperator for LimitOperator {
     fn name(&self) -> &'static str {
         "limit"
     }

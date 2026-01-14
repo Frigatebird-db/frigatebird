@@ -13,6 +13,7 @@ use crate::sql::runtime::batch::ColumnarBatch;
 use crate::pipeline::operators::AggregateOperator;
 use crate::pipeline::planner::plan_row_ids_for_select;
 use crate::pipeline::window_helpers::ensure_common_partition;
+use crate::sql::runtime::aggregation_exec::finalize_aggregation_rows;
 use crate::sql::executor::SqlExecutor;
 use crate::sql::runtime::{
     AggregateProjectionPlan, OrderClause, ProjectionPlan, SelectResult, SqlExecutionError,
@@ -33,6 +34,7 @@ use crate::sql::runtime::select_helpers::{
     rewrite_aliases_in_expr,
 };
 use crate::sql::runtime::physical_evaluator::filter_supported;
+use crate::sql::runtime::scan_helpers::build_scan_stream;
 use crate::sql::runtime::scan_stream::collect_stream_batches;
 use crate::sql::PlannerError;
 use crate::sql::physical_plan::PhysicalExpr;
@@ -64,7 +66,8 @@ pub(crate) fn execute_projection_pipeline(
     qualify_expr: Option<&Expr>,
     row_ids: Option<Vec<u64>>,
 ) -> Result<SelectResult, SqlExecutionError> {
-    let stream = executor.build_scan_stream(
+    let stream = build_scan_stream(
+        executor.page_handler(),
         table,
         columns,
         required_ordinals,
@@ -78,7 +81,7 @@ pub(crate) fn execute_projection_pipeline(
             let mut filtered = Vec::new();
             for batch in batches {
                 let mut filter = FilterOperator::new(
-                    executor,
+                    executor.page_handler().as_ref(),
                     expr,
                     selection_physical_expr,
                     catalog,
@@ -109,7 +112,7 @@ pub(crate) fn execute_projection_pipeline(
         let mut filtered = Vec::new();
         for batch in batches {
             let mut filter = FilterOperator::new(
-                executor,
+                executor.page_handler().as_ref(),
                 expr,
                 None,
                 catalog,
@@ -138,11 +141,11 @@ pub(crate) fn execute_projection_pipeline(
     }
 
     if !order_clauses.is_empty() {
-        let mut sorter = SortOperator::new(executor, order_clauses, catalog);
+        let mut sorter = SortOperator::new(order_clauses, catalog);
         processed_batches = sorter.execute_batches(processed_batches)?;
     }
 
-    let mut project = ProjectOperator::new(executor, projection_plan, catalog);
+    let mut project = ProjectOperator::new(projection_plan, catalog);
     let mut projected = Vec::new();
     for batch in processed_batches {
         let results = project.execute(batch)?;
@@ -166,7 +169,7 @@ pub(crate) fn execute_projection_pipeline(
     if distinct_flag {
         let mut distinct = DistinctOperator::new(projection_plan.items.len());
         let deduped = distinct.execute_batches(projected)?;
-        let mut limiter = LimitOperator::new(executor, offset, limit);
+        let mut limiter = LimitOperator::new(offset, limit);
         let limited_batches = limiter.execute_batches(deduped)?;
         return Ok(SelectResult {
             columns: result_columns,
@@ -174,7 +177,7 @@ pub(crate) fn execute_projection_pipeline(
         });
     }
 
-    let mut limiter = LimitOperator::new(executor, offset, limit);
+    let mut limiter = LimitOperator::new(offset, limit);
     let limited_batches = limiter.execute_batches(projected)?;
     Ok(SelectResult {
         columns: result_columns,
@@ -236,7 +239,8 @@ pub(crate) fn execute_window_pipeline(
         rewrite_window_expressions(&mut clause.expr, &alias_map)?;
     }
 
-    let stream = executor.build_scan_stream(
+    let stream = build_scan_stream(
+        executor.page_handler(),
         table,
         columns,
         required_ordinals,
@@ -256,7 +260,7 @@ pub(crate) fn execute_window_pipeline(
             let mut filtered = Vec::new();
             for batch in batches {
                 let mut filter = FilterOperator::new(
-                    executor,
+                    executor.page_handler().as_ref(),
                     expr,
                     selection_physical_expr,
                     catalog,
@@ -312,12 +316,12 @@ pub(crate) fn execute_window_pipeline(
     }
 
     if !final_order_clauses.is_empty() {
-        let mut sorter = SortOperator::new(executor, &final_order_clauses, catalog);
+        let mut sorter = SortOperator::new(&final_order_clauses, catalog);
         let sorted_batches = sorter.execute_batches(vec![processed_batch])?;
         processed_batch = merge_batches(sorted_batches);
     }
 
-    let mut project = ProjectOperator::new(executor, &projection_plan, catalog);
+    let mut project = ProjectOperator::new(&projection_plan, catalog);
     let mut results = project.execute(processed_batch)?;
     let final_batch = results.pop().unwrap_or_else(ColumnarBatch::new);
     let offset = parse_offset(offset_expr)?;
@@ -326,7 +330,7 @@ pub(crate) fn execute_window_pipeline(
     if distinct_flag {
         let mut distinct = DistinctOperator::new(projection_plan.items.len());
         let deduped = distinct.execute_batches(vec![final_batch])?;
-        let mut limiter = LimitOperator::new(executor, offset, limit);
+        let mut limiter = LimitOperator::new(offset, limit);
         let limited_batches = limiter.execute_batches(deduped)?;
         return Ok(SelectResult {
             columns: result_columns,
@@ -334,7 +338,7 @@ pub(crate) fn execute_window_pipeline(
         });
     }
 
-    let mut limiter = LimitOperator::new(executor, offset, limit);
+    let mut limiter = LimitOperator::new(offset, limit);
     let limited_batches = limiter.execute_batches(vec![final_batch])?;
     Ok(SelectResult {
         columns: result_columns,
@@ -712,7 +716,8 @@ pub(crate) fn execute_select_plan(
         );
     }
 
-    let stream = executor.build_scan_stream(
+    let stream = build_scan_stream(
+        executor.page_handler(),
         &table_name,
         &columns,
         &required_ordinals,
@@ -725,7 +730,7 @@ pub(crate) fn execute_select_plan(
             let mut filtered = Vec::new();
             for batch in base_batches {
                 let mut filter = FilterOperator::new(
-                    executor,
+                    executor.page_handler().as_ref(),
                     expr,
                     scan_selection_expr,
                     &catalog,
@@ -752,7 +757,7 @@ pub(crate) fn execute_select_plan(
             .as_ref()
             .map_or(false, GroupByStrategy::prefer_exact_numeric);
         let aggregate_operator = AggregateOperator::new(
-            executor,
+            executor.page_handler().as_ref(),
             &table_name,
             &catalog,
             &columns,
@@ -778,7 +783,7 @@ pub(crate) fn execute_select_plan(
             .as_ref()
             .map_or(false, GroupByStrategy::prefer_exact_numeric);
         let aggregate_operator = AggregateOperator::new(
-            executor,
+            executor.page_handler().as_ref(),
             &table_name,
             &catalog,
             &columns,
@@ -813,7 +818,7 @@ pub(crate) fn execute_select_plan(
             );
         }
 
-        return executor.finalize_aggregation_rows(
+        return finalize_aggregation_rows(
             aggregated_rows,
             &order_clauses,
             distinct_flag,

@@ -1,11 +1,11 @@
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
-use crate::sql::executor::SqlExecutor;
 use crate::sql::runtime::aggregates::MaterializedColumns;
 use crate::sql::runtime::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
 use crate::sql::runtime::expressions::evaluate_expression_on_batch;
 use crate::sql::runtime::physical_evaluator::PhysicalEvaluator;
 use crate::sql::runtime::projection_helpers::materialize_columns;
 use crate::sql::runtime::SqlExecutionError;
+use crate::page_handler::PageHandler;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
 use sqlparser::ast::Expr;
@@ -28,7 +28,7 @@ pub(crate) fn apply_qualify_filter(
 }
 
 pub(crate) fn apply_filter_expr(
-    executor: &SqlExecutor,
+    page_handler: &PageHandler,
     batch: ColumnarBatch,
     expr: &Expr,
     physical_expr: Option<&PhysicalExpr>,
@@ -59,7 +59,7 @@ pub(crate) fn apply_filter_expr(
                 table,
             )?;
             let materialized = materialize_columns(
-                executor.page_handler(),
+                page_handler,
                 table,
                 columns,
                 &ordinals,

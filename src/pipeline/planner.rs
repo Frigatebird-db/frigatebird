@@ -1,6 +1,7 @@
 use crate::metadata_store::ColumnCatalog;
 use crate::sql::executor::SqlExecutor;
 use crate::sql::runtime::helpers::{collect_expr_column_names, column_name_from_expr, expr_to_string};
+use crate::sql::runtime::scan_helpers::{locate_rows_by_sort_prefixes, locate_rows_by_sort_tuple};
 use crate::sql::runtime::values::compare_strs;
 use crate::sql::runtime::SqlExecutionError;
 use crate::sql::types::DataType;
@@ -32,13 +33,17 @@ pub(crate) fn plan_row_ids_from_sort_keys(
             })?;
             key_values.push(value);
         }
-        Some(executor.locate_rows_by_sort_tuple(
+        Some(locate_rows_by_sort_tuple(
+            executor.page_handler().as_ref(),
+            executor.page_directory().as_ref(),
             table_name,
             sort_columns,
             &key_values,
         )?)
     } else if let Some(prefixes) = sort_key_prefixes {
-        Some(executor.locate_rows_by_sort_prefixes(
+        Some(locate_rows_by_sort_prefixes(
+            executor.page_handler().as_ref(),
+            executor.page_directory().as_ref(),
             table_name,
             sort_columns,
             &prefixes,
