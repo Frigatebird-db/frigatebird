@@ -23,7 +23,6 @@ pub(crate) enum NullsPlacement {
     Last,
 }
 
-
 #[derive(Clone)]
 pub(crate) struct OrderKey {
     pub(crate) values: Vec<ScalarValue>,

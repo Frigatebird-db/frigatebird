@@ -1,11 +1,11 @@
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
+use crate::page_handler::PageHandler;
 use crate::sql::runtime::aggregation_exec::{
     execute_grouping_set_aggregation_rows_from_batch, finalize_aggregation_rows,
 };
 use crate::sql::runtime::{
-    AggregatedRow, AggregateProjectionPlan, OrderClause, SelectResult, SqlExecutionError,
+    AggregateProjectionPlan, AggregatedRow, OrderClause, SelectResult, SqlExecutionError,
 };
-use crate::page_handler::PageHandler;
 use crate::sql::types::DataType;
 use sqlparser::ast::{Expr, Offset};
 use std::collections::{BTreeSet, HashMap};
@@ -129,7 +129,6 @@ impl<'a> AggregateOperator<'a> {
             masked_exprs,
         )
     }
-
 }
 
 impl<'a> PipelineOperator for AggregateOperator<'a> {
@@ -142,8 +141,7 @@ impl<'a> PipelineOperator for AggregateOperator<'a> {
         _input: super::PipelineBatch,
     ) -> Result<Vec<super::PipelineBatch>, SqlExecutionError> {
         Err(SqlExecutionError::Unsupported(
-            "aggregate operator requires explicit batch-driven execution"
-                .into(),
+            "aggregate operator requires explicit batch-driven execution".into(),
         ))
     }
 }

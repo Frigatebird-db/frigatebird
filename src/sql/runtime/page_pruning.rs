@@ -104,7 +104,10 @@ fn build_null_prunable_predicate(
     false
 }
 
-fn comparison_for_operator(op: &BinaryOperator, column_on_left: bool) -> Option<PagePruneComparison> {
+fn comparison_for_operator(
+    op: &BinaryOperator,
+    column_on_left: bool,
+) -> Option<PagePruneComparison> {
     match op {
         BinaryOperator::Gt => Some(if column_on_left {
             PagePruneComparison::GreaterThan { inclusive: false }
@@ -180,8 +183,10 @@ pub(crate) fn should_prune_page(
                     }
                 }
                 _ => {
-                    if matches!(stats.kind, ColumnStatsKind::Int64 | ColumnStatsKind::Float64)
-                        && predicate_disqualifies(stats, predicate)
+                    if matches!(
+                        stats.kind,
+                        ColumnStatsKind::Int64 | ColumnStatsKind::Float64
+                    ) && predicate_disqualifies(stats, predicate)
                     {
                         return true;
                     }
@@ -320,7 +325,12 @@ mod tests {
             comparison: PagePruneComparison::GreaterThan { inclusive: false },
             value: Some(25.0),
         };
-        assert!(should_prune_page(0, &[predicate], &descriptor_map, &pred_map));
+        assert!(should_prune_page(
+            0,
+            &[predicate],
+            &descriptor_map,
+            &pred_map
+        ));
     }
 
     #[test]
@@ -342,7 +352,12 @@ mod tests {
             comparison: PagePruneComparison::LessThan { inclusive: true },
             value: Some(30.0),
         };
-        assert!(!should_prune_page(0, &[predicate], &descriptor_map, &pred_map));
+        assert!(!should_prune_page(
+            0,
+            &[predicate],
+            &descriptor_map,
+            &pred_map
+        ));
     }
 
     #[test]
@@ -364,7 +379,12 @@ mod tests {
             comparison: PagePruneComparison::IsNull,
             value: None,
         };
-        assert!(should_prune_page(0, &[predicate], &descriptor_map, &pred_map));
+        assert!(should_prune_page(
+            0,
+            &[predicate],
+            &descriptor_map,
+            &pred_map
+        ));
     }
 
     #[test]
@@ -386,6 +406,11 @@ mod tests {
             comparison: PagePruneComparison::IsNotNull,
             value: None,
         };
-        assert!(should_prune_page(0, &[predicate], &descriptor_map, &pred_map));
+        assert!(should_prune_page(
+            0,
+            &[predicate],
+            &descriptor_map,
+            &pred_map
+        ));
     }
 }

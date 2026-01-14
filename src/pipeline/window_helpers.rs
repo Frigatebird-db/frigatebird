@@ -1,3 +1,5 @@
+use crate::metadata_store::TableCatalog;
+use crate::sql::runtime::SqlExecutionError;
 use crate::sql::runtime::batch::{Bitmap, BytesColumn, ColumnData, ColumnarBatch, ColumnarPage};
 use crate::sql::runtime::executor_types::{GroupKey, ProjectionItem, ProjectionPlan};
 use crate::sql::runtime::expressions::evaluate_expression_on_batch;
@@ -7,9 +9,7 @@ use crate::sql::runtime::ordering::{
     NullsPlacement, OrderClause, OrderKey, build_order_keys_on_batch, compare_order_keys,
 };
 use crate::sql::runtime::values::{ScalarValue, scalar_from_f64};
-use crate::sql::runtime::SqlExecutionError;
 use sqlparser::ast::{Expr, OrderByExpr};
-use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{
     FunctionArg, FunctionArgExpr, Ident, SelectItem, Value, WindowFrameBound, WindowFrameUnits,
     WindowType,

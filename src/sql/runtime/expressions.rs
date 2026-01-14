@@ -912,8 +912,7 @@ fn evaluate_case_expression_vectorized(
                 let mut selected = None;
                 let mut matched = false;
                 if operand_value.is_some() {
-                    for (cond_page, result_page) in
-                        condition_pages.iter().zip(result_pages.iter())
+                    for (cond_page, result_page) in condition_pages.iter().zip(result_pages.iter())
                     {
                         let cond_value = cond_page.value_as_string(row_idx);
                         if cond_value.is_some() && cond_value == operand_value {
@@ -944,9 +943,7 @@ fn evaluate_case_expression_vectorized(
             for row_idx in 0..batch.num_rows {
                 let mut selected = None;
                 let mut matched = false;
-                for (cond_page, result_page) in
-                    condition_pages.iter().zip(result_pages.iter())
-                {
+                for (cond_page, result_page) in condition_pages.iter().zip(result_pages.iter()) {
                     if page_value_truthy(cond_page, row_idx) {
                         matched = true;
                         selected = page_numeric_value(result_page, row_idx);
@@ -1278,22 +1275,12 @@ fn numeric_value_at(page: &ColumnarPage, idx: usize) -> Result<f64, SqlExecution
         ColumnData::Float64(values) => values.get(idx).copied().ok_or_else(|| {
             SqlExecutionError::OperationFailed("vectorized expression index out of bounds".into())
         }),
-        ColumnData::Text(values) => values
-            .get_string(idx)
-            .parse::<f64>()
-            .map_err(|_| {
-                SqlExecutionError::Unsupported(
-                    "vectorized expression requires numeric operands".into(),
-                )
-            }),
-        ColumnData::Dictionary(values) => values
-            .get_string(idx)
-            .parse::<f64>()
-            .map_err(|_| {
-                SqlExecutionError::Unsupported(
-                    "vectorized expression requires numeric operands".into(),
-                )
-            }),
+        ColumnData::Text(values) => values.get_string(idx).parse::<f64>().map_err(|_| {
+            SqlExecutionError::Unsupported("vectorized expression requires numeric operands".into())
+        }),
+        ColumnData::Dictionary(values) => values.get_string(idx).parse::<f64>().map_err(|_| {
+            SqlExecutionError::Unsupported("vectorized expression requires numeric operands".into())
+        }),
         _ => Err(SqlExecutionError::Unsupported(
             "vectorized expression requires numeric operands".into(),
         )),

@@ -5,8 +5,8 @@ use crate::page_handler::PageHandler;
 use crate::pipeline::{Job, PipelineBatch, PipelineStep};
 use crate::sql::FilterExpr;
 use crate::sql::physical_plan::PhysicalExpr;
-use std::collections::BTreeSet;
 use crossbeam::channel::Receiver;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub trait BatchStream {
@@ -124,9 +124,10 @@ impl<'a> PipelineScanBuilder<'a> {
         let mut is_root = true;
 
         for &ordinal in &ordinals {
-            let column = self.columns.get(ordinal).ok_or_else(|| {
-                SqlExecutionError::OperationFailed("invalid scan ordinal".into())
-            })?;
+            let column = self
+                .columns
+                .get(ordinal)
+                .ok_or_else(|| SqlExecutionError::OperationFailed("invalid scan ordinal".into()))?;
             let (current_producer, next_receiver) =
                 crossbeam::channel::unbounded::<PipelineBatch>();
             steps.push(PipelineStep::new(
@@ -138,11 +139,7 @@ impl<'a> PipelineScanBuilder<'a> {
                 Arc::clone(&self.page_handler),
                 current_producer,
                 previous_receiver,
-                if is_root {
-                    self.row_ids.clone()
-                } else {
-                    None
-                },
+                if is_root { self.row_ids.clone() } else { None },
             ));
             previous_receiver = next_receiver;
             is_root = false;

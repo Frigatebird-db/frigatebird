@@ -10,10 +10,7 @@ pub struct ProjectOperator<'a> {
 }
 
 impl<'a> ProjectOperator<'a> {
-    pub(crate) fn new(
-        projection_plan: &'a ProjectionPlan,
-        catalog: &'a TableCatalog,
-    ) -> Self {
+    pub(crate) fn new(projection_plan: &'a ProjectionPlan, catalog: &'a TableCatalog) -> Self {
         Self {
             projection_plan,
             catalog,

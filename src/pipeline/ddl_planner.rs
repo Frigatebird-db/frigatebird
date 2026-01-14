@@ -17,10 +17,7 @@ pub(crate) fn execute_ddl_plan(
     }
 }
 
-fn execute_create(
-    executor: &SqlExecutor,
-    statement: Statement,
-) -> Result<(), SqlExecutionError> {
+fn execute_create(executor: &SqlExecutor, statement: Statement) -> Result<(), SqlExecutionError> {
     let plan: CreateTablePlan = plan_create_table_statement(&statement)?;
     create_table_from_plan(executor.page_directory(), &plan)
         .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;

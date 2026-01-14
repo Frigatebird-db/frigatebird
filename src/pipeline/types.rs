@@ -1,8 +1,8 @@
+use crate::metadata_store::ROWS_PER_PAGE_GROUP;
 use crate::page_handler::PageHandler;
+use crate::sql::models::FilterExpr;
 use crate::sql::runtime::batch::{Bitmap, ColumnarBatch, ColumnarPage};
 use crate::sql::runtime::physical_evaluator::PhysicalEvaluator;
-use crate::sql::models::FilterExpr;
-use crate::metadata_store::ROWS_PER_PAGE_GROUP;
 use crossbeam::channel::{Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,7 +53,6 @@ fn evaluate_filter_expr_with_batch(filter: &FilterExpr, batch: &ColumnarBatch) -
         }
     }
 }
-
 
 pub type PipelineBatch = ColumnarBatch;
 
@@ -136,9 +135,7 @@ impl PipelineStep {
 
             let mut batch = ColumnarBatch::new();
             batch.num_rows = page_len;
-            batch
-                .columns
-                .insert(self.column_ordinal, page.page.clone());
+            batch.columns.insert(self.column_ordinal, page.page.clone());
             batch.row_ids = (base_row as u64..(base_row + page_len) as u64).collect();
 
             let bitmap = evaluate_filters(&self.filters, &batch);
@@ -182,12 +179,7 @@ impl PipelineStep {
             batch.row_ids = slice.to_vec();
             batch.columns.insert(
                 self.column_ordinal,
-                materialize_column_in_batch(
-                    &self.page_handler,
-                    &self.table,
-                    &self.column,
-                    slice,
-                ),
+                materialize_column_in_batch(&self.page_handler, &self.table, &self.column, slice),
             );
 
             let bitmap = evaluate_filters(&self.filters, &batch);

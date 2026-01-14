@@ -1,5 +1,5 @@
-use crate::sql::runtime::batch::ColumnarBatch;
 use crate::sql::runtime::SqlExecutionError;
+use crate::sql::runtime::batch::ColumnarBatch;
 
 pub mod aggregate;
 pub mod distinct;

@@ -1,10 +1,10 @@
+use super::SqlExecutionError;
 use super::aggregates::AggregateDataset;
 use super::batch::ColumnarBatch;
+use super::executor_types::{GroupByInfo, GroupKey, GroupingSetPlan};
 use super::expressions::{
     evaluate_expression_on_batch, evaluate_row_expr, evaluate_scalar_expression,
 };
-use super::SqlExecutionError;
-use super::executor_types::{GroupByInfo, GroupKey, GroupingSetPlan};
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::{Expr, GroupByExpr};
 

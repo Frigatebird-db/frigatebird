@@ -1,9 +1,11 @@
 use crate::metadata_store::ColumnCatalog;
 use crate::sql::executor::SqlExecutor;
-use crate::sql::runtime::helpers::{collect_expr_column_names, column_name_from_expr, expr_to_string};
+use crate::sql::runtime::SqlExecutionError;
+use crate::sql::runtime::helpers::{
+    collect_expr_column_names, column_name_from_expr, expr_to_string,
+};
 use crate::sql::runtime::scan_helpers::{locate_rows_by_sort_prefixes, locate_rows_by_sort_tuple};
 use crate::sql::runtime::values::compare_strs;
-use crate::sql::runtime::SqlExecutionError;
 use crate::sql::types::DataType;
 use sqlparser::ast::{BinaryOperator, Expr, Value};
 use std::cmp::Ordering;
@@ -405,7 +407,9 @@ fn selection_uses_numeric_literal_on_string_sort(
         Expr::UnaryOp { expr, .. } => {
             selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types)
         }
-        Expr::Between { expr, low, high, .. } => {
+        Expr::Between {
+            expr, low, high, ..
+        } => {
             selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types)
                 || selection_uses_numeric_literal_on_string_sort(low, sort_columns, column_types)
                 || selection_uses_numeric_literal_on_string_sort(high, sort_columns, column_types)
@@ -424,20 +428,15 @@ fn selection_uses_numeric_literal_on_string_sort(
             results,
             else_result,
         } => {
-            operand
-                .as_ref()
-                .is_some_and(|op| {
-                    selection_uses_numeric_literal_on_string_sort(op, sort_columns, column_types)
-                })
-                || conditions.iter().any(|cond| {
-                    selection_uses_numeric_literal_on_string_sort(cond, sort_columns, column_types)
-                })
-                || results.iter().any(|res| {
-                    selection_uses_numeric_literal_on_string_sort(res, sort_columns, column_types)
-                })
-                || else_result.as_ref().is_some_and(|expr| {
-                    selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types)
-                })
+            operand.as_ref().is_some_and(|op| {
+                selection_uses_numeric_literal_on_string_sort(op, sort_columns, column_types)
+            }) || conditions.iter().any(|cond| {
+                selection_uses_numeric_literal_on_string_sort(cond, sort_columns, column_types)
+            }) || results.iter().any(|res| {
+                selection_uses_numeric_literal_on_string_sort(res, sort_columns, column_types)
+            }) || else_result.as_ref().is_some_and(|expr| {
+                selection_uses_numeric_literal_on_string_sort(expr, sort_columns, column_types)
+            })
         }
         _ => false,
     }
@@ -447,8 +446,10 @@ fn is_numeric_literal(expr: &Expr) -> bool {
     match expr {
         Expr::Value(Value::Number(_, _)) => true,
         Expr::UnaryOp { op, expr } => {
-            matches!(op, sqlparser::ast::UnaryOperator::Plus | sqlparser::ast::UnaryOperator::Minus)
-                && matches!(**expr, Expr::Value(Value::Number(_, _)))
+            matches!(
+                op,
+                sqlparser::ast::UnaryOperator::Plus | sqlparser::ast::UnaryOperator::Minus
+            ) && matches!(**expr, Expr::Value(Value::Number(_, _)))
         }
         _ => false,
     }

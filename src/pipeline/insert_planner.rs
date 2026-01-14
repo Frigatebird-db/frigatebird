@@ -30,9 +30,10 @@ fn execute_insert_writer(
     }
 
     if !rows.is_empty() {
-        executor.writer().flush_table(&table).map_err(|err| {
-            SqlExecutionError::OperationFailed(format!("flush failed: {err:?}"))
-        })?;
+        executor
+            .writer()
+            .flush_table(&table)
+            .map_err(|err| SqlExecutionError::OperationFailed(format!("flush failed: {err:?}")))?;
     }
 
     Ok(())
@@ -61,7 +62,10 @@ fn execute_insert_legacy(
     Ok(())
 }
 
-fn build_insert_tuple<'a>(columns: &'a [ColumnCatalog], row: &'a [String]) -> Vec<(&'a str, &'a str)> {
+fn build_insert_tuple<'a>(
+    columns: &'a [ColumnCatalog],
+    row: &'a [String],
+) -> Vec<(&'a str, &'a str)> {
     columns
         .iter()
         .map(|col| (col.name.as_str(), row[col.ordinal].as_str()))

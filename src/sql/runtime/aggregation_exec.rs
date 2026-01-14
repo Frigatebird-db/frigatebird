@@ -1,18 +1,20 @@
+use super::{SelectResult, SqlExecutionError};
+use crate::metadata_store::{ColumnCatalog, TableCatalog};
+use crate::page_handler::PageHandler;
 use crate::sql::runtime::aggregates::{
     AggregateDataset, AggregateFunctionPlan, AggregateProjectionPlan, evaluate_aggregate_outputs,
 };
 use crate::sql::runtime::aggregation_helpers::ensure_aggregate_plan_for_expr;
 use crate::sql::runtime::batch::ColumnarBatch;
 use crate::sql::runtime::executor_types::{AggregatedRow, GroupKey};
+use crate::sql::runtime::executor_utils::rows_to_batch;
 use crate::sql::runtime::expressions::evaluate_scalar_expression;
 use crate::sql::runtime::grouping_helpers::{evaluate_group_keys_on_batch, evaluate_having};
 use crate::sql::runtime::helpers::{parse_limit, parse_offset};
-use crate::sql::runtime::ordering::{OrderClause, OrderKey, build_group_order_key, compare_order_keys};
+use crate::sql::runtime::ordering::{
+    OrderClause, OrderKey, build_group_order_key, compare_order_keys,
+};
 use crate::sql::runtime::projection_helpers::materialize_columns;
-use crate::sql::runtime::executor_utils::rows_to_batch;
-use super::{SelectResult, SqlExecutionError};
-use crate::metadata_store::{ColumnCatalog, TableCatalog};
-use crate::page_handler::PageHandler;
 use crate::sql::types::DataType;
 use sqlparser::ast::{Expr, Offset};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -45,18 +47,13 @@ pub(crate) fn execute_grouping_set_aggregation_rows_from_batch(
     }
 
     let row_ids = batch.row_ids.clone();
-    let materialized = materialize_columns(
-        page_handler,
-        table,
-        columns,
-        required_ordinals,
-        &row_ids,
-    )?;
+    let materialized =
+        materialize_columns(page_handler, table, columns, required_ordinals, &row_ids)?;
     let mut group_rows: HashMap<GroupKey, Vec<u64>> = HashMap::new();
     for (idx, key) in group_keys.iter().enumerate() {
-        let row_id = *row_ids.get(idx).ok_or_else(|| {
-            SqlExecutionError::OperationFailed("missing row id".into())
-        })?;
+        let row_id = *row_ids
+            .get(idx)
+            .ok_or_else(|| SqlExecutionError::OperationFailed("missing row id".into()))?;
         group_rows.entry(key.clone()).or_default().push(row_id);
     }
     if group_exprs.is_empty() && group_order.is_empty() {

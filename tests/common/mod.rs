@@ -257,9 +257,7 @@ fn dataset(config: &MassiveFixtureConfig) -> Arc<BigFixtureDataset> {
         }
     }
 
-    let mut guard = cache
-        .write()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let mut guard = cache.write().unwrap_or_else(|poison| poison.into_inner());
     Arc::clone(
         guard
             .entry(config.row_count)

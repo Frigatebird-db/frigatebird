@@ -15,11 +15,7 @@ enum DistinctValue {
 struct DistinctKey {
     values: Vec<DistinctValue>,
 }
-fn build_distinct_key(
-    batch: &ColumnarBatch,
-    row_idx: usize,
-    column_count: usize,
-) -> DistinctKey {
+fn build_distinct_key(batch: &ColumnarBatch, row_idx: usize, column_count: usize) -> DistinctKey {
     let mut values = Vec::with_capacity(column_count);
     for ordinal in 0..column_count {
         let value = match batch.columns.get(&ordinal) {

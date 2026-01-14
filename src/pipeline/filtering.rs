@@ -1,12 +1,12 @@
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
+use crate::page_handler::PageHandler;
+use crate::sql::physical_plan::PhysicalExpr;
+use crate::sql::runtime::SqlExecutionError;
 use crate::sql::runtime::aggregates::MaterializedColumns;
 use crate::sql::runtime::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
 use crate::sql::runtime::expressions::evaluate_expression_on_batch;
 use crate::sql::runtime::physical_evaluator::PhysicalEvaluator;
 use crate::sql::runtime::projection_helpers::materialize_columns;
-use crate::sql::runtime::SqlExecutionError;
-use crate::page_handler::PageHandler;
-use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
@@ -58,13 +58,8 @@ pub(crate) fn apply_filter_expr(
                 column_ordinals,
                 table,
             )?;
-            let materialized = materialize_columns(
-                page_handler,
-                table,
-                columns,
-                &ordinals,
-                &batch.row_ids,
-            )?;
+            let materialized =
+                materialize_columns(page_handler, table, columns, &ordinals, &batch.row_ids)?;
             let matching_rows = filter_rows_with_expr(
                 expr,
                 &batch.row_ids,
@@ -76,8 +71,7 @@ pub(crate) fn apply_filter_expr(
             if matching_rows.is_empty() {
                 return Ok(ColumnarBatch::new());
             }
-            let matching: std::collections::HashSet<u64> =
-                matching_rows.into_iter().collect();
+            let matching: std::collections::HashSet<u64> = matching_rows.into_iter().collect();
             let mut bitmap = Bitmap::new(batch.num_rows);
             for (idx, row_id) in batch.row_ids.iter().enumerate() {
                 if matching.contains(row_id) {
@@ -134,11 +128,7 @@ fn filter_rows_with_expr(
 
     let mut filtered = Vec::with_capacity(rows.len());
     for &row_idx in rows {
-        let value = crate::sql::runtime::expressions::evaluate_row_expr(
-            expr,
-            row_idx,
-            &dataset,
-        )?;
+        let value = crate::sql::runtime::expressions::evaluate_row_expr(expr, row_idx, &dataset)?;
         if value.as_bool().unwrap_or(false) {
             filtered.push(row_idx);
         }

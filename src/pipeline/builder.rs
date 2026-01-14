@@ -108,7 +108,11 @@ fn attach_channels(
     grouped_steps: Vec<(String, usize, Vec<FilterExpr>)>,
     table: String,
     page_handler: Arc<PageHandler>,
-) -> (Sender<PipelineBatch>, Receiver<PipelineBatch>, Vec<PipelineStep>) {
+) -> (
+    Sender<PipelineBatch>,
+    Receiver<PipelineBatch>,
+    Vec<PipelineStep>,
+) {
     let (entry_producer, mut previous_receiver) = unbounded::<PipelineBatch>();
     let mut steps = Vec::with_capacity(grouped_steps.len());
     let mut is_root = true;

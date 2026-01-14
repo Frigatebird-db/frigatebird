@@ -1,6 +1,6 @@
-use super::executor_types::GroupKey;
 use super::SqlExecutionError;
 use super::batch::{ColumnData, ColumnarPage};
+use super::executor_types::GroupKey;
 use super::expressions::{evaluate_row_expr, evaluate_scalar_expression};
 use super::helpers::collect_expr_column_ordinals;
 use super::values::{CachedValue, ScalarValue, format_float, scalar_from_f64};
@@ -54,10 +54,7 @@ impl AggregateFunctionPlan {
     }
 
     fn from_function(function: &Function) -> Result<Self, SqlExecutionError> {
-        if function.over.is_some()
-            || !function.order_by.is_empty()
-            || function.filter.is_some()
-        {
+        if function.over.is_some() || !function.order_by.is_empty() || function.filter.is_some() {
             return Err(SqlExecutionError::Unsupported(
                 "vectorized aggregation does not support advanced aggregate modifiers".into(),
             ));
@@ -227,9 +224,7 @@ impl AggregateFunctionPlan {
             AggregateFunctionKind::CountStar | AggregateFunctionKind::CountExpr => {
                 AggregateState::Count(0)
             }
-            AggregateFunctionKind::CountDistinct => {
-                AggregateState::CountDistinct(HashSet::new())
-            }
+            AggregateFunctionKind::CountDistinct => AggregateState::CountDistinct(HashSet::new()),
             AggregateFunctionKind::Sum => AggregateState::Sum {
                 total: 0.0,
                 seen: false,
@@ -271,12 +266,8 @@ impl AggregateFunctionPlan {
                     Some(format_float(*sum / *count as f64))
                 }
             }
-            (AggregateFunctionKind::Min, AggregateState::Min { value }) => {
-                value.map(format_float)
-            }
-            (AggregateFunctionKind::Max, AggregateState::Max { value }) => {
-                value.map(format_float)
-            }
+            (AggregateFunctionKind::Min, AggregateState::Min { value }) => value.map(format_float),
+            (AggregateFunctionKind::Max, AggregateState::Max { value }) => value.map(format_float),
             (
                 AggregateFunctionKind::VariancePop | AggregateFunctionKind::StddevPop,
                 AggregateState::Variance { count, mean: _, m2 },

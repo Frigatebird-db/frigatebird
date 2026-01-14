@@ -1,6 +1,6 @@
 use super::SqlExecutionError;
-use super::executor_types::{ProjectionItem, ProjectionPlan};
 use super::aggregates::AggregateProjectionPlan;
+use super::executor_types::{ProjectionItem, ProjectionPlan};
 use super::helpers::column_name_from_expr;
 use super::ordering::OrderClause;
 use crate::metadata_store::ColumnCatalog;

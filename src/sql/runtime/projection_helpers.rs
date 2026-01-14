@@ -1,11 +1,11 @@
+use super::SqlExecutionError;
 use super::aggregates::MaterializedColumns;
+use super::executor_types::{ProjectionItem, ProjectionPlan};
 use super::helpers::{
     collect_expr_column_ordinals, column_name_from_expr, object_name_matches_table,
     wildcard_options_supported,
 };
 use super::values::CachedValue;
-use super::SqlExecutionError;
-use super::executor_types::{ProjectionItem, ProjectionPlan};
 use crate::entry::Entry;
 use crate::metadata_store::ColumnCatalog;
 use crate::page_handler::PageHandler;

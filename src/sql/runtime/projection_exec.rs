@@ -1,8 +1,8 @@
+use super::{ProjectionItem, SqlExecutionError};
 use crate::metadata_store::TableCatalog;
 use crate::sql::runtime::batch::ColumnarBatch;
 use crate::sql::runtime::executor_types::ProjectionPlan;
 use crate::sql::runtime::expressions::evaluate_expression_on_batch;
-use super::{ProjectionItem, SqlExecutionError};
 
 pub(crate) fn build_projection_batch(
     batch: &ColumnarBatch,

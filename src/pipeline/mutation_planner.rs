@@ -1,8 +1,10 @@
 use crate::metadata_store::ColumnCatalog;
 use crate::ops_handler::{delete_row, insert_sorted_row, overwrite_row, read_row};
-use crate::pipeline::planner::plan_row_ids_for_select;
 use crate::pipeline::operators::{FilterOperator, PipelineOperator};
+use crate::pipeline::planner::plan_row_ids_for_select;
 use crate::sql::executor::SqlExecutor;
+use crate::sql::planner::ExpressionPlanner;
+use crate::sql::runtime::SqlExecutionError;
 use crate::sql::runtime::helpers::{
     collect_expr_column_ordinals, expr_to_string, object_name_to_string, table_with_joins_to_name,
 };
@@ -10,8 +12,6 @@ use crate::sql::runtime::physical_evaluator::filter_supported;
 use crate::sql::runtime::scan_helpers::build_scan_stream;
 use crate::sql::runtime::scan_stream::collect_stream_batches;
 use crate::sql::runtime::values::compare_strs;
-use crate::sql::runtime::SqlExecutionError;
-use crate::sql::planner::ExpressionPlanner;
 use crate::sql::types::DataType;
 use sqlparser::ast::{
     Assignment, Expr, FromTable, ObjectName, OrderByExpr, SelectItem, TableFactor, TableWithJoins,
@@ -101,8 +101,9 @@ pub(crate) fn execute_update_plan(
             new_row[*ordinal] = value.clone();
         }
 
-        let sort_changed =
-            sort_indices.iter().any(|&idx| compare_strs(&current_row[idx], &new_row[idx]) != Ordering::Equal);
+        let sort_changed = sort_indices
+            .iter()
+            .any(|&idx| compare_strs(&current_row[idx], &new_row[idx]) != Ordering::Equal);
 
         if sort_changed {
             delete_row(executor.page_handler().as_ref(), &table_name, row_idx)
@@ -114,8 +115,13 @@ pub(crate) fn execute_update_plan(
             insert_sorted_row(executor.page_handler().as_ref(), &table_name, &tuple)
                 .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
         } else {
-            overwrite_row(executor.page_handler().as_ref(), &table_name, row_idx, &new_row)
-                .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
+            overwrite_row(
+                executor.page_handler().as_ref(),
+                &table_name,
+                row_idx,
+                &new_row,
+            )
+            .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
         }
     }
 
@@ -251,7 +257,11 @@ fn collect_matching_row_ids(
         executor,
         table_name,
         sort_columns,
-        if has_selection { Some(&selection_expr) } else { None },
+        if has_selection {
+            Some(&selection_expr)
+        } else {
+            None
+        },
         column_types,
     )?;
     let mut row_ids = row_ids;

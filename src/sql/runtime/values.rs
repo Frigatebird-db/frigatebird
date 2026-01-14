@@ -221,12 +221,14 @@ where
 
 pub(crate) fn compare_scalar_values(left: &ScalarValue, right: &ScalarValue) -> Option<Ordering> {
     match (left, right) {
-        (ScalarValue::String(l), ScalarValue::Int64(r)) => {
-            l.parse::<f64>().ok().and_then(|lv| lv.partial_cmp(&(*r as f64)))
-        }
-        (ScalarValue::Int64(l), ScalarValue::String(r)) => {
-            r.parse::<f64>().ok().and_then(|rv| (*l as f64).partial_cmp(&rv))
-        }
+        (ScalarValue::String(l), ScalarValue::Int64(r)) => l
+            .parse::<f64>()
+            .ok()
+            .and_then(|lv| lv.partial_cmp(&(*r as f64))),
+        (ScalarValue::Int64(l), ScalarValue::String(r)) => r
+            .parse::<f64>()
+            .ok()
+            .and_then(|rv| (*l as f64).partial_cmp(&rv)),
         (ScalarValue::String(l), ScalarValue::Float64(r)) => {
             l.parse::<f64>().ok().and_then(|lv| lv.partial_cmp(r))
         }

@@ -1,9 +1,9 @@
 use crate::metadata_store::{PageDirectory, TableCatalog};
-use crate::sql::runtime::values::ScalarValue;
 use crate::sql::models::{
     ColumnSpec, CreateTablePlan, FilterExpr, PlannerError, PlannerResult, QueryPlan, TableAccess,
 };
 use crate::sql::physical_plan::PhysicalExpr;
+use crate::sql::runtime::values::ScalarValue;
 use crate::sql::types::DataType;
 use crate::sql::utils::{parse_bool, parse_datetime};
 use chrono::Utc;

@@ -34,7 +34,7 @@ impl SqlExecutor {
         };
 
         let catalog = self
-            .page_directory
+            .page_directory()
             .table_catalog(&table)
             .ok_or_else(|| SqlExecutionError::TableNotFound(table.clone()))?;
         let columns: Vec<ColumnCatalog> = catalog.columns().to_vec();
@@ -101,7 +101,7 @@ impl SqlExecutor {
         leading_column: &str,
     ) -> Result<bool, SqlExecutionError> {
         match self
-            .page_handler
+            .page_handler()
             .locate_latest_in_table(table, leading_column)
         {
             Some(descriptor) => Ok(descriptor.entry_count == 0),
@@ -117,10 +117,10 @@ impl SqlExecutor {
     ) -> Result<(), SqlExecutionError> {
         for column in columns {
             let descriptor = self
-                .page_handler
+                .page_handler()
                 .locate_latest_in_table(table, &column.name)
                 .or_else(|| {
-                    self.page_directory.register_page_in_table_with_sizes(
+                    self.page_directory().register_page_in_table_with_sizes(
                         table,
                         &column.name,
                         format!("mem://{table}_{}_page0", column.name),
@@ -140,11 +140,11 @@ impl SqlExecutor {
             let mut page = Page::new();
             page.page_metadata = descriptor.id.clone();
             page.entries.push(Entry::new(&row[column.ordinal]));
-            self.page_handler.write_back_uncompressed(
+            self.page_handler().write_back_uncompressed(
                 &descriptor.id,
                 PageCacheEntryUncompressed::from_disk_page(page, column.data_type),
             );
-            self.page_handler
+            self.page_handler()
                 .update_entry_count_in_table(table, &column.name, 1)
                 .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
         }

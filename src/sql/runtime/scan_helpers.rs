@@ -1,13 +1,13 @@
 use super::SqlExecutionError;
 use crate::metadata_store::{ColumnCatalog, PageDirectory};
 use crate::page_handler::PageHandler;
-use crate::sql::runtime::batch::ColumnarBatch;
 use crate::pipeline::planner::SortKeyPrefix;
+use crate::sql::physical_plan::PhysicalExpr;
+use crate::sql::runtime::batch::ColumnarBatch;
 use crate::sql::runtime::scan_stream::{
     BatchStream, PipelineBatchStream, PipelineScanBuilder, SingleBatchStream,
 };
 use crate::sql::runtime::values::compare_strs;
-use crate::sql::physical_plan::PhysicalExpr;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -77,9 +77,7 @@ pub(crate) fn locate_rows_by_sort_tuple(
             continue;
         }
 
-        if let Ok(pos) = entries
-            .binary_search_by(|entry| compare_strs(entry.get_data(), target))
-        {
+        if let Ok(pos) = entries.binary_search_by(|entry| compare_strs(entry.get_data(), target)) {
             let mut idx = pos;
             while idx > 0 && compare_strs(entries[idx - 1].get_data(), target) == Ordering::Equal {
                 idx -= 1;

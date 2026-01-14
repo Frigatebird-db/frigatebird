@@ -1,44 +1,42 @@
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
+use crate::pipeline::filtering::apply_qualify_filter;
+use crate::pipeline::operators::AggregateOperator;
 use crate::pipeline::operators::{
     DistinctOperator, FilterOperator, LimitOperator, PipelineOperator, ProjectOperator,
     SortOperator, WindowOperator as PipelineWindowOperator,
 };
+use crate::pipeline::planner::plan_row_ids_for_select;
+use crate::pipeline::window_helpers::ensure_common_partition;
 use crate::pipeline::window_helpers::{
     WindowFunctionPlan, assign_window_display_aliases, collect_window_function_plans,
     collect_window_plans_from_expr, plan_order_clauses, rewrite_projection_plan_for_windows,
     rewrite_window_expressions,
 };
-use crate::pipeline::filtering::apply_qualify_filter;
-use crate::sql::runtime::batch::ColumnarBatch;
-use crate::pipeline::operators::AggregateOperator;
-use crate::pipeline::planner::plan_row_ids_for_select;
-use crate::pipeline::window_helpers::ensure_common_partition;
-use crate::sql::runtime::aggregation_exec::finalize_aggregation_rows;
+use crate::sql::PlannerError;
 use crate::sql::executor::SqlExecutor;
-use crate::sql::runtime::{
-    AggregateProjectionPlan, OrderClause, ProjectionPlan, SelectResult, SqlExecutionError,
-};
+use crate::sql::physical_plan::PhysicalExpr;
+use crate::sql::planner::ExpressionPlanner;
+use crate::sql::runtime::aggregates::{plan_aggregate_projection, select_item_contains_aggregate};
+use crate::sql::runtime::aggregation_exec::finalize_aggregation_rows;
+use crate::sql::runtime::batch::ColumnarBatch;
 use crate::sql::runtime::executor_utils::merge_batches;
-use crate::sql::runtime::select_helpers::GroupByStrategy;
-use crate::sql::runtime::aggregates::{
-    plan_aggregate_projection, select_item_contains_aggregate,
-};
 use crate::sql::runtime::grouping_helpers::validate_group_by;
 use crate::sql::runtime::helpers::{
     collect_expr_column_ordinals, object_name_to_string, parse_limit, parse_offset,
 };
+use crate::sql::runtime::physical_evaluator::filter_supported;
 use crate::sql::runtime::projection_helpers::build_projection;
+use crate::sql::runtime::scan_helpers::build_scan_stream;
+use crate::sql::runtime::scan_stream::collect_stream_batches;
+use crate::sql::runtime::select_helpers::GroupByStrategy;
 use crate::sql::runtime::select_helpers::{
     build_aggregate_alias_map, build_projection_alias_map, determine_group_by_strategy,
     projection_expressions_from_plan, resolve_group_by_exprs, resolve_order_by_exprs,
     rewrite_aliases_in_expr,
 };
-use crate::sql::runtime::physical_evaluator::filter_supported;
-use crate::sql::runtime::scan_helpers::build_scan_stream;
-use crate::sql::runtime::scan_stream::collect_stream_batches;
-use crate::sql::PlannerError;
-use crate::sql::physical_plan::PhysicalExpr;
-use crate::sql::planner::ExpressionPlanner;
+use crate::sql::runtime::{
+    AggregateProjectionPlan, OrderClause, ProjectionPlan, SelectResult, SqlExecutionError,
+};
 use crate::sql::types::DataType;
 use sqlparser::ast::{
     Expr, GroupByExpr, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, TableFactor, Value,
@@ -294,8 +292,7 @@ pub(crate) fn execute_window_pipeline(
         });
     }
 
-    let mut window_operator =
-        PipelineWindowOperator::new(window_plans, partition_exprs, catalog);
+    let mut window_operator = PipelineWindowOperator::new(window_plans, partition_exprs, catalog);
     let processed_batches = window_operator.execute(base_batch)?;
     if processed_batches.is_empty() {
         return Ok(SelectResult {
@@ -456,7 +453,11 @@ pub(crate) fn execute_select_plan(
         Some(expr) => (expr, true),
         None => (Expr::Value(Value::Boolean(true)), false),
     };
-    let selection_expr_opt = if has_selection { Some(&selection_expr) } else { None };
+    let selection_expr_opt = if has_selection {
+        Some(&selection_expr)
+    } else {
+        None
+    };
 
     let expr_planner = ExpressionPlanner::new(&catalog);
     let physical_selection_expr = if has_selection {
@@ -540,7 +541,11 @@ pub(crate) fn execute_select_plan(
     let resolved_order_by = resolve_order_by_exprs(&order_by_clauses, &projection_exprs)?;
     let order_clauses = plan_order_clauses(
         &resolved_order_by,
-        if alias_map.is_empty() { None } else { Some(&alias_map) },
+        if alias_map.is_empty() {
+            None
+        } else {
+            Some(&alias_map)
+        },
     )?;
     let qualify_expr = qualify.as_ref().map(|expr| {
         if alias_map.is_empty() {
@@ -564,8 +569,7 @@ pub(crate) fn execute_select_plan(
         required_ordinals.insert(column.ordinal);
     }
     for clause in &order_clauses {
-        let ordinals =
-            collect_expr_column_ordinals(&clause.expr, &column_ordinals, &table_name)?;
+        let ordinals = collect_expr_column_ordinals(&clause.expr, &column_ordinals, &table_name)?;
         required_ordinals.extend(ordinals);
     }
     if let Some(expr) = qualify_expr.as_ref() {
@@ -575,15 +579,13 @@ pub(crate) fn execute_select_plan(
     if let Some(group_info) = &group_by_info {
         for grouping in &group_info.sets {
             for expr in &grouping.expressions {
-                let ordinals =
-                    collect_expr_column_ordinals(expr, &column_ordinals, &table_name)?;
+                let ordinals = collect_expr_column_ordinals(expr, &column_ordinals, &table_name)?;
                 required_ordinals.extend(ordinals);
             }
         }
     }
     if let Some(having_expr) = &having {
-        let ordinals =
-            collect_expr_column_ordinals(having_expr, &column_ordinals, &table_name)?;
+        let ordinals = collect_expr_column_ordinals(having_expr, &column_ordinals, &table_name)?;
         required_ordinals.extend(ordinals);
     }
     for plan in &window_plans {
@@ -804,18 +806,18 @@ pub(crate) fn execute_select_plan(
 
         if let Some(group_info) = &group_by_info {
             for grouping in &group_info.sets {
-                aggregated_rows.extend(
-                    aggregate_operator.execute_grouping_set_rows_from_batch(
-                        &base_batch,
-                        &grouping.expressions,
-                        Some(grouping.masked_exprs.as_slice()),
-                    )?,
-                );
+                aggregated_rows.extend(aggregate_operator.execute_grouping_set_rows_from_batch(
+                    &base_batch,
+                    &grouping.expressions,
+                    Some(grouping.masked_exprs.as_slice()),
+                )?);
             }
         } else {
-            aggregated_rows.extend(
-                aggregate_operator.execute_grouping_set_rows_from_batch(&base_batch, &[], None)?,
-            );
+            aggregated_rows.extend(aggregate_operator.execute_grouping_set_rows_from_batch(
+                &base_batch,
+                &[],
+                None,
+            )?);
         }
 
         return finalize_aggregation_rows(

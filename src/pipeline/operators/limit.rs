@@ -1,5 +1,5 @@
-use crate::sql::runtime::limit_exec::apply_limit_offset;
 use crate::sql::runtime::SqlExecutionError;
+use crate::sql::runtime::limit_exec::apply_limit_offset;
 
 use super::{PipelineBatch, PipelineOperator};
 

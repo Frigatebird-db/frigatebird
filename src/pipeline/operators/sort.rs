@@ -10,10 +10,7 @@ pub struct SortOperator<'a> {
 }
 
 impl<'a> SortOperator<'a> {
-    pub(crate) fn new(
-        clauses: &'a [OrderClause],
-        catalog: &'a TableCatalog,
-    ) -> Self {
+    pub(crate) fn new(clauses: &'a [OrderClause], catalog: &'a TableCatalog) -> Self {
         Self { clauses, catalog }
     }
 

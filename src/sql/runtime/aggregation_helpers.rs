@@ -1,5 +1,5 @@
-use super::aggregates::AggregateFunctionPlan;
 use super::SqlExecutionError;
+use super::aggregates::AggregateFunctionPlan;
 use sqlparser::ast::{Expr, Value};
 use std::collections::HashMap;
 

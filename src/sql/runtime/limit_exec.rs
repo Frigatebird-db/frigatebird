@@ -1,5 +1,5 @@
-use crate::sql::runtime::batch::ColumnarBatch;
 use super::SqlExecutionError;
+use crate::sql::runtime::batch::ColumnarBatch;
 
 pub(crate) fn apply_limit_offset<I>(
     batches: I,
