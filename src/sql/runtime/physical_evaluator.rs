@@ -935,6 +935,30 @@ fn evaluate_like(
         && let Some(page) = batch.columns.get(index)
     {
         if let Some((prefix, exact)) = extract_like_prefix(pat) {
+            if let ColumnData::Dictionary(dict) = &page.data {
+                let mut matches_key = vec![false; dict.values.len()];
+                for idx in 0..dict.values.len() {
+                    let bytes = dict.values.get_bytes(idx);
+                    if exact && bytes.len() != prefix.len() {
+                        continue;
+                    }
+                    if bytes.len() < prefix.len() {
+                        continue;
+                    }
+                    let slice = &bytes[..prefix.len()];
+                    let matches = if case_insensitive {
+                        slice.eq_ignore_ascii_case(&prefix)
+                    } else {
+                        slice == prefix.as_slice()
+                    };
+                    matches_key[idx] = if negated { !matches } else { matches };
+                }
+                return build_indexed_word_bitmap(batch.num_rows, &page.null_bitmap, |i| {
+                    let key = dict.keys[i] as usize;
+                    *matches_key.get(key).unwrap_or(&false)
+                });
+            }
+
             return build_indexed_word_bitmap(batch.num_rows, &page.null_bitmap, |i| {
                 let bytes = match &page.data {
                     ColumnData::Text(col) => col.get_bytes(i),
