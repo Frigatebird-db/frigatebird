@@ -1,3 +1,4 @@
+use crate::executor::PipelineExecutor;
 use crate::metadata_store::{MetaJournal, PageDirectory};
 use crate::page_handler::PageHandler;
 use crate::wal::{FsyncSchedule, ReadConsistency, Walrus};
@@ -93,11 +94,16 @@ impl SqlExecutor {
             shard_count,
             wal_enabled,
         ));
+        let executor_threads = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(2);
+        let pipeline_executor = Arc::new(PipelineExecutor::new(executor_threads));
 
         SqlExecutor {
             page_handler,
             page_directory,
             writer,
+            pipeline_executor: Some(pipeline_executor),
             meta_journal: Some(meta_journal),
             use_writer_inserts,
             wal_namespace: namespace,

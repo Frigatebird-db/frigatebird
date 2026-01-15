@@ -129,6 +129,7 @@ pub(crate) fn build_scan_stream(
     scan_ordinals: &BTreeSet<usize>,
     selection_expr: Option<&PhysicalExpr>,
     row_ids: Option<Vec<u64>>,
+    pipeline_executor: Option<Arc<crate::executor::PipelineExecutor>>,
 ) -> Result<Box<dyn BatchStream>, SqlExecutionError> {
     let effective_selection = if row_ids.is_some() {
         None
@@ -142,6 +143,7 @@ pub(crate) fn build_scan_stream(
         scan_ordinals,
         effective_selection,
         row_ids,
+        pipeline_executor,
     )? {
         return Ok(Box::new(stream));
     }
@@ -155,6 +157,7 @@ pub(crate) fn build_pipeline_scan_stream(
     scan_ordinals: &BTreeSet<usize>,
     selection_expr: Option<&PhysicalExpr>,
     row_ids: Option<Vec<u64>>,
+    pipeline_executor: Option<Arc<crate::executor::PipelineExecutor>>,
 ) -> Result<Option<PipelineBatchStream>, SqlExecutionError> {
     PipelineScanBuilder::new(
         Arc::clone(page_handler),
@@ -163,6 +166,7 @@ pub(crate) fn build_pipeline_scan_stream(
         scan_ordinals,
         selection_expr,
         row_ids.map(Arc::new),
+        pipeline_executor,
     )
     .build()
 }

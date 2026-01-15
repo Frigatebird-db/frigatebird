@@ -19,6 +19,7 @@ mod entry;
 mod helpers;
 mod metadata_store;
 mod ops_handler;
+mod executor;
 mod page;
 mod page_handler;
 mod pipeline;

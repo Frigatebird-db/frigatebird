@@ -1,3 +1,4 @@
+use crate::executor::PipelineExecutor;
 use crate::metadata_store::{MetaJournal, PageDirectory, TableCatalog};
 use crate::page_handler::PageHandler;
 use crate::writer::Writer;
@@ -7,6 +8,7 @@ pub struct SqlExecutor {
     pub(crate) page_handler: Arc<PageHandler>,
     pub(crate) page_directory: Arc<PageDirectory>,
     pub(crate) writer: Arc<Writer>,
+    pub(crate) pipeline_executor: Option<Arc<PipelineExecutor>>,
     pub(crate) meta_journal: Option<Arc<MetaJournal>>,
     pub(crate) use_writer_inserts: bool,
     pub(crate) wal_namespace: String,
@@ -25,6 +27,10 @@ impl SqlExecutor {
 
     pub(crate) fn writer(&self) -> &Writer {
         &self.writer
+    }
+
+    pub(crate) fn pipeline_executor(&self) -> Option<Arc<PipelineExecutor>> {
+        self.pipeline_executor.clone()
     }
 
     pub(crate) fn use_writer_inserts(&self) -> bool {

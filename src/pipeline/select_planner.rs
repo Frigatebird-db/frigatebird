@@ -71,6 +71,7 @@ pub(crate) fn execute_projection_pipeline(
         required_ordinals,
         selection_physical_expr,
         row_ids,
+        executor.pipeline_executor(),
     )?;
     let mut batches = collect_stream_batches(stream)?;
 
@@ -242,6 +243,7 @@ pub(crate) fn execute_window_pipeline(
         required_ordinals,
         selection_physical_expr,
         row_ids,
+        executor.pipeline_executor(),
     )?;
     let mut batches = collect_stream_batches(stream)?;
     if batches.is_empty() {
@@ -719,6 +721,7 @@ pub(crate) fn execute_select_plan(
         &required_ordinals,
         scan_selection_expr,
         row_ids.clone(),
+        executor.pipeline_executor(),
     )?;
     let mut base_batches = collect_stream_batches(stream)?;
     if has_selection

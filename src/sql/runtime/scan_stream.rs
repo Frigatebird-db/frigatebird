@@ -2,6 +2,7 @@ use super::SqlExecutionError;
 use super::batch::ColumnarBatch;
 use crate::metadata_store::ColumnCatalog;
 use crate::page_handler::PageHandler;
+use crate::executor::PipelineExecutor;
 use crate::pipeline::{Job, PipelineBatch, PipelineStep};
 use crate::sql::FilterExpr;
 use crate::sql::physical_plan::PhysicalExpr;
@@ -47,14 +48,20 @@ pub struct PipelineBatchStream {
     job: Option<Job>,
     receiver: Receiver<PipelineBatch>,
     executed: bool,
+    executor: Option<Arc<PipelineExecutor>>,
 }
 
 impl PipelineBatchStream {
-    pub fn new(job: Job, receiver: Receiver<PipelineBatch>) -> Self {
+    pub fn new(
+        job: Job,
+        receiver: Receiver<PipelineBatch>,
+        executor: Option<Arc<PipelineExecutor>>,
+    ) -> Self {
         Self {
             job: Some(job),
             receiver,
             executed: false,
+            executor,
         }
     }
 
@@ -63,9 +70,13 @@ impl PipelineBatchStream {
             return;
         }
         if let Some(job) = self.job.take() {
-            let step_count = job.steps.len();
-            for _ in 0..step_count {
-                job.get_next();
+            if let Some(executor) = self.executor.as_ref() {
+                executor.submit(job);
+            } else {
+                let step_count = job.steps.len();
+                for _ in 0..step_count {
+                    job.get_next();
+                }
             }
         }
         self.executed = true;
@@ -90,6 +101,7 @@ pub struct PipelineScanBuilder<'a> {
     scan_ordinals: &'a BTreeSet<usize>,
     selection_expr: Option<&'a PhysicalExpr>,
     row_ids: Option<Arc<Vec<u64>>>,
+    executor: Option<Arc<PipelineExecutor>>,
 }
 
 impl<'a> PipelineScanBuilder<'a> {
@@ -100,6 +112,7 @@ impl<'a> PipelineScanBuilder<'a> {
         scan_ordinals: &'a BTreeSet<usize>,
         selection_expr: Option<&'a PhysicalExpr>,
         row_ids: Option<Arc<Vec<u64>>>,
+        executor: Option<Arc<PipelineExecutor>>,
     ) -> Self {
         Self {
             page_handler,
@@ -108,6 +121,7 @@ impl<'a> PipelineScanBuilder<'a> {
             scan_ordinals,
             selection_expr,
             row_ids,
+            executor,
         }
     }
 
@@ -170,7 +184,11 @@ impl<'a> PipelineScanBuilder<'a> {
             entry_producer,
             output_receiver.clone(),
         );
-        Ok(Some(PipelineBatchStream::new(job, output_receiver)))
+        Ok(Some(PipelineBatchStream::new(
+            job,
+            output_receiver,
+            self.executor,
+        )))
     }
 }
 

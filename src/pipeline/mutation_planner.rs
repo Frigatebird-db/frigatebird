@@ -286,6 +286,7 @@ fn collect_matching_row_ids(
         &required_ordinals,
         vectorized_selection_expr,
         row_ids,
+        executor.pipeline_executor(),
     )?;
     let selection_applied_in_scan = has_selection && can_use_physical_filter && !has_row_ids;
     let mut matching_rows = Vec::new();
