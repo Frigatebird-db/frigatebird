@@ -107,24 +107,40 @@ pub(crate) fn deduplicate_batches(
 
 fn dedup_single_column(batches: &[ColumnarBatch]) -> Option<ColumnarBatch> {
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
+    let mut ordered: Vec<Option<Vec<u8>>> = Vec::new();
     let mut saw_null = false;
     for batch in batches {
         let page = batch.columns.get(&0)?;
-        if page.null_bitmap.count_ones() > 0 {
-            saw_null = true;
-        }
         match &page.data {
             ColumnData::Dictionary(dict) => {
-                for idx in 0..dict.values.len() {
-                    seen.insert(dict.values.get_bytes(idx).to_vec());
+                for (row_idx, &key) in dict.keys.iter().enumerate() {
+                    if page.null_bitmap.is_set(row_idx) {
+                        if !saw_null {
+                            ordered.push(None);
+                            saw_null = true;
+                        }
+                        continue;
+                    }
+                    let bytes = dict.values.get_bytes(key as usize);
+                    let owned = bytes.to_vec();
+                    if seen.insert(owned.clone()) {
+                        ordered.push(Some(owned));
+                    }
                 }
             }
             ColumnData::Text(col) => {
                 for idx in 0..col.len() {
                     if page.null_bitmap.is_set(idx) {
+                        if !saw_null {
+                            ordered.push(None);
+                            saw_null = true;
+                        }
                         continue;
                     }
-                    seen.insert(col.get_bytes(idx).to_vec());
+                    let owned = col.get_bytes(idx).to_vec();
+                    if seen.insert(owned.clone()) {
+                        ordered.push(Some(owned));
+                    }
                 }
             }
             _ => {
@@ -133,20 +149,21 @@ fn dedup_single_column(batches: &[ColumnarBatch]) -> Option<ColumnarBatch> {
         }
     }
 
-    let mut values: Vec<Vec<u8>> = seen.into_iter().collect();
-    if values.is_empty() && !saw_null {
+    if ordered.is_empty() && !saw_null {
         return Some(ColumnarBatch::new());
     }
 
-    let mut col = BytesColumn::with_capacity(values.len() + saw_null as usize, values.len() * 8);
-    let mut null_bitmap = Bitmap::new(values.len() + saw_null as usize);
-    for value in values.drain(..) {
-        col.push(&String::from_utf8_lossy(&value));
-    }
-    if saw_null {
-        let null_idx = col.len();
-        col.push("");
-        null_bitmap.set(null_idx);
+    let mut col = BytesColumn::with_capacity(ordered.len(), ordered.len() * 8);
+    let mut null_bitmap = Bitmap::new(ordered.len());
+    for value in ordered {
+        match value {
+            Some(bytes) => col.push(&String::from_utf8_lossy(&bytes)),
+            None => {
+                let null_idx = col.len();
+                col.push("");
+                null_bitmap.set(null_idx);
+            }
+        }
     }
 
     let num_rows = col.len();
