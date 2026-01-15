@@ -6,7 +6,9 @@ use crate::helpers::compressor::Compressor;
 use crate::metadata_store::{
     CatalogError, PageDescriptor, PageDirectory, PageSlice, RowLocation, TableCatalog,
 };
+use crate::page::Page;
 use crate::page_handler::page_io::PageIO;
+use crate::sql::runtime::batch::ColumnarPage;
 use crate::sql::types::DataType;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
@@ -408,6 +410,87 @@ impl PageHandler {
         let location = self.locate_row_in_table(table, column, row)?;
         let page = self.get_page(location.descriptor.clone())?;
         page.page.entry_at(location.page_row_index as usize)
+    }
+
+    pub fn gather_column_for_rows(
+        &self,
+        table: &str,
+        column: &str,
+        row_ids: &[u64],
+    ) -> ColumnarPage {
+        if row_ids.is_empty() {
+            return ColumnarPage::empty();
+        }
+
+        let catalog = self.table_catalog(table).expect("missing catalog");
+        let col_cat = catalog.column(column).expect("missing column");
+        let mut output: Option<ColumnarPage> = None;
+        let mut current_page_id: Option<String> = None;
+        let mut current_page: Option<Arc<PageCacheEntryUncompressed>> = None;
+        let mut current_indices: Vec<usize> = Vec::new();
+        let mut missing_page: Option<ColumnarPage> = None;
+
+        let mut flush = |output: &mut Option<ColumnarPage>,
+                         current_page: &Option<Arc<PageCacheEntryUncompressed>>,
+                         current_indices: &mut Vec<usize>| {
+            if current_indices.is_empty() {
+                return;
+            }
+            if let Some(page) = current_page {
+                let gathered = page.page.gather(current_indices);
+                if let Some(existing) = output.as_mut() {
+                    existing.append(&gathered);
+                } else {
+                    *output = Some(gathered);
+                }
+            }
+            current_indices.clear();
+        };
+
+        for &row_id in row_ids {
+            let location = self.locate_row_in_table(table, column, row_id);
+            match location {
+                Some(loc) => {
+                    if current_page_id.as_deref() != Some(loc.descriptor.id.as_str()) {
+                        flush(&mut output, &current_page, &mut current_indices);
+                        current_page_id = Some(loc.descriptor.id.clone());
+                        current_page = self.get_page(loc.descriptor.clone());
+                        if current_page.is_none() {
+                            current_page_id = None;
+                            let missing = missing_page.get_or_insert_with(|| {
+                                let mut page = Page::new();
+                                page.add_entry(entry::Entry::new(""));
+                                ColumnarPage::load(page, col_cat.data_type)
+                            });
+                            if let Some(existing) = output.as_mut() {
+                                existing.append(missing);
+                            } else {
+                                output = Some(missing.clone());
+                            }
+                            continue;
+                        }
+                    }
+                    current_indices.push(loc.page_row_index as usize);
+                }
+                None => {
+                    flush(&mut output, &current_page, &mut current_indices);
+                    let missing = missing_page.get_or_insert_with(|| {
+                        let mut page = Page::new();
+                        page.add_entry(entry::Entry::new(""));
+                        ColumnarPage::load(page, col_cat.data_type)
+                    });
+                    if let Some(existing) = output.as_mut() {
+                        existing.append(missing);
+                    } else {
+                        output = Some(missing.clone());
+                    }
+                }
+            }
+        }
+
+        flush(&mut output, &current_page, &mut current_indices);
+
+        output.unwrap_or_else(ColumnarPage::empty)
     }
 
     pub fn update_entry_count_in_table(

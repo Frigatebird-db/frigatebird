@@ -250,28 +250,7 @@ fn materialize_column_in_batch(
     column: &str,
     row_ids: &[u64],
 ) -> ColumnarPage {
-    if row_ids.is_empty() {
-        return ColumnarPage::empty();
-    }
-
-    let catalog = page_handler.table_catalog(table).expect("missing catalog");
-    let col_cat = catalog.column(column).expect("missing column");
-
-    let mut entries = Vec::with_capacity(row_ids.len());
-    for &row_id in row_ids {
-        if let Some(entry) = page_handler.read_entry_at(table, column, row_id) {
-            entries.push(entry);
-        } else {
-            entries.push(crate::entry::Entry::new(""));
-        }
-    }
-
-    let disk_page = crate::page::Page {
-        page_metadata: String::new(),
-        entries,
-    };
-
-    ColumnarPage::load(disk_page, col_cat.data_type)
+    page_handler.gather_column_for_rows(table, column, row_ids)
 }
 
 pub struct Job {

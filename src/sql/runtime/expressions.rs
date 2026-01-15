@@ -11,6 +11,7 @@ use super::values::{
     compare_scalar_values, scalar_from_f64,
 };
 use crate::metadata_store::TableCatalog;
+use crate::sql::utils::parse_bool;
 use sqlparser::ast::{
     BinaryOperator, DateTimeField, Expr, Function, FunctionArg, FunctionArgExpr, UnaryOperator,
     Value,
@@ -716,6 +717,15 @@ pub(crate) fn evaluate_expression_on_batch(
                 BinaryOperator::Divide => {
                     vectorized_numeric_binary_op(&left_page, &right_page, |a, b| a / b)
                 }
+                BinaryOperator::And => {
+                    vectorized_boolean_binary_op(&left_page, &right_page, |a, b| a && b)
+                }
+                BinaryOperator::Or => {
+                    vectorized_boolean_binary_op(&left_page, &right_page, |a, b| a || b)
+                }
+                BinaryOperator::Xor => {
+                    vectorized_boolean_binary_op(&left_page, &right_page, |a, b| a ^ b)
+                }
                 BinaryOperator::Eq => {
                     vectorized_numeric_comparison_op(&left_page, &right_page, |ord| {
                         ord == Ordering::Equal
@@ -756,6 +766,7 @@ pub(crate) fn evaluate_expression_on_batch(
             match op {
                 UnaryOperator::Plus => Ok(page),
                 UnaryOperator::Minus => vectorized_numeric_unary_op(&page, |value| -value),
+                UnaryOperator::Not => vectorized_boolean_unary_op(&page, |value| !value),
                 _ => Err(SqlExecutionError::Unsupported(format!(
                     "unary operator {op:?} is not supported in vectorized projection"
                 ))),
@@ -1236,23 +1247,85 @@ where
         ));
     }
 
-    let mut col = BytesColumn::with_capacity(len, len * 5); // "true"/"false" ~5 chars
+    let mut values = Vec::with_capacity(len);
     let mut null_bitmap = Bitmap::new(len);
     for idx in 0..len {
         if left.null_bitmap.is_set(idx) || right.null_bitmap.is_set(idx) {
             null_bitmap.set(idx);
-            col.push("");
+            values.push(false);
             continue;
         }
         let lhs = numeric_value_at(left, idx)?;
         let rhs = numeric_value_at(right, idx)?;
         let matches = lhs.partial_cmp(&rhs).map(&predicate).unwrap_or(false);
-        col.push(&bool_to_text(matches));
+        values.push(matches);
     }
 
     Ok(ColumnarPage {
         page_metadata: String::new(),
-        data: ColumnData::Text(col),
+        data: ColumnData::Boolean(values),
+        null_bitmap,
+        num_rows: len,
+    })
+}
+
+fn vectorized_boolean_binary_op<F>(
+    left: &ColumnarPage,
+    right: &ColumnarPage,
+    op: F,
+) -> Result<ColumnarPage, SqlExecutionError>
+where
+    F: Fn(bool, bool) -> bool,
+{
+    let len = left.len();
+    if right.len() != len {
+        return Err(SqlExecutionError::Unsupported(
+            "vectorized expressions require operands with equal lengths".into(),
+        ));
+    }
+
+    let mut values = Vec::with_capacity(len);
+    let mut null_bitmap = Bitmap::new(len);
+    for idx in 0..len {
+        if left.null_bitmap.is_set(idx) || right.null_bitmap.is_set(idx) {
+            null_bitmap.set(idx);
+            values.push(false);
+            continue;
+        }
+        let lhs = boolean_value_at(left, idx)?;
+        let rhs = boolean_value_at(right, idx)?;
+        values.push(op(lhs, rhs));
+    }
+
+    Ok(ColumnarPage {
+        page_metadata: String::new(),
+        data: ColumnData::Boolean(values),
+        null_bitmap,
+        num_rows: len,
+    })
+}
+
+fn vectorized_boolean_unary_op<F>(
+    page: &ColumnarPage,
+    op: F,
+) -> Result<ColumnarPage, SqlExecutionError>
+where
+    F: Fn(bool) -> bool,
+{
+    let len = page.len();
+    let mut values = Vec::with_capacity(len);
+    let null_bitmap = page.null_bitmap.clone();
+    for idx in 0..len {
+        if page.null_bitmap.is_set(idx) {
+            values.push(false);
+            continue;
+        }
+        let value = boolean_value_at(page, idx)?;
+        values.push(op(value));
+    }
+    Ok(ColumnarPage {
+        page_metadata: String::new(),
+        data: ColumnData::Boolean(values),
         null_bitmap,
         num_rows: len,
     })
@@ -1284,6 +1357,24 @@ fn numeric_value_at(page: &ColumnarPage, idx: usize) -> Result<f64, SqlExecution
     }
 }
 
-fn bool_to_text(value: bool) -> String {
-    if value { "true".into() } else { "false".into() }
+fn boolean_value_at(page: &ColumnarPage, idx: usize) -> Result<bool, SqlExecutionError> {
+    match &page.data {
+        ColumnData::Boolean(values) => values.get(idx).copied().ok_or_else(|| {
+            SqlExecutionError::OperationFailed("vectorized expression index out of bounds".into())
+        }),
+        ColumnData::Text(values) => parse_bool_bytes(values.get_bytes(idx)),
+        ColumnData::Dictionary(values) => parse_bool_bytes(values.get_bytes(idx)),
+        _ => Err(SqlExecutionError::Unsupported(
+            "vectorized expression requires boolean operands".into(),
+        )),
+    }
+}
+
+fn parse_bool_bytes(bytes: &[u8]) -> Result<bool, SqlExecutionError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        SqlExecutionError::Unsupported("vectorized expression requires boolean operands".into())
+    })?;
+    parse_bool(text).ok_or_else(|| {
+        SqlExecutionError::Unsupported("vectorized expression requires boolean operands".into())
+    })
 }

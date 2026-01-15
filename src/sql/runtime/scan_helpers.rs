@@ -101,23 +101,32 @@ pub(crate) fn locate_rows_by_sort_tuple(
         return Ok(result);
     }
 
-    let mut refined = Vec::new();
-    'outer: for row_idx in result {
-        for (column, expected) in sort_columns.iter().zip(key_values.iter()) {
-            let entry = page_handler
-                .read_entry_at(table, &column.name, row_idx)
-                .ok_or_else(|| {
-                    SqlExecutionError::OperationFailed(format!(
-                        "unable to read row {row_idx} for column {table}.{}",
-                        column.name
-                    ))
-                })?;
-            if compare_strs(entry.get_data(), expected) != Ordering::Equal {
-                continue 'outer;
+    if result.is_empty() {
+        return Ok(result);
+    }
+
+    let mut keep = vec![true; result.len()];
+    for (column, expected) in sort_columns.iter().zip(key_values.iter()) {
+        let page = page_handler.gather_column_for_rows(table, &column.name, &result);
+        for (idx, keep_row) in keep.iter_mut().enumerate() {
+            if !*keep_row {
+                continue;
+            }
+            let matches = page
+                .get_value_as_string(idx)
+                .map(|value| compare_strs(&value, expected) == Ordering::Equal)
+                .unwrap_or(false);
+            if !matches {
+                *keep_row = false;
             }
         }
-        refined.push(row_idx);
     }
+
+    let refined = result
+        .into_iter()
+        .zip(keep.into_iter())
+        .filter_map(|(row_id, keep_row)| keep_row.then_some(row_id))
+        .collect();
 
     Ok(refined)
 }

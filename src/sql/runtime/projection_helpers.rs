@@ -6,7 +6,6 @@ use super::helpers::{
     wildcard_options_supported,
 };
 use super::values::CachedValue;
-use crate::entry::Entry;
 use crate::metadata_store::ColumnCatalog;
 use crate::page_handler::PageHandler;
 use sqlparser::ast::Expr;
@@ -146,77 +145,21 @@ pub(crate) fn materialize_columns(
         return Ok(result);
     }
 
-    let start_row = *rows.first().expect("rows not empty");
-    let end_row = *rows.last().expect("rows not empty");
-
     for &ordinal in ordinals {
         let column = table_columns.get(ordinal).ok_or_else(|| {
             SqlExecutionError::OperationFailed(format!(
                 "invalid column ordinal {ordinal} on table {table}"
             ))
         })?;
-
-        let slices = page_handler.list_range_in_table(table, &column.name, start_row, end_row);
-        if slices.is_empty() {
-            result.insert(ordinal, HashMap::new());
-            continue;
-        }
-
-        let descriptors = slices
-            .iter()
-            .map(|slice| slice.descriptor.clone())
-            .collect::<Vec<_>>();
-        let pages = page_handler.get_pages(descriptors);
-
-        let mut page_map: HashMap<String, Vec<Entry>> = HashMap::with_capacity(pages.len());
-        for page in pages {
-            let disk_page = page.page.as_disk_page();
-            page_map.insert(disk_page.page_metadata.clone(), disk_page.entries);
-        }
-
+        let page = page_handler.gather_column_for_rows(table, &column.name, rows);
         let mut values: HashMap<u64, CachedValue> = HashMap::with_capacity(rows.len());
-        let mut row_iter = rows.iter().copied().peekable();
-        let mut current_row = start_row;
-
-        'outer: for slice in slices {
-            if row_iter.peek().is_none() {
-                break;
-            }
-
-            let entries = page_map.get(&slice.descriptor.id).ok_or_else(|| {
-                SqlExecutionError::OperationFailed(format!(
-                    "missing page {} for column {}",
-                    slice.descriptor.id, column.name
-                ))
-            })?;
-
-            let start = slice.start_row_offset as usize;
-            let end = slice.end_row_offset.min(entries.len() as u64) as usize;
-
-            for idx in start..end {
-                while let Some(&target) = row_iter.peek() {
-                    if target < current_row {
-                        row_iter.next();
-                    } else {
-                        break;
-                    }
-                }
-
-                match row_iter.peek().copied() {
-                    Some(target) if target == current_row => {
-                        if let Some(entry) = entries.get(idx) {
-                            values.insert(target, CachedValue::from_entry(entry));
-                        }
-                        row_iter.next();
-                    }
-                    Some(_) => {}
-                    None => break 'outer,
-                }
-
-                current_row = current_row.saturating_add(1);
-            }
+        for (idx, row_id) in rows.iter().copied().enumerate() {
+            let value = page
+                .get_value_as_string(idx)
+                .map(CachedValue::Text)
+                .unwrap_or(CachedValue::Null);
+            values.insert(row_id, value);
         }
-
         result.insert(ordinal, values);
     }
 
