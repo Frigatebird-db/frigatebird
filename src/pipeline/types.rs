@@ -91,6 +91,7 @@ pub enum PagePruneOp {
     GtEq,
     Lt,
     LtEq,
+    Prefix,
     IsNull,
     IsNotNull,
 }
@@ -99,6 +100,9 @@ pub enum PagePruneOp {
 pub struct PagePrunePredicate {
     pub op: PagePruneOp,
     pub value: Option<ScalarValue>,
+    pub prefix: Option<Vec<u8>>,
+    pub prefix_upper: Option<Vec<u8>>,
+    pub case_insensitive: bool,
 }
 
 impl PipelineStep {
@@ -326,6 +330,20 @@ fn predicate_prunes(
                 return range_prunes_text(min, max, value, &predicate.op);
             }
         },
+        PagePruneOp::Prefix => {
+            if predicate.case_insensitive {
+                return false;
+            }
+            if !matches!(stats.kind, ColumnStatsKind::Text) {
+                return false;
+            }
+            let Some(prefix) = predicate.prefix.as_ref() else {
+                return false;
+            };
+            let min = stats.min_value.as_deref().map(|val| val.as_bytes());
+            let max = stats.max_value.as_deref().map(|val| val.as_bytes());
+            return prefix_prunes_text(min, max, predicate.prefix_upper.as_deref(), prefix);
+        }
     }
     false
 }
@@ -387,6 +405,26 @@ fn range_prunes_text(
         PagePruneOp::LtEq => cmp_min.map_or(false, |cmp| cmp == std::cmp::Ordering::Less),
         _ => false,
     }
+}
+
+fn prefix_prunes_text(
+    min: Option<&[u8]>,
+    max: Option<&[u8]>,
+    upper: Option<&[u8]>,
+    prefix: &[u8],
+) -> bool {
+    if let Some(max_val) = max
+        && max_val < prefix
+    {
+        return true;
+    }
+    if let Some(upper_val) = upper
+        && let Some(min_val) = min
+        && min_val >= upper_val
+    {
+        return true;
+    }
+    false
 }
 
 impl PipelineStepInterface for PipelineStep {

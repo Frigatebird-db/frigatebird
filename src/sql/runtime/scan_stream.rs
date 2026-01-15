@@ -250,6 +250,9 @@ fn collect_prunable_predicates(
                 out.push(PagePrunePredicate {
                     op: PagePruneOp::IsNull,
                     value: None,
+                    prefix: None,
+                    prefix_upper: None,
+                    case_insensitive: false,
                 });
             }
         }
@@ -261,10 +264,43 @@ fn collect_prunable_predicates(
                 out.push(PagePrunePredicate {
                     op: PagePruneOp::IsNotNull,
                     value: None,
+                    prefix: None,
+                    prefix_upper: None,
+                    case_insensitive: false,
                 });
             }
         }
         PhysicalExpr::Cast { expr, .. } => collect_prunable_predicates(expr, root_ordinal, out),
+        PhysicalExpr::Like {
+            expr,
+            pattern,
+            case_insensitive,
+            negated,
+        } => {
+            if *negated {
+                return;
+            }
+            let PhysicalExpr::Column { index, .. } = expr.as_ref() else {
+                return;
+            };
+            if *index != root_ordinal {
+                return;
+            }
+            let PhysicalExpr::Literal(crate::sql::runtime::values::ScalarValue::String(pat)) =
+                pattern.as_ref()
+            else {
+                return;
+            };
+            if let Some((prefix, upper)) = like_prefix_bounds(pat) {
+                out.push(PagePrunePredicate {
+                    op: PagePruneOp::Prefix,
+                    value: None,
+                    prefix: Some(prefix),
+                    prefix_upper: upper,
+                    case_insensitive: *case_insensitive,
+                });
+            }
+        }
         _ => {}
     }
 }
@@ -306,5 +342,47 @@ fn prune_predicate_for_op(
     Some(PagePrunePredicate {
         op: prune_op,
         value: Some(value),
+        prefix: None,
+        prefix_upper: None,
+        case_insensitive: false,
     })
+}
+
+fn like_prefix_bounds(pattern: &str) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let bytes = pattern.as_bytes();
+    let mut first_wildcard = None;
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b == b'_' {
+            return None;
+        }
+        if b == b'%' {
+            first_wildcard = Some(idx);
+            break;
+        }
+    }
+
+    let prefix = match first_wildcard {
+        None => bytes.to_vec(),
+        Some(pos) => {
+            if !bytes[pos..].iter().all(|&b| b == b'%') {
+                return None;
+            }
+            bytes[..pos].to_vec()
+        }
+    };
+
+    let upper = next_prefix_upper(&prefix);
+    Some((prefix, upper))
+}
+
+fn next_prefix_upper(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut upper = prefix.to_vec();
+    for idx in (0..upper.len()).rev() {
+        if upper[idx] != u8::MAX {
+            upper[idx] = upper[idx].wrapping_add(1);
+            upper.truncate(idx + 1);
+            return Some(upper);
+        }
+    }
+    None
 }

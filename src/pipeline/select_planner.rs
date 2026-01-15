@@ -19,6 +19,7 @@ use crate::sql::planner::ExpressionPlanner;
 use crate::sql::runtime::aggregates::{plan_aggregate_projection, select_item_contains_aggregate};
 use crate::sql::runtime::aggregation_exec::finalize_aggregation_rows;
 use crate::sql::runtime::batch::ColumnarBatch;
+use crate::sql::runtime::executor_utils::rows_to_batch;
 use crate::sql::runtime::executor_utils::merge_batches;
 use crate::sql::runtime::grouping_helpers::validate_group_by;
 use crate::sql::runtime::helpers::{
@@ -27,6 +28,7 @@ use crate::sql::runtime::helpers::{
 };
 use crate::sql::runtime::physical_evaluator::filter_supported;
 use crate::sql::runtime::projection_helpers::build_projection;
+use crate::sql::runtime::row_counts::estimate_table_row_count;
 use crate::sql::runtime::scan_helpers::build_scan_stream;
 use crate::sql::runtime::scan_stream::collect_stream_batches;
 use crate::sql::runtime::select_helpers::GroupByStrategy;
@@ -604,6 +606,33 @@ pub(crate) fn execute_select_plan(
     };
     let group_by_info = validate_group_by(&resolved_group_by)?;
 
+    if needs_aggregation
+        && !has_selection
+        && group_by_info.is_none()
+        && having.is_none()
+        && qualify.is_none()
+        && order_clauses.is_empty()
+        && !distinct_flag
+        && aggregate_plan_opt
+            .as_ref()
+            .is_some_and(is_count_star_plan)
+    {
+        let count = estimate_table_row_count(executor.page_handler().as_ref(), &table_name, &columns)?;
+        let offset = parse_offset(offset_expr.clone())?;
+        let limit = parse_limit(limit_expr.clone())?;
+        let rows = if offset > 0 || limit == Some(0) {
+            Vec::new()
+        } else {
+            vec![vec![Some(count.to_string())]]
+        };
+        let batch = rows_to_batch(rows);
+        let batches = if batch.num_rows == 0 { Vec::new() } else { vec![batch] };
+        return Ok(SelectResult {
+            columns: result_columns,
+            batches,
+        });
+    }
+
     for column in &sort_columns {
         required_ordinals.insert(column.ordinal);
     }
@@ -959,4 +988,33 @@ fn build_row_id_slice(
         row_ids.push(row_id);
     }
     Some(row_ids)
+}
+
+fn is_count_star_plan(plan: &AggregateProjectionPlan) -> bool {
+    if plan.outputs.len() != 1 {
+        return false;
+    }
+    let expr = &plan.outputs[0].expr;
+    let Expr::Function(function) = expr else {
+        return false;
+    };
+    let name = function
+        .name
+        .0
+        .last()
+        .map(|ident| ident.value.to_uppercase())
+        .unwrap_or_default();
+    if name != "COUNT" || function.over.is_some() {
+        return false;
+    }
+    if function.args.is_empty() {
+        return true;
+    }
+    function.args.iter().all(|arg| matches!(
+        arg,
+        sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Wildcard)
+            | sqlparser::ast::FunctionArg::Unnamed(
+                sqlparser::ast::FunctionArgExpr::QualifiedWildcard(_)
+            )
+    ))
 }

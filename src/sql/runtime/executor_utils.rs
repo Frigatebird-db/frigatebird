@@ -78,6 +78,12 @@ pub(crate) fn deduplicate_batches(
         return batches;
     }
 
+    if column_count == 1 {
+        if let Some(batch) = dedup_single_column(&batches) {
+            return if batch.num_rows == 0 { Vec::new() } else { vec![batch] };
+        }
+    }
+
     let mut seen: HashSet<DistinctKey> = HashSet::new();
     let mut deduped: Vec<ColumnarBatch> = Vec::new();
 
@@ -97,6 +103,65 @@ pub(crate) fn deduplicate_batches(
         }
     }
     deduped
+}
+
+fn dedup_single_column(batches: &[ColumnarBatch]) -> Option<ColumnarBatch> {
+    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+    let mut saw_null = false;
+    for batch in batches {
+        let page = batch.columns.get(&0)?;
+        if page.null_bitmap.count_ones() > 0 {
+            saw_null = true;
+        }
+        match &page.data {
+            ColumnData::Dictionary(dict) => {
+                for idx in 0..dict.values.len() {
+                    seen.insert(dict.values.get_bytes(idx).to_vec());
+                }
+            }
+            ColumnData::Text(col) => {
+                for idx in 0..col.len() {
+                    if page.null_bitmap.is_set(idx) {
+                        continue;
+                    }
+                    seen.insert(col.get_bytes(idx).to_vec());
+                }
+            }
+            _ => {
+                return None;
+            }
+        }
+    }
+
+    let mut values: Vec<Vec<u8>> = seen.into_iter().collect();
+    if values.is_empty() && !saw_null {
+        return Some(ColumnarBatch::new());
+    }
+
+    let mut col = BytesColumn::with_capacity(values.len() + saw_null as usize, values.len() * 8);
+    let mut null_bitmap = Bitmap::new(values.len() + saw_null as usize);
+    for value in values.drain(..) {
+        col.push(&String::from_utf8_lossy(&value));
+    }
+    if saw_null {
+        let null_idx = col.len();
+        col.push("");
+        null_bitmap.set(null_idx);
+    }
+
+    let num_rows = col.len();
+    let page = ColumnarPage {
+        page_metadata: String::new(),
+        data: ColumnData::Text(col),
+        null_bitmap,
+        num_rows,
+    };
+
+    let mut batch = ColumnarBatch::with_capacity(1);
+    batch.columns.insert(0, page);
+    batch.num_rows = num_rows;
+    batch.row_ids = (0..batch.num_rows as u64).collect();
+    Some(batch)
 }
 
 pub(crate) fn chunk_batch(batch: &ColumnarBatch, chunk_size: usize) -> Vec<ColumnarBatch> {
