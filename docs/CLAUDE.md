@@ -1,1 +1,0 @@
-note that this is a docs directory, whatever it is that you add in here must be full of signal, zero bullshit, zero potential improvements or future plans bullshit, everythign that is in source, must be documented here with ascii diagrams wherever needed

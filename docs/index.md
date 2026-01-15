@@ -1,110 +1,145 @@
----
-layout: default
-title: "Home"
-nav_order: 1
----
+# Satori Documentation Index
 
-# Satori Documentation
+## Quick Navigation
 
-Comprehensive internal architecture documentation for Satori, a high-performance columnar database system.
-
----
-
-## Getting Started
-
-- [System Overview](system_overview) - Progressive deep-dive from 30,000ft to implementation
-- [Architecture Overview](architecture_overview) - End-to-end system blueprint
+| Doc | What It Covers | Read Time |
+|-----|----------------|-----------|
+| **[README](README.md)** | Big picture overview, SQL execution model, system diagram | 5 min |
+| **[Architecture](architecture.md)** | Push-based Volcano, pipeline structure, parallelism, caching, I/O | 15 min |
+| **[Components](components.md)** | Deep dive into each module: steps, batches, writer, cache, storage | 25 min |
+| **[Data Flow](data-flow.md)** | Complete query trace with detailed diagrams at every stage | 20 min |
 
 ---
 
-## Core Components
+## Reading Paths
 
-### Storage Layer
+### "I want to understand how Satori works" (30 min)
+```
+README.md ──▶ Architecture.md (first half) ──▶ Data Flow (Pipeline at a Glance)
+```
 
-- [Core Types](core_types) - Entry and Page data structures
-- [Cache System](cache) - Two-tier LRU cache with lifecycle callbacks (UPC → CPC → Disk)
-- [Storage Layer](storage) - Block allocation, file rotation, and disk I/O with io_uring
+### "I need to understand the execution model deeply" (45 min)
+```
+Architecture.md (full) ──▶ Data Flow.md (full)
+```
+
+### "I need to work on the codebase" (60 min)
+```
+README.md ──▶ Architecture.md ──▶ Components.md ──▶ Data Flow.md
+```
+
+---
+
+## Topic Index
+
+### SQL Execution
+| Topic | Location |
+|-------|----------|
+| SQL → Pipeline mapping | [architecture.md#sql-query-execution-model](architecture.md#sql-query-execution-model) |
+| Query execution stages | [architecture.md#query-execution-stages](architecture.md#query-execution-stages) |
+| Supported query types | [architecture.md#supported-query-types](architecture.md#supported-query-types) |
+| Complete query trace | [data-flow.md#complete-query-execution-example](data-flow.md#complete-query-execution-example) |
+
+### Pipeline & Execution
+| Topic | Location |
+|-------|----------|
+| Push vs Pull Volcano | [architecture.md#push-based-volcano-model](architecture.md#push-based-volcano-model) |
+| Pipeline architecture | [architecture.md#pipeline-architecture](architecture.md#pipeline-architecture) |
+| Pipeline at a glance | [data-flow.md#pipeline-at-a-glance](data-flow.md#pipeline-at-a-glance) |
+| PipelineStep internals | [components.md#pipelinestep-execution](components.md#pipelinestep-execution) |
+| Channel wiring | [architecture.md#channel-wiring](architecture.md#channel-wiring) |
+
+### Parallelism & Scheduling
+| Topic | Location |
+|-------|----------|
+| Morsel-driven parallelism | [architecture.md#parallel-execution-model](architecture.md#parallel-execution-model) |
+| Parallel morsel execution | [data-flow.md#parallel-morsel-execution](data-flow.md#parallel-morsel-execution) |
+| Work-stealing (CAS) | [data-flow.md#work-stealing-execution-model](data-flow.md#work-stealing-execution-model) |
+| Executor thread pools | [architecture.md#parallel-execution-model](architecture.md#parallel-execution-model) |
+
+### Data Structures
+| Topic | Location |
+|-------|----------|
+| ColumnarBatch | [components.md#columnarbatch-structure](components.md#columnarbatch-structure) |
+| ColumnarPage & ColumnData | [components.md#columnarpage-structure](components.md#columnarpage-structure) |
+| Bitmap operations | [components.md#bitmap-operations](components.md#bitmap-operations) |
+| DictionaryColumn | [components.md#dictionary-encoding](components.md#dictionary-encoding) |
+
+### Storage & I/O
+| Topic | Location |
+|-------|----------|
+| Three-tier cache | [architecture.md#three-tier-page-cache](architecture.md#three-tier-page-cache) |
+| Cache lifecycle | [components.md#cache-system](components.md#cache-system) |
+| io_uring + O_DIRECT | [components.md#storage-io](components.md#storage-io) |
+| Block allocator | [components.md#block-allocator](components.md#block-allocator) |
+| Disk I/O architecture | [architecture.md#disk-io-architecture](architecture.md#disk-io-architecture) |
 
 ### Write Path
+| Topic | Location |
+|-------|----------|
+| Writer overview | [architecture.md#write-path-architecture](architecture.md#write-path-architecture) |
+| Sharded writer | [components.md#sharded-architecture](components.md#sharded-architecture) |
+| Three-phase commit | [components.md#three-phase-commit](components.md#three-phase-commit) |
+| WAL integration | [components.md#wal-integration-and-recovery](components.md#wal-integration-and-recovery) |
+| Row buffering | [components.md#row-buffering-and-page-group-flushing](components.md#row-buffering-and-page-group-flushing) |
 
-- [Writer](writer) - Write execution subsystem with block allocator
-
-### Metadata & Catalog
-
-- [Metadata Store](metadata_store) - Column version chains with prefix sums
-- [Page Handler](page_handler) - Cache orchestration and page location
-
-### Operations API
-
-- [Operations Handler](ops_handler) - High-level upsert/update/range_scan API
-- [Sorted Inserts](sorted_inserts) - ORDER BY table insertion strategies
-
----
-
-## Query Processing
-
-### SQL Pipeline
-
-- [SQL Parser](sql_parser) - SQL tokenization and AST generation
-- [Query Planner](query_planner) - Logical plan construction and optimization
-- [Pipeline Builder](pipeline) - Filter-based execution pipeline construction
-- [Pipeline Executor](executor) - Dual-pool work-stealing job execution
-- [SQL Executor](sql_executor) - CREATE TABLE, INSERT, UPDATE, DELETE execution
-
-### Runtime
-
-- [Thread Pool Scheduler](scheduler) - Thread pool implementation
+### Metadata
+| Topic | Location |
+|-------|----------|
+| Metadata organization | [architecture.md#metadata-organization](architecture.md#metadata-organization) |
+| Column statistics | [components.md#column-statistics](components.md#column-statistics) |
+| Page descriptors | [architecture.md#metadata-organization](architecture.md#metadata-organization) |
 
 ---
 
-## Documentation Map
+## Key Diagrams
 
-| Category | Documents | Status |
-|----------|-----------|--------|
-| **Overview** | system_overview, architecture_overview | Complete |
-| **Storage** | core_types, cache, storage | Complete |
-| **Write Path** | writer | Complete |
-| **Metadata** | metadata_store, page_handler | Complete |
-| **Operations** | ops_handler, sorted_inserts | Complete |
-| **Query** | sql_parser, query_planner, pipeline, executor, sql_executor, scheduler | Complete |
-
----
-
-## Quick Reference
-
-### Key Constants
-
-| Constant | Value | Location |
-|----------|-------|----------|
-| Cache Size (LRU) | 10 pages per tier | [cache](cache) |
-| Block Size | 256 KiB | [storage](storage) |
-| File Max Size | 4 GiB | [storage](storage) |
-| Thread Split | 85% main / 15% reserve | [executor](executor) |
-
-### Critical Paths
-
-| Path | Entry Point | Documentation |
-|------|-------------|---------------|
-| **Write** | `Writer::submit()` | [writer](writer) |
-| **Read** | `PageHandler::get_page()` | [page_handler](page_handler) |
-| **Query (plan)** | `plan_sql()` | [query_planner](query_planner) |
-| **SQL Exec** | `SqlExecutor::execute()` | [sql_executor](sql_executor) |
-| **Allocation** | `allocator.allocate()` | [storage](storage) |
+| Diagram | Shows | Location |
+|---------|-------|----------|
+| System overview | All components and data flow | [README.md](README.md) |
+| SQL execution big picture | Parse → Plan → Build → Execute | [README.md](README.md) |
+| Push vs Pull comparison | Why push-based is better | [architecture.md](architecture.md) |
+| Pipeline structure | Steps, channels, Job | [architecture.md](architecture.md) |
+| Parallel timeline | Workers executing morsels | [data-flow.md](data-flow.md) |
+| Work-stealing sequence | CAS operations | [data-flow.md](data-flow.md) |
+| Three-tier cache | Hot → Warm → Cold flow | [architecture.md](architecture.md) |
+| Writer three-phase commit | Persist → Metadata → Cache | [components.md](components.md) |
+| io_uring batched reads | Async I/O pattern | [components.md](components.md) |
 
 ---
 
-## Architecture Diagrams
+## Module → Documentation Map
 
-All documentation includes ASCII diagrams for:
-- Data flow through components
-- Thread interaction patterns
-- Memory layout and alignment
-- State machines and protocols
+```
+src/
+├── sql/
+│   ├── parser.rs        → README (SQL execution), architecture.md (query stages)
+│   ├── planner.rs       → architecture.md (SQL-to-pipeline mapping)
+│   └── runtime/
+│       └── batch.rs     → components.md (ColumnarBatch, ColumnarPage, Bitmap)
+├── pipeline/
+│   ├── builder.rs       → architecture.md (pipeline architecture)
+│   └── types.rs         → components.md (PipelineStep, Job)
+├── executor.rs          → architecture.md (parallel execution), data-flow.md (work-stealing)
+├── cache/               → architecture.md (three-tier), components.md (lifecycle)
+├── page_handler/        → components.md (PageHandler, prefetch, io_uring)
+├── metadata_store/      → architecture.md (metadata org), components.md (stats)
+└── writer/              → components.md (sharded writer, three-phase commit, WAL)
+```
 
 ---
 
-## Notes
+## Glossary
 
-- All documentation reflects **actual implementation** (no future plans or hypotheticals)
-- Constants are hardcoded (not runtime-configurable)
-- Platform differences noted where applicable (Linux O_DIRECT, etc.)
+| Term | Definition |
+|------|------------|
+| **Morsel** | A page group (~50k rows), unit of parallel work |
+| **Step** | Pipeline operator that processes one column |
+| **Root step** | First step that scans pages and creates batches |
+| **Late materialization** | Loading columns only for rows that survive filters |
+| **Bitmap** | Packed bit vector (64 rows per u64) for filter results |
+| **ColumnarBatch** | Container for columns flowing through pipeline |
+| **Job** | Executable pipeline with steps and channels |
+| **CAS** | Compare-and-swap, atomic operation for work-stealing |
+| **Page group** | Storage unit, one morsel of data for one column |
+| **Column chain** | Ordered list of page descriptors for a column |
