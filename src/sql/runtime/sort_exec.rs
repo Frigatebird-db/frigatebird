@@ -1,7 +1,9 @@
 use super::SqlExecutionError;
 use crate::metadata_store::TableCatalog;
 use crate::sql::runtime::batch::ColumnarBatch;
-use crate::sql::runtime::ordering::{MergeOperator, OrderClause, sort_batch_in_memory};
+use crate::sql::runtime::ordering::{
+    MergeOperator, OrderClause, sort_batch_in_memory_with_limit,
+};
 use crate::sql::runtime::spill::SpillManager;
 
 const SORT_OUTPUT_BATCH_SIZE: usize = 1_024;
@@ -10,6 +12,7 @@ pub(crate) fn execute_sort<I>(
     batches: I,
     clauses: &[OrderClause],
     catalog: &TableCatalog,
+    limit: Option<usize>,
 ) -> Result<Vec<ColumnarBatch>, SqlExecutionError>
 where
     I: IntoIterator<Item = ColumnarBatch>,
@@ -28,7 +31,7 @@ where
         if batch.num_rows == 0 {
             continue;
         }
-        let sorted = sort_batch_in_memory(&batch, clauses, catalog)?;
+        let sorted = sort_batch_in_memory_with_limit(&batch, clauses, catalog, limit)?;
         spill_manager
             .spill_batch(sorted)
             .map_err(|err| SqlExecutionError::OperationFailed(err.to_string()))?;
@@ -41,7 +44,8 @@ where
         return Ok(runs);
     }
 
-    let mut merge_operator = MergeOperator::new(runs, clauses, catalog, SORT_OUTPUT_BATCH_SIZE)?;
+    let mut merge_operator =
+        MergeOperator::new(runs, clauses, catalog, SORT_OUTPUT_BATCH_SIZE, limit)?;
     let mut merged_batches = Vec::new();
     while let Some(batch) = merge_operator.next_batch()? {
         if batch.num_rows > 0 {

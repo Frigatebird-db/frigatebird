@@ -164,22 +164,41 @@ pub(crate) fn sort_batch_in_memory(
     clauses: &[OrderClause],
     catalog: &TableCatalog,
 ) -> Result<ColumnarBatch, SqlExecutionError> {
+    sort_batch_in_memory_with_limit(batch, clauses, catalog, None)
+}
+
+pub(crate) fn sort_batch_in_memory_with_limit(
+    batch: &ColumnarBatch,
+    clauses: &[OrderClause],
+    catalog: &TableCatalog,
+    limit: Option<usize>,
+) -> Result<ColumnarBatch, SqlExecutionError> {
     if clauses.is_empty() || batch.num_rows <= 1 {
         return Ok(batch.clone());
     }
 
     let order_keys = build_order_keys_on_batch(clauses, batch, catalog)?;
     let mut indices: Vec<usize> = (0..batch.num_rows).collect();
-    indices.sort_by(|&left, &right| {
-        let ordering = compare_order_keys(&order_keys[left], &order_keys[right], clauses);
+    let compare = |left: &usize, right: &usize| {
+        let ordering = compare_order_keys(&order_keys[*left], &order_keys[*right], clauses);
         if ordering == Ordering::Equal {
-            let left_id = batch.row_ids.get(left).copied().unwrap_or(left as u64);
-            let right_id = batch.row_ids.get(right).copied().unwrap_or(right as u64);
+            let left_id = batch.row_ids.get(*left).copied().unwrap_or(*left as u64);
+            let right_id = batch.row_ids.get(*right).copied().unwrap_or(*right as u64);
             left_id.cmp(&right_id)
         } else {
             ordering
         }
-    });
+    };
+
+    if let Some(limit) = limit
+        && limit < indices.len()
+    {
+        indices.select_nth_unstable_by(limit, compare);
+        indices[..limit].sort_unstable_by(compare);
+        return Ok(batch.gather(&indices[..limit]));
+    }
+
+    indices.sort_unstable_by(compare);
     Ok(batch.gather(&indices))
 }
 
@@ -204,6 +223,8 @@ pub(crate) struct MergeOperator {
     heap: BinaryHeap<HeapItem>,
     batch_capacity: usize,
     clauses: Arc<Vec<OrderClause>>,
+    limit: Option<usize>,
+    produced: usize,
 }
 
 impl MergeOperator {
@@ -212,6 +233,7 @@ impl MergeOperator {
         clauses: &[OrderClause],
         catalog: &TableCatalog,
         batch_capacity: usize,
+        limit: Option<usize>,
     ) -> Result<Self, SqlExecutionError> {
         if runs.is_empty() {
             return Ok(Self {
@@ -219,6 +241,8 @@ impl MergeOperator {
                 heap: BinaryHeap::new(),
                 batch_capacity,
                 clauses: Arc::new(Vec::new()),
+                limit,
+                produced: 0,
             });
         }
 
@@ -260,6 +284,8 @@ impl MergeOperator {
             heap,
             batch_capacity,
             clauses: clauses_arc,
+            limit,
+            produced: 0,
         })
     }
 
@@ -267,11 +293,18 @@ impl MergeOperator {
         if self.heap.is_empty() {
             return Ok(None);
         }
+        if let Some(limit) = self.limit
+            && self.produced >= limit
+        {
+            return Ok(None);
+        }
 
         let mut emitted = 0;
+        let remaining = self.limit.map(|limit| limit - self.produced);
+        let batch_target = remaining.unwrap_or(self.batch_capacity).min(self.batch_capacity);
         let mut chunks: Vec<RowChunk> = Vec::new();
 
-        while emitted < self.batch_capacity {
+        while emitted < batch_target {
             let Some(item) = self.heap.pop() else {
                 break;
             };
@@ -315,6 +348,7 @@ impl MergeOperator {
                 .slice(chunk.start_row, chunk.end_row);
             output.append(&slice);
         }
+        self.produced += emitted;
         Ok(Some(output))
     }
 }

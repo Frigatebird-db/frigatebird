@@ -137,8 +137,16 @@ pub(crate) fn execute_projection_pipeline(
         });
     }
 
+    let offset = parse_offset(offset_expr)?;
+    let limit = parse_limit(limit_expr)?;
+    let sort_limit = if distinct_flag {
+        None
+    } else {
+        limit.map(|limit| limit.saturating_add(offset))
+    };
+
     if !order_clauses.is_empty() {
-        let mut sorter = SortOperator::new(order_clauses, catalog);
+        let mut sorter = SortOperator::new(order_clauses, catalog, sort_limit);
         processed_batches = sorter.execute_batches(processed_batches)?;
     }
 
@@ -159,9 +167,6 @@ pub(crate) fn execute_projection_pipeline(
             batches: Vec::new(),
         });
     }
-
-    let offset = parse_offset(offset_expr)?;
-    let limit = parse_limit(limit_expr)?;
 
     if distinct_flag {
         let mut distinct = DistinctOperator::new(projection_plan.items.len());
@@ -310,8 +315,16 @@ pub(crate) fn execute_window_pipeline(
         }
     }
 
+    let offset = parse_offset(offset_expr)?;
+    let limit = parse_limit(limit_expr)?;
+    let sort_limit = if distinct_flag {
+        None
+    } else {
+        limit.map(|limit| limit.saturating_add(offset))
+    };
+
     if !final_order_clauses.is_empty() {
-        let mut sorter = SortOperator::new(&final_order_clauses, catalog);
+        let mut sorter = SortOperator::new(&final_order_clauses, catalog, sort_limit);
         let sorted_batches = sorter.execute_batches(vec![processed_batch])?;
         processed_batch = merge_batches(sorted_batches);
     }
@@ -319,9 +332,6 @@ pub(crate) fn execute_window_pipeline(
     let mut project = ProjectOperator::new(&projection_plan, catalog);
     let mut results = project.execute(processed_batch)?;
     let final_batch = results.pop().unwrap_or_else(ColumnarBatch::new);
-    let offset = parse_offset(offset_expr)?;
-    let limit = parse_limit(limit_expr)?;
-
     if distinct_flag {
         let mut distinct = DistinctOperator::new(projection_plan.items.len());
         let deduped = distinct.execute_batches(vec![final_batch])?;

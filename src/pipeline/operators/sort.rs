@@ -7,18 +7,27 @@ use super::{PipelineBatch, PipelineOperator};
 pub struct SortOperator<'a> {
     clauses: &'a [OrderClause],
     catalog: &'a TableCatalog,
+    limit: Option<usize>,
 }
 
 impl<'a> SortOperator<'a> {
-    pub(crate) fn new(clauses: &'a [OrderClause], catalog: &'a TableCatalog) -> Self {
-        Self { clauses, catalog }
+    pub(crate) fn new(
+        clauses: &'a [OrderClause],
+        catalog: &'a TableCatalog,
+        limit: Option<usize>,
+    ) -> Self {
+        Self {
+            clauses,
+            catalog,
+            limit,
+        }
     }
 
     pub(crate) fn execute_batches(
         &mut self,
         batches: Vec<PipelineBatch>,
     ) -> Result<Vec<PipelineBatch>, SqlExecutionError> {
-        execute_sort(batches, self.clauses, self.catalog)
+        execute_sort(batches, self.clauses, self.catalog, self.limit)
     }
 }
 
