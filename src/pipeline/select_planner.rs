@@ -22,7 +22,8 @@ use crate::sql::runtime::batch::ColumnarBatch;
 use crate::sql::runtime::executor_utils::merge_batches;
 use crate::sql::runtime::grouping_helpers::validate_group_by;
 use crate::sql::runtime::helpers::{
-    collect_expr_column_ordinals, object_name_to_string, parse_limit, parse_offset,
+    collect_expr_column_ordinals, column_name_from_expr, object_name_to_string, parse_limit,
+    parse_offset,
 };
 use crate::sql::runtime::physical_evaluator::filter_supported;
 use crate::sql::runtime::projection_helpers::build_projection;
@@ -35,9 +36,11 @@ use crate::sql::runtime::select_helpers::{
     rewrite_aliases_in_expr,
 };
 use crate::sql::runtime::{
-    AggregateProjectionPlan, OrderClause, ProjectionPlan, SelectResult, SqlExecutionError,
+    AggregateProjectionPlan, NullsPlacement, OrderClause, ProjectionPlan, SelectResult,
+    SqlExecutionError,
 };
 use crate::sql::types::DataType;
+use crate::page_handler::PageHandler;
 use sqlparser::ast::{
     Expr, GroupByExpr, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, TableFactor, Value,
 };
@@ -145,7 +148,9 @@ pub(crate) fn execute_projection_pipeline(
         limit.map(|limit| limit.saturating_add(offset))
     };
 
-    if !order_clauses.is_empty() {
+    if !order_clauses.is_empty()
+        && !can_skip_sort(executor.page_handler().as_ref(), table, order_clauses, catalog)
+    {
         let mut sorter = SortOperator::new(order_clauses, catalog, sort_limit);
         processed_batches = sorter.execute_batches(processed_batches)?;
     }
@@ -323,7 +328,9 @@ pub(crate) fn execute_window_pipeline(
         limit.map(|limit| limit.saturating_add(offset))
     };
 
-    if !final_order_clauses.is_empty() {
+    if !final_order_clauses.is_empty()
+        && !can_skip_sort(executor.page_handler().as_ref(), table, &final_order_clauses, catalog)
+    {
         let mut sorter = SortOperator::new(&final_order_clauses, catalog, sort_limit);
         let sorted_batches = sorter.execute_batches(vec![processed_batch])?;
         processed_batch = merge_batches(sorted_batches);
@@ -841,4 +848,51 @@ pub(crate) fn execute_select_plan(
     Err(SqlExecutionError::OperationFailed(
         "select execution fell through without a pipeline path".into(),
     ))
+}
+
+fn can_skip_sort(
+    page_handler: &PageHandler,
+    table: &str,
+    order_clauses: &[OrderClause],
+    catalog: &TableCatalog,
+) -> bool {
+    if order_clauses.is_empty() {
+        return true;
+    }
+
+    let sort_columns = catalog.sort_key();
+    if sort_columns.is_empty() || order_clauses.len() > sort_columns.len() {
+        return false;
+    }
+
+    for (idx, clause) in order_clauses.iter().enumerate() {
+        if clause.descending || !matches!(clause.nulls, NullsPlacement::Default) {
+            return false;
+        }
+
+        let Some(name) = column_name_from_expr(&clause.expr) else {
+            return false;
+        };
+        let Some(sort_column) = sort_columns.get(idx) else {
+            return false;
+        };
+        if sort_column.name != name {
+            return false;
+        }
+
+        let pages = page_handler.list_pages_in_table(table, &sort_column.name);
+        if pages.is_empty()
+            || pages.iter().any(|page| {
+                page.stats
+                    .as_ref()
+                    .map(|stats| stats.null_count == 0)
+                    .unwrap_or(false)
+                    == false
+            })
+        {
+            return false;
+        }
+    }
+
+    true
 }
