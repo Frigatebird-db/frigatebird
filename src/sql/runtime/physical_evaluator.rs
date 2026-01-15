@@ -937,12 +937,16 @@ fn evaluate_like(
         if let Some((prefix, exact)) = extract_like_prefix(pat) {
             if let ColumnData::Dictionary(dict) = &page.data {
                 let mut matches_key = vec![false; dict.values.len()];
+                let mut any_match = false;
+                let mut all_match = true;
                 for idx in 0..dict.values.len() {
                     let bytes = dict.values.get_bytes(idx);
                     if exact && bytes.len() != prefix.len() {
+                        all_match = false;
                         continue;
                     }
                     if bytes.len() < prefix.len() {
+                        all_match = false;
                         continue;
                     }
                     let slice = &bytes[..prefix.len()];
@@ -951,7 +955,28 @@ fn evaluate_like(
                     } else {
                         slice == prefix.as_slice()
                     };
+                    if matches {
+                        any_match = true;
+                    } else {
+                        all_match = false;
+                    }
                     matches_key[idx] = if negated { !matches } else { matches };
+                }
+
+                if !negated {
+                    if !any_match {
+                        return Bitmap::new(batch.num_rows);
+                    }
+                    if all_match {
+                        return build_non_null_bitmap(batch.num_rows, &page.null_bitmap);
+                    }
+                } else {
+                    if !any_match {
+                        return build_non_null_bitmap(batch.num_rows, &page.null_bitmap);
+                    }
+                    if all_match {
+                        return Bitmap::new(batch.num_rows);
+                    }
                 }
                 return build_indexed_word_bitmap(batch.num_rows, &page.null_bitmap, |i| {
                     let key = dict.keys[i] as usize;
