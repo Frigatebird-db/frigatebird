@@ -8,6 +8,7 @@ use crate::sql::FilterExpr;
 use crate::sql::physical_plan::PhysicalExpr;
 use crossbeam::channel::Receiver;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub trait BatchStream {
@@ -42,6 +43,12 @@ pub fn collect_stream_batches(
     Ok(batches)
 }
 
+static SELECT_SCAN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn is_select_scan_in_progress() -> bool {
+    SELECT_SCAN_ACTIVE.load(Ordering::Relaxed)
+}
+
 // Legacy row-id stream removed after pipeline row-id scans.
 
 pub struct PipelineBatchStream {
@@ -69,6 +76,7 @@ impl PipelineBatchStream {
         if self.executed {
             return;
         }
+        SELECT_SCAN_ACTIVE.store(true, Ordering::Relaxed);
         if let Some(job) = self.job.take() {
             if let Some(executor) = self.executor.as_ref() {
                 executor.submit(job);
@@ -87,9 +95,15 @@ impl BatchStream for PipelineBatchStream {
     fn next_batch(&mut self) -> Result<Option<ColumnarBatch>, SqlExecutionError> {
         self.ensure_executed();
         match self.receiver.recv() {
-            Ok(batch) if batch.num_rows == 0 => Ok(None),
+            Ok(batch) if batch.num_rows == 0 => {
+                SELECT_SCAN_ACTIVE.store(false, Ordering::Relaxed);
+                Ok(None)
+            }
             Ok(batch) => Ok(Some(batch)),
-            Err(_) => Ok(None),
+            Err(_) => {
+                SELECT_SCAN_ACTIVE.store(false, Ordering::Relaxed);
+                Ok(None)
+            }
         }
     }
 }

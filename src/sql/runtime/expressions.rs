@@ -727,32 +727,28 @@ pub(crate) fn evaluate_expression_on_batch(
                     vectorized_boolean_binary_op(&left_page, &right_page, |a, b| a ^ b)
                 }
                 BinaryOperator::Eq => {
-                    vectorized_numeric_comparison_op(&left_page, &right_page, |ord| {
-                        ord == Ordering::Equal
-                    })
+                    vectorized_equality_op(&left_page, &right_page, true)
                 }
                 BinaryOperator::NotEq => {
-                    vectorized_numeric_comparison_op(&left_page, &right_page, |ord| {
-                        ord != Ordering::Equal
-                    })
+                    vectorized_equality_op(&left_page, &right_page, false)
                 }
                 BinaryOperator::Gt => {
-                    vectorized_numeric_comparison_op(&left_page, &right_page, |ord| {
+                    vectorized_ordering_comparison_op(&left_page, &right_page, |ord| {
                         ord == Ordering::Greater
                     })
                 }
                 BinaryOperator::GtEq => {
-                    vectorized_numeric_comparison_op(&left_page, &right_page, |ord| {
+                    vectorized_ordering_comparison_op(&left_page, &right_page, |ord| {
                         ord == Ordering::Greater || ord == Ordering::Equal
                     })
                 }
                 BinaryOperator::Lt => {
-                    vectorized_numeric_comparison_op(&left_page, &right_page, |ord| {
+                    vectorized_ordering_comparison_op(&left_page, &right_page, |ord| {
                         ord == Ordering::Less
                     })
                 }
                 BinaryOperator::LtEq => {
-                    vectorized_numeric_comparison_op(&left_page, &right_page, |ord| {
+                    vectorized_ordering_comparison_op(&left_page, &right_page, |ord| {
                         ord == Ordering::Less || ord == Ordering::Equal
                     })
                 }
@@ -774,29 +770,11 @@ pub(crate) fn evaluate_expression_on_batch(
         }
         Expr::IsNull(inner) => {
             let page = evaluate_expression_on_batch(inner, batch, catalog)?;
-            let mut values = Vec::with_capacity(page.num_rows);
-            for idx in 0..page.num_rows {
-                values.push(page.null_bitmap.is_set(idx));
-            }
-            Ok(ColumnarPage {
-                page_metadata: String::new(),
-                data: ColumnData::Boolean(values),
-                null_bitmap: Bitmap::new(page.num_rows),
-                num_rows: page.num_rows,
-            })
+            Ok(boolean_page_from_bitmap(&page.null_bitmap, false))
         }
         Expr::IsNotNull(inner) => {
             let page = evaluate_expression_on_batch(inner, batch, catalog)?;
-            let mut values = Vec::with_capacity(page.num_rows);
-            for idx in 0..page.num_rows {
-                values.push(!page.null_bitmap.is_set(idx));
-            }
-            Ok(ColumnarPage {
-                page_metadata: String::new(),
-                data: ColumnData::Boolean(values),
-                null_bitmap: Bitmap::new(page.num_rows),
-                num_rows: page.num_rows,
-            })
+            Ok(boolean_page_from_bitmap(&page.null_bitmap, true))
         }
         Expr::Nested(inner) => evaluate_expression_on_batch(inner, batch, catalog),
         Expr::Case {
@@ -1269,6 +1247,125 @@ where
     })
 }
 
+fn vectorized_ordering_comparison_op<F>(
+    left: &ColumnarPage,
+    right: &ColumnarPage,
+    predicate: F,
+) -> Result<ColumnarPage, SqlExecutionError>
+where
+    F: Fn(Ordering) -> bool,
+{
+    let len = left.len();
+    if right.len() != len {
+        return Err(SqlExecutionError::Unsupported(
+            "vectorized expressions require operands with equal lengths".into(),
+        ));
+    }
+
+    let mut values = Vec::with_capacity(len);
+    let mut null_bitmap = Bitmap::new(len);
+    for idx in 0..len {
+        if left.null_bitmap.is_set(idx) || right.null_bitmap.is_set(idx) {
+            null_bitmap.set(idx);
+            values.push(false);
+            continue;
+        }
+
+        let ordering = match (&left.data, &right.data) {
+            (ColumnData::Int64(l), ColumnData::Int64(r)) => l[idx].cmp(&r[idx]),
+            (ColumnData::Timestamp(l), ColumnData::Timestamp(r)) => l[idx].cmp(&r[idx]),
+            (ColumnData::Float64(l), ColumnData::Float64(r)) => {
+                l[idx].partial_cmp(&r[idx]).unwrap_or(Ordering::Equal)
+            }
+            (ColumnData::Int64(l), ColumnData::Float64(r)) => {
+                (l[idx] as f64).partial_cmp(&r[idx]).unwrap_or(Ordering::Equal)
+            }
+            (ColumnData::Float64(l), ColumnData::Int64(r)) => {
+                l[idx].partial_cmp(&(r[idx] as f64)).unwrap_or(Ordering::Equal)
+            }
+            (ColumnData::Boolean(l), ColumnData::Boolean(r)) => l[idx].cmp(&r[idx]),
+            (ColumnData::Text(l), ColumnData::Text(r)) => l.get_bytes(idx).cmp(r.get_bytes(idx)),
+            (ColumnData::Dictionary(l), ColumnData::Dictionary(r)) => {
+                l.get_bytes(idx).cmp(r.get_bytes(idx))
+            }
+            (ColumnData::Text(l), ColumnData::Dictionary(r)) => {
+                l.get_bytes(idx).cmp(r.get_bytes(idx))
+            }
+            (ColumnData::Dictionary(l), ColumnData::Text(r)) => {
+                l.get_bytes(idx).cmp(r.get_bytes(idx))
+            }
+            _ => {
+                return Err(SqlExecutionError::Unsupported(
+                    "vectorized ordering requires comparable operand types".into(),
+                ))
+            }
+        };
+
+        values.push(predicate(ordering));
+    }
+
+    Ok(ColumnarPage {
+        page_metadata: String::new(),
+        data: ColumnData::Boolean(values),
+        null_bitmap,
+        num_rows: len,
+    })
+}
+
+fn vectorized_equality_op(
+    left: &ColumnarPage,
+    right: &ColumnarPage,
+    is_eq: bool,
+) -> Result<ColumnarPage, SqlExecutionError> {
+    let len = left.len();
+    if right.len() != len {
+        return Err(SqlExecutionError::Unsupported(
+            "vectorized expressions require operands with equal lengths".into(),
+        ));
+    }
+
+    let mut values = Vec::with_capacity(len);
+    let mut null_bitmap = Bitmap::new(len);
+    for idx in 0..len {
+        if left.null_bitmap.is_set(idx) || right.null_bitmap.is_set(idx) {
+            null_bitmap.set(idx);
+            values.push(false);
+            continue;
+        }
+        let matches = match (&left.data, &right.data) {
+            (ColumnData::Boolean(l), ColumnData::Boolean(r)) => l[idx] == r[idx],
+            (ColumnData::Int64(l), ColumnData::Int64(r)) => l[idx] == r[idx],
+            (ColumnData::Float64(l), ColumnData::Float64(r)) => float_eq(l[idx], r[idx]),
+            (ColumnData::Int64(l), ColumnData::Float64(r)) => float_eq(l[idx] as f64, r[idx]),
+            (ColumnData::Float64(l), ColumnData::Int64(r)) => float_eq(l[idx], r[idx] as f64),
+            (ColumnData::Timestamp(l), ColumnData::Timestamp(r)) => l[idx] == r[idx],
+            (ColumnData::Text(l), ColumnData::Text(r)) => l.get_bytes(idx) == r.get_bytes(idx),
+            (ColumnData::Dictionary(l), ColumnData::Dictionary(r)) => {
+                l.get_bytes(idx) == r.get_bytes(idx)
+            }
+            (ColumnData::Text(l), ColumnData::Dictionary(r)) => {
+                l.get_bytes(idx) == r.get_bytes(idx)
+            }
+            (ColumnData::Dictionary(l), ColumnData::Text(r)) => {
+                l.get_bytes(idx) == r.get_bytes(idx)
+            }
+            _ => {
+                return Err(SqlExecutionError::Unsupported(
+                    "vectorized equality requires comparable operand types".into(),
+                ))
+            }
+        };
+        values.push(if is_eq { matches } else { !matches });
+    }
+
+    Ok(ColumnarPage {
+        page_metadata: String::new(),
+        data: ColumnData::Boolean(values),
+        null_bitmap,
+        num_rows: len,
+    })
+}
+
 fn vectorized_boolean_binary_op<F>(
     left: &ColumnarPage,
     right: &ColumnarPage,
@@ -1331,6 +1428,36 @@ where
     })
 }
 
+fn boolean_page_from_bitmap(bitmap: &Bitmap, invert: bool) -> ColumnarPage {
+    let len = bitmap.len();
+    let mut values = vec![false; len];
+    let word_count = bitmap.words().len();
+    for (word_idx, &word) in bitmap.words().iter().enumerate() {
+        let mut current = if invert { !word } else { word };
+        if word_idx + 1 == word_count {
+            let rem = len % 64;
+            if rem != 0 {
+                let mask = (1u64 << rem) - 1;
+                current &= mask;
+            }
+        }
+        let base = word_idx * 64;
+        for bit in 0..64 {
+            let idx = base + bit;
+            if idx >= len {
+                break;
+            }
+            values[idx] = ((current >> bit) & 1) != 0;
+        }
+    }
+    ColumnarPage {
+        page_metadata: String::new(),
+        data: ColumnData::Boolean(values),
+        null_bitmap: Bitmap::new(len),
+        num_rows: len,
+    }
+}
+
 fn numeric_value_at(page: &ColumnarPage, idx: usize) -> Result<f64, SqlExecutionError> {
     match &page.data {
         ColumnData::Int64(values) => values
@@ -1377,4 +1504,12 @@ fn parse_bool_bytes(bytes: &[u8]) -> Result<bool, SqlExecutionError> {
     parse_bool(text).ok_or_else(|| {
         SqlExecutionError::Unsupported("vectorized expression requires boolean operands".into())
     })
+}
+
+fn float_eq(left: f64, right: f64) -> bool {
+    if left.is_nan() && right.is_nan() {
+        true
+    } else {
+        left == right
+    }
 }
