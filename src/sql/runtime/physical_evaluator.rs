@@ -933,19 +933,48 @@ fn evaluate_like(
     if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(ScalarValue::String(pat))) =
         (expr, pattern)
         && let Some(page) = batch.columns.get(index)
-        && let ColumnData::Text(col) = &page.data
     {
-        let mut bitmap = Bitmap::new(batch.num_rows);
-        for i in 0..col.len() {
-            // LIKE requires string semantics, so we use get_string here
-            // TODO: optimize with byte-level pattern matching
-            let value = col.get_string(i);
-            let matches = like_match(&value, pat, !case_insensitive);
-            if if negated { !matches } else { matches } {
-                bitmap.set(i);
-            }
+        if let Some((prefix, exact)) = extract_like_prefix(pat) {
+            return build_indexed_word_bitmap(batch.num_rows, &page.null_bitmap, |i| {
+                let bytes = match &page.data {
+                    ColumnData::Text(col) => col.get_bytes(i),
+                    ColumnData::Dictionary(dict) => dict.get_bytes(i),
+                    _ => return false,
+                };
+                if exact && bytes.len() != prefix.len() {
+                    return false;
+                }
+                if bytes.len() < prefix.len() {
+                    return false;
+                }
+                let slice = &bytes[..prefix.len()];
+                let matches = if case_insensitive {
+                    slice.eq_ignore_ascii_case(&prefix)
+                } else {
+                    slice == prefix.as_slice()
+                };
+                if negated { !matches } else { matches }
+            });
         }
-        return bitmap;
+
+        match &page.data {
+            ColumnData::Text(col) => {
+                return build_indexed_word_bitmap(batch.num_rows, &page.null_bitmap, |i| {
+                    // LIKE requires string semantics, so we use get_string here
+                    let value = col.get_string(i);
+                    let matches = like_match(&value, pat, !case_insensitive);
+                    if negated { !matches } else { matches }
+                });
+            }
+            ColumnData::Dictionary(dict) => {
+                return build_indexed_word_bitmap(batch.num_rows, &page.null_bitmap, |i| {
+                    let value = dict.get_string(i);
+                    let matches = like_match(&value, pat, !case_insensitive);
+                    if negated { !matches } else { matches }
+                });
+            }
+            _ => {}
+        }
     }
     Bitmap::new(batch.num_rows)
 }
@@ -972,6 +1001,31 @@ fn evaluate_rlike(
         return bitmap;
     }
     Bitmap::new(batch.num_rows)
+}
+
+fn extract_like_prefix(pattern: &str) -> Option<(Vec<u8>, bool)> {
+    let bytes = pattern.as_bytes();
+    let mut first_wildcard = None;
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b == b'_' {
+            return None;
+        }
+        if b == b'%' {
+            first_wildcard = Some(idx);
+            break;
+        }
+    }
+
+    match first_wildcard {
+        None => Some((bytes.to_vec(), true)),
+        Some(pos) => {
+            if bytes[pos..].iter().all(|&b| b == b'%') {
+                Some((bytes[..pos].to_vec(), false))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn evaluate_is_null(expr: &PhysicalExpr, batch: &ColumnarBatch) -> Bitmap {

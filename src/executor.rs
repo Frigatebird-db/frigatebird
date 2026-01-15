@@ -89,6 +89,7 @@ mod tests {
             "c0".to_string(),
             0,
             Vec::new(),
+            Vec::new(),
             true,
             page_handler,
             out_tx,

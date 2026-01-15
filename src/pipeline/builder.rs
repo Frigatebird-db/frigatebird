@@ -124,6 +124,7 @@ fn attach_channels(
             column,
             ordinal,
             filters,
+            Vec::new(),
             is_root,
             Arc::clone(&page_handler),
             current_producer,

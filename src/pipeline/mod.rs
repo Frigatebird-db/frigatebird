@@ -12,4 +12,6 @@ pub mod types;
 pub mod window_helpers;
 
 pub use builder::build_pipeline;
-pub use types::{Job, PipelineBatch, PipelineStep, PipelineStepInterface};
+pub use types::{
+    Job, PagePruneOp, PagePrunePredicate, PipelineBatch, PipelineStep, PipelineStepInterface,
+};

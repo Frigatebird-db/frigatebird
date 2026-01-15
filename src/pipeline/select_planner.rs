@@ -67,13 +67,35 @@ pub(crate) fn execute_projection_pipeline(
     qualify_expr: Option<&Expr>,
     row_ids: Option<Vec<u64>>,
 ) -> Result<SelectResult, SqlExecutionError> {
+    let offset = parse_offset(offset_expr.clone())?;
+    let limit = parse_limit(limit_expr.clone())?;
+
+    let mut effective_row_ids = row_ids;
+    if effective_row_ids.is_none()
+        && selection_expr.is_none()
+        && selection_physical_expr.is_none()
+        && qualify_expr.is_none()
+        && !distinct_flag
+        && limit.is_some()
+        && (order_clauses.is_empty()
+            || can_skip_sort(executor.page_handler().as_ref(), table, order_clauses, catalog))
+    {
+        effective_row_ids = build_row_id_slice(
+            executor.page_handler().as_ref(),
+            table,
+            columns,
+            offset,
+            limit,
+        );
+    }
+
     let stream = build_scan_stream(
         executor.page_handler(),
         table,
         columns,
         required_ordinals,
         selection_physical_expr,
-        row_ids,
+        effective_row_ids,
         executor.pipeline_executor(),
     )?;
     let mut batches = collect_stream_batches(stream)?;
@@ -140,8 +162,6 @@ pub(crate) fn execute_projection_pipeline(
         });
     }
 
-    let offset = parse_offset(offset_expr)?;
-    let limit = parse_limit(limit_expr)?;
     let sort_limit = if distinct_flag {
         None
     } else {
@@ -895,4 +915,42 @@ fn can_skip_sort(
     }
 
     true
+}
+
+fn build_row_id_slice(
+    page_handler: &PageHandler,
+    table: &str,
+    columns: &[ColumnCatalog],
+    offset: usize,
+    limit: Option<usize>,
+) -> Option<Vec<u64>> {
+    let Some(limit) = limit else {
+        return None;
+    };
+    if columns.is_empty() {
+        return None;
+    }
+    if limit == 0 {
+        return Some(Vec::new());
+    }
+
+    let total_rows = page_handler
+        .list_pages_in_table(table, &columns[0].name)
+        .iter()
+        .map(|page| page.entry_count)
+        .sum::<u64>();
+    if total_rows == 0 {
+        return Some(Vec::new());
+    }
+
+    let start = offset as u64;
+    if start >= total_rows {
+        return Some(Vec::new());
+    }
+    let end = (start + limit as u64).min(total_rows);
+    let mut row_ids = Vec::with_capacity((end - start) as usize);
+    for row_id in start..end {
+        row_ids.push(row_id);
+    }
+    Some(row_ids)
 }

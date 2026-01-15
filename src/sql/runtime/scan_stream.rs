@@ -3,9 +3,10 @@ use super::batch::ColumnarBatch;
 use crate::metadata_store::ColumnCatalog;
 use crate::page_handler::PageHandler;
 use crate::executor::PipelineExecutor;
-use crate::pipeline::{Job, PipelineBatch, PipelineStep};
+use crate::pipeline::{Job, PagePruneOp, PagePrunePredicate, PipelineBatch, PipelineStep};
 use crate::sql::FilterExpr;
 use crate::sql::physical_plan::PhysicalExpr;
+use crate::sql::runtime::physical_evaluator::reverse_operator;
 use crossbeam::channel::Receiver;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -158,11 +159,18 @@ impl<'a> PipelineScanBuilder<'a> {
                 .ok_or_else(|| SqlExecutionError::OperationFailed("invalid scan ordinal".into()))?;
             let (current_producer, next_receiver) =
                 crossbeam::channel::unbounded::<PipelineBatch>();
+            let mut prune_predicates = Vec::new();
+            if is_root {
+                if let Some(expr) = self.selection_expr {
+                    collect_prunable_predicates(expr, ordinal, &mut prune_predicates);
+                }
+            }
             steps.push(PipelineStep::new(
                 self.table.to_string(),
                 column.name.clone(),
                 ordinal,
                 Vec::new(),
+                prune_predicates,
                 is_root,
                 Arc::clone(&self.page_handler),
                 current_producer,
@@ -181,6 +189,7 @@ impl<'a> PipelineScanBuilder<'a> {
                 self.columns[ordinals[0]].name.clone(),
                 ordinals[0],
                 vec![FilterExpr::leaf(expr.clone())],
+                Vec::new(),
                 false,
                 Arc::clone(&self.page_handler),
                 current_producer,
@@ -207,3 +216,95 @@ impl<'a> PipelineScanBuilder<'a> {
 }
 
 // Legacy gather_column_for_rows helper removed after pipeline row-id scans.
+
+fn collect_prunable_predicates(
+    expr: &PhysicalExpr,
+    root_ordinal: usize,
+    out: &mut Vec<PagePrunePredicate>,
+) {
+    match expr {
+        PhysicalExpr::BinaryOp { left, op, right } => match op {
+            sqlparser::ast::BinaryOperator::And => {
+                collect_prunable_predicates(left, root_ordinal, out);
+                collect_prunable_predicates(right, root_ordinal, out);
+            }
+            sqlparser::ast::BinaryOperator::Or => {}
+            sqlparser::ast::BinaryOperator::Eq
+            | sqlparser::ast::BinaryOperator::Gt
+            | sqlparser::ast::BinaryOperator::GtEq
+            | sqlparser::ast::BinaryOperator::Lt
+            | sqlparser::ast::BinaryOperator::LtEq => {
+                if let Some(predicate) =
+                    prune_from_binary(left, op, right, root_ordinal)
+                {
+                    out.push(predicate);
+                }
+            }
+            _ => {}
+        },
+        PhysicalExpr::IsNull(inner) => {
+            if matches!(
+                inner.as_ref(),
+                PhysicalExpr::Column { index, .. } if *index == root_ordinal
+            ) {
+                out.push(PagePrunePredicate {
+                    op: PagePruneOp::IsNull,
+                    value: None,
+                });
+            }
+        }
+        PhysicalExpr::IsNotNull(inner) => {
+            if matches!(
+                inner.as_ref(),
+                PhysicalExpr::Column { index, .. } if *index == root_ordinal
+            ) {
+                out.push(PagePrunePredicate {
+                    op: PagePruneOp::IsNotNull,
+                    value: None,
+                });
+            }
+        }
+        PhysicalExpr::Cast { expr, .. } => collect_prunable_predicates(expr, root_ordinal, out),
+        _ => {}
+    }
+}
+
+fn prune_from_binary(
+    left: &PhysicalExpr,
+    op: &sqlparser::ast::BinaryOperator,
+    right: &PhysicalExpr,
+    root_ordinal: usize,
+) -> Option<PagePrunePredicate> {
+    if let (PhysicalExpr::Column { index, .. }, PhysicalExpr::Literal(value)) = (left, right)
+        && *index == root_ordinal
+    {
+        return prune_predicate_for_op(op, value.clone());
+    }
+
+    if let (PhysicalExpr::Literal(value), PhysicalExpr::Column { index, .. }) = (left, right)
+        && *index == root_ordinal
+        && let Some(reversed) = reverse_operator(op)
+    {
+        return prune_predicate_for_op(&reversed, value.clone());
+    }
+
+    None
+}
+
+fn prune_predicate_for_op(
+    op: &sqlparser::ast::BinaryOperator,
+    value: crate::sql::runtime::values::ScalarValue,
+) -> Option<PagePrunePredicate> {
+    let prune_op = match op {
+        sqlparser::ast::BinaryOperator::Eq => PagePruneOp::Eq,
+        sqlparser::ast::BinaryOperator::Gt => PagePruneOp::Gt,
+        sqlparser::ast::BinaryOperator::GtEq => PagePruneOp::GtEq,
+        sqlparser::ast::BinaryOperator::Lt => PagePruneOp::Lt,
+        sqlparser::ast::BinaryOperator::LtEq => PagePruneOp::LtEq,
+        _ => return None,
+    };
+    Some(PagePrunePredicate {
+        op: prune_op,
+        value: Some(value),
+    })
+}

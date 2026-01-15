@@ -1,8 +1,9 @@
-use crate::metadata_store::ROWS_PER_PAGE_GROUP;
+use crate::metadata_store::{ColumnStats, ColumnStatsKind, PageDescriptor, ROWS_PER_PAGE_GROUP};
 use crate::page_handler::PageHandler;
 use crate::sql::models::FilterExpr;
 use crate::sql::runtime::batch::{Bitmap, ColumnarBatch, ColumnarPage};
 use crate::sql::runtime::physical_evaluator::PhysicalEvaluator;
+use crate::sql::runtime::values::ScalarValue;
 use crossbeam::channel::{Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,6 +64,7 @@ pub struct PipelineStep {
     pub column: String,
     pub column_ordinal: usize,
     pub filters: Vec<FilterExpr>,
+    pub prune_predicates: Vec<PagePrunePredicate>,
     pub is_root: bool,
     pub table: String,
     pub page_handler: Arc<PageHandler>,
@@ -75,10 +77,28 @@ impl std::fmt::Debug for PipelineStep {
             .field("column", &self.column)
             .field("column_ordinal", &self.column_ordinal)
             .field("filters", &self.filters)
+            .field("prune_predicates", &self.prune_predicates)
             .field("is_root", &self.is_root)
             .field("table", &self.table)
             .finish()
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum PagePruneOp {
+    Eq,
+    Gt,
+    GtEq,
+    Lt,
+    LtEq,
+    IsNull,
+    IsNotNull,
+}
+
+#[derive(Clone, Debug)]
+pub struct PagePrunePredicate {
+    pub op: PagePruneOp,
+    pub value: Option<ScalarValue>,
 }
 
 impl PipelineStep {
@@ -88,6 +108,7 @@ impl PipelineStep {
         column: String,
         column_ordinal: usize,
         filters: Vec<FilterExpr>,
+        prune_predicates: Vec<PagePrunePredicate>,
         is_root: bool,
         page_handler: Arc<PageHandler>,
         current_producer: Sender<PipelineBatch>,
@@ -100,6 +121,7 @@ impl PipelineStep {
             column,
             column_ordinal,
             filters,
+            prune_predicates,
             is_root,
             table,
             page_handler,
@@ -123,6 +145,16 @@ impl PipelineStep {
         let descriptors = self
             .page_handler
             .list_pages_in_table(&self.table, &self.column);
+        let descriptors = if self.prune_predicates.is_empty() {
+            descriptors
+        } else {
+            descriptors
+                .into_iter()
+                .filter(|descriptor| {
+                    !should_prune_descriptor(descriptor, &self.prune_predicates)
+                })
+                .collect()
+        };
         let page_ids: Vec<String> = descriptors.iter().map(|d| d.id.clone()).collect();
         self.page_handler.ensure_pages_cached(&page_ids);
         let pages = self.page_handler.get_pages(descriptors);
@@ -231,6 +263,129 @@ impl PipelineStep {
         if !sent_termination {
             let _ = self.current_producer.send(ColumnarBatch::new());
         }
+    }
+}
+
+fn should_prune_descriptor(
+    descriptor: &PageDescriptor,
+    predicates: &[PagePrunePredicate],
+) -> bool {
+    let Some(stats) = &descriptor.stats else {
+        return false;
+    };
+    for predicate in predicates {
+        if predicate_prunes(stats, descriptor.entry_count, predicate) {
+            return true;
+        }
+    }
+    false
+}
+
+fn predicate_prunes(
+    stats: &ColumnStats,
+    entry_count: u64,
+    predicate: &PagePrunePredicate,
+) -> bool {
+    match predicate.op {
+        PagePruneOp::IsNull => {
+            if stats.null_count == 0 {
+                return true;
+            }
+        }
+        PagePruneOp::IsNotNull => {
+            if stats.null_count == entry_count {
+                return true;
+            }
+        }
+        PagePruneOp::Eq
+        | PagePruneOp::Gt
+        | PagePruneOp::GtEq
+        | PagePruneOp::Lt
+        | PagePruneOp::LtEq => match stats.kind {
+            ColumnStatsKind::Int64 | ColumnStatsKind::Float64 => {
+                let value = predicate.value.as_ref().and_then(scalar_to_f64);
+                let Some(value) = value else {
+                    return false;
+                };
+                let min = stats
+                    .min_value
+                    .as_ref()
+                    .and_then(|value| value.parse::<f64>().ok());
+                let max = stats
+                    .max_value
+                    .as_ref()
+                    .and_then(|value| value.parse::<f64>().ok());
+                return range_prunes_numeric(min, max, value, &predicate.op);
+            }
+            ColumnStatsKind::Text => {
+                let Some(value) = predicate.value.as_ref().and_then(scalar_to_text) else {
+                    return false;
+                };
+                let min = stats.min_value.as_deref();
+                let max = stats.max_value.as_deref();
+                return range_prunes_text(min, max, value, &predicate.op);
+            }
+        },
+    }
+    false
+}
+
+fn scalar_to_f64(value: &ScalarValue) -> Option<f64> {
+    match value {
+        ScalarValue::Int64(v) => Some(*v as f64),
+        ScalarValue::Float64(v) => Some(*v),
+        ScalarValue::Timestamp(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
+fn scalar_to_text(value: &ScalarValue) -> Option<&str> {
+    match value {
+        ScalarValue::String(text) => Some(text.as_str()),
+        ScalarValue::Boolean(value) => Some(if *value { "true" } else { "false" }),
+        _ => None,
+    }
+}
+
+fn range_prunes_numeric(
+    min: Option<f64>,
+    max: Option<f64>,
+    value: f64,
+    op: &PagePruneOp,
+) -> bool {
+    match op {
+        PagePruneOp::Eq => match (min, max) {
+            (Some(min_val), Some(max_val)) => value < min_val || value > max_val,
+            _ => false,
+        },
+        PagePruneOp::Gt => max.map_or(false, |max_val| max_val <= value),
+        PagePruneOp::GtEq => max.map_or(false, |max_val| max_val < value),
+        PagePruneOp::Lt => min.map_or(false, |min_val| min_val >= value),
+        PagePruneOp::LtEq => min.map_or(false, |min_val| min_val > value),
+        _ => false,
+    }
+}
+
+fn range_prunes_text(
+    min: Option<&str>,
+    max: Option<&str>,
+    value: &str,
+    op: &PagePruneOp,
+) -> bool {
+    let cmp_min = min.map(|min_val| value.as_bytes().cmp(min_val.as_bytes()));
+    let cmp_max = max.map(|max_val| value.as_bytes().cmp(max_val.as_bytes()));
+    match op {
+        PagePruneOp::Eq => match (cmp_min, cmp_max) {
+            (Some(min_cmp), Some(max_cmp)) => {
+                min_cmp == std::cmp::Ordering::Less || max_cmp == std::cmp::Ordering::Greater
+            }
+            _ => false,
+        },
+        PagePruneOp::Gt => cmp_max.map_or(false, |cmp| cmp != std::cmp::Ordering::Less),
+        PagePruneOp::GtEq => cmp_max.map_or(false, |cmp| cmp == std::cmp::Ordering::Greater),
+        PagePruneOp::Lt => cmp_min.map_or(false, |cmp| cmp != std::cmp::Ordering::Greater),
+        PagePruneOp::LtEq => cmp_min.map_or(false, |cmp| cmp == std::cmp::Ordering::Less),
+        _ => false,
     }
 }
 
