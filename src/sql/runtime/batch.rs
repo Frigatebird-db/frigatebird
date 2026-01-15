@@ -26,6 +26,14 @@ impl Bitmap {
         self.len
     }
 
+    pub(crate) fn words(&self) -> &[u64] {
+        &self.bits
+    }
+
+    pub(crate) fn words_mut(&mut self) -> &mut [u64] {
+        &mut self.bits
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

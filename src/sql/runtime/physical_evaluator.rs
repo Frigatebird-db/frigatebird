@@ -112,13 +112,12 @@ impl PhysicalEvaluator {
                 if let Some(page) = batch.columns.get(index)
                     && let ColumnData::Boolean(values) = &page.data
                 {
-                    let mut bitmap = Bitmap::new(batch.num_rows);
-                    for (i, &v) in values.iter().enumerate() {
-                        if v {
-                            bitmap.set(i);
-                        }
-                    }
-                    return bitmap;
+                    return build_word_bitmap(
+                        values,
+                        &page.null_bitmap,
+                        batch.num_rows,
+                        |v| *v,
+                    );
                 }
                 Bitmap::new(batch.num_rows)
             }
@@ -230,46 +229,22 @@ pub(crate) fn evaluate_col_lit(
             let target = *val;
             match op {
                 BinaryOperator::Eq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v == target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v == target);
                 }
                 BinaryOperator::NotEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v != target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v != target);
                 }
                 BinaryOperator::Gt => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v > target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v > target);
                 }
                 BinaryOperator::GtEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v >= target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v >= target);
                 }
                 BinaryOperator::Lt => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v < target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v < target);
                 }
                 BinaryOperator::LtEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v <= target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v <= target);
                 }
                 _ => {}
             }
@@ -282,46 +257,26 @@ pub(crate) fn evaluate_col_lit(
             let target = *val;
             match op {
                 BinaryOperator::Eq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v - target).abs() < f64::EPSILON {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v - target).abs() < f64::EPSILON
+                    });
                 }
                 BinaryOperator::NotEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v - target).abs() >= f64::EPSILON {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v - target).abs() >= f64::EPSILON
+                    });
                 }
                 BinaryOperator::Gt => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v > target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v > target);
                 }
                 BinaryOperator::GtEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v >= target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v >= target);
                 }
                 BinaryOperator::Lt => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v < target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v < target);
                 }
                 BinaryOperator::LtEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v <= target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v <= target);
                 }
                 _ => {}
             }
@@ -334,46 +289,34 @@ pub(crate) fn evaluate_col_lit(
             let target = *val;
             match op {
                 BinaryOperator::Eq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v as f64 - target).abs() < f64::EPSILON {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v as f64 - target).abs() < f64::EPSILON
+                    });
                 }
                 BinaryOperator::NotEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v as f64 - target).abs() >= f64::EPSILON {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v as f64 - target).abs() >= f64::EPSILON
+                    });
                 }
                 BinaryOperator::Gt => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v as f64) > target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v as f64) > target
+                    });
                 }
                 BinaryOperator::GtEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v as f64) >= target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v as f64) >= target
+                    });
                 }
                 BinaryOperator::Lt => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v as f64) < target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v as f64) < target
+                    });
                 }
                 BinaryOperator::LtEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v as f64) <= target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v as f64) <= target
+                    });
                 }
                 _ => {}
             }
@@ -382,46 +325,26 @@ pub(crate) fn evaluate_col_lit(
             let target = *val as f64;
             match op {
                 BinaryOperator::Eq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v - target).abs() < f64::EPSILON {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v - target).abs() < f64::EPSILON
+                    });
                 }
                 BinaryOperator::NotEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && (v - target).abs() >= f64::EPSILON {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
+                        (*v - target).abs() >= f64::EPSILON
+                    });
                 }
                 BinaryOperator::Gt => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v > target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v > target);
                 }
                 BinaryOperator::GtEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v >= target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v >= target);
                 }
                 BinaryOperator::Lt => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v < target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v < target);
                 }
                 BinaryOperator::LtEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v <= target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v <= target);
                 }
                 _ => {}
             }
@@ -434,18 +357,10 @@ pub(crate) fn evaluate_col_lit(
             let target = *val;
             match op {
                 BinaryOperator::Eq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v == target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v == target);
                 }
                 BinaryOperator::NotEq => {
-                    for (i, &v) in vec.iter().enumerate() {
-                        if !null_bitmap.is_set(i) && v != target {
-                            bitmap.set(i);
-                        }
-                    }
+                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v != target);
                 }
                 _ => {}
             }
@@ -460,78 +375,48 @@ pub(crate) fn evaluate_col_lit(
 
             match op {
                 BinaryOperator::Eq => {
-                    // Length-first filtering: if lengths differ, strings cannot be equal.
-                    // This avoids touching the data buffer for most rows.
-                    for i in 0..num_rows {
-                        if null_bitmap.is_set(i) {
-                            continue;
-                        }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
                         let row_len = col.get_len(i);
                         if row_len != val_len {
-                            continue; // Fast reject: length mismatch
+                            return false;
                         }
-                        // Only compare bytes if lengths match
                         let row_bytes = col.get_bytes(i);
-                        if row_bytes == val_bytes {
-                            bitmap.set(i);
-                        }
-                    }
+                        row_bytes == val_bytes
+                    });
                 }
                 BinaryOperator::NotEq => {
-                    for i in 0..num_rows {
-                        if null_bitmap.is_set(i) {
-                            continue;
-                        }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
                         let row_len = col.get_len(i);
                         if row_len != val_len {
-                            bitmap.set(i); // Different length = definitely not equal
-                            continue;
+                            return true;
                         }
                         let row_bytes = col.get_bytes(i);
-                        if row_bytes != val_bytes {
-                            bitmap.set(i);
-                        }
-                    }
+                        row_bytes != val_bytes
+                    });
                 }
                 BinaryOperator::Gt => {
-                    for i in 0..num_rows {
-                        if !null_bitmap.is_set(i) {
-                            let row_bytes = col.get_bytes(i);
-                            if row_bytes > val_bytes {
-                                bitmap.set(i);
-                            }
-                        }
-                    }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
+                        let row_bytes = col.get_bytes(i);
+                        row_bytes > val_bytes
+                    });
                 }
                 BinaryOperator::GtEq => {
-                    for i in 0..num_rows {
-                        if !null_bitmap.is_set(i) {
-                            let row_bytes = col.get_bytes(i);
-                            if row_bytes >= val_bytes {
-                                bitmap.set(i);
-                            }
-                        }
-                    }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
+                        let row_bytes = col.get_bytes(i);
+                        row_bytes >= val_bytes
+                    });
                 }
                 BinaryOperator::Lt => {
-                    for i in 0..num_rows {
-                        if !null_bitmap.is_set(i) {
-                            let row_bytes = col.get_bytes(i);
-                            if row_bytes < val_bytes {
-                                bitmap.set(i);
-                            }
-                        }
-                    }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
+                        let row_bytes = col.get_bytes(i);
+                        row_bytes < val_bytes
+                    });
                 }
                 BinaryOperator::LtEq => {
-                    for i in 0..num_rows {
-                        if !null_bitmap.is_set(i) {
-                            let row_bytes = col.get_bytes(i);
-                            if row_bytes <= val_bytes {
-                                bitmap.set(i);
-                            }
-                        }
-                    }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
+                        let row_bytes = col.get_bytes(i);
+                        row_bytes <= val_bytes
+                    });
                 }
                 _ => {}
             }
@@ -548,73 +433,53 @@ pub(crate) fn evaluate_col_lit(
                     // Key optimization: look up literal in dictionary ONCE
                     // If found, compare integer keys instead of bytes
                     if let Some(target_key) = dict.find_key(val_bytes) {
-                        // Integer comparison - much faster than memcmp
-                        for i in 0..num_rows {
-                            if !null_bitmap.is_set(i) && dict.keys[i] == target_key {
-                                bitmap.set(i);
-                            }
-                        }
+                        bitmap = build_word_bitmap(
+                            &dict.keys,
+                            null_bitmap,
+                            num_rows,
+                            |key| *key == target_key,
+                        );
                     }
                     // If value not in dictionary, no rows can match - bitmap stays empty
                 }
                 BinaryOperator::NotEq => {
                     if let Some(target_key) = dict.find_key(val_bytes) {
-                        // Integer comparison
-                        for i in 0..num_rows {
-                            if !null_bitmap.is_set(i) && dict.keys[i] != target_key {
-                                bitmap.set(i);
-                            }
-                        }
+                        bitmap = build_word_bitmap(
+                            &dict.keys,
+                            null_bitmap,
+                            num_rows,
+                            |key| *key != target_key,
+                        );
                     } else {
                         // Value not in dictionary - all non-null rows match
-                        for i in 0..num_rows {
-                            if !null_bitmap.is_set(i) {
-                                bitmap.set(i);
-                            }
-                        }
+                        bitmap = build_non_null_bitmap(num_rows, null_bitmap);
                     }
                 }
                 // For ordering comparisons, fall back to byte comparison
                 // (dictionary order doesn't preserve lexicographic order)
                 BinaryOperator::Gt => {
-                    for i in 0..num_rows {
-                        if !null_bitmap.is_set(i) {
-                            let row_bytes = dict.get_bytes(i);
-                            if row_bytes > val_bytes {
-                                bitmap.set(i);
-                            }
-                        }
-                    }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
+                        let row_bytes = dict.get_bytes(i);
+                        row_bytes > val_bytes
+                    });
                 }
                 BinaryOperator::GtEq => {
-                    for i in 0..num_rows {
-                        if !null_bitmap.is_set(i) {
-                            let row_bytes = dict.get_bytes(i);
-                            if row_bytes >= val_bytes {
-                                bitmap.set(i);
-                            }
-                        }
-                    }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
+                        let row_bytes = dict.get_bytes(i);
+                        row_bytes >= val_bytes
+                    });
                 }
                 BinaryOperator::Lt => {
-                    for i in 0..num_rows {
-                        if !null_bitmap.is_set(i) {
-                            let row_bytes = dict.get_bytes(i);
-                            if row_bytes < val_bytes {
-                                bitmap.set(i);
-                            }
-                        }
-                    }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
+                        let row_bytes = dict.get_bytes(i);
+                        row_bytes < val_bytes
+                    });
                 }
                 BinaryOperator::LtEq => {
-                    for i in 0..num_rows {
-                        if !null_bitmap.is_set(i) {
-                            let row_bytes = dict.get_bytes(i);
-                            if row_bytes <= val_bytes {
-                                bitmap.set(i);
-                            }
-                        }
-                    }
+                    bitmap = build_indexed_word_bitmap(num_rows, null_bitmap, |i| {
+                        let row_bytes = dict.get_bytes(i);
+                        row_bytes <= val_bytes
+                    });
                 }
                 _ => {}
             }
@@ -814,6 +679,97 @@ pub(crate) fn evaluate_col_lit(
     bitmap
 }
 
+fn build_word_bitmap<T, F>(
+    values: &[T],
+    null_bitmap: &Bitmap,
+    num_rows: usize,
+    mut predicate: F,
+) -> Bitmap
+where
+    F: FnMut(&T) -> bool,
+{
+    let mut bitmap = Bitmap::new(num_rows);
+    let out_words = bitmap.words_mut();
+    let null_words = null_bitmap.words();
+    let word_count = out_words.len();
+
+    for word_idx in 0..word_count {
+        let base = word_idx * 64;
+        let remaining = num_rows.saturating_sub(base);
+        let count = remaining.min(64);
+        let null_word = *null_words.get(word_idx).unwrap_or(&0);
+        let mut out_word = 0u64;
+
+        for bit in 0..count {
+            let idx = base + bit;
+            let cond = predicate(&values[idx]) as u64;
+            let valid = 1u64 ^ ((null_word >> bit) & 1);
+            out_word |= (cond & valid) << bit;
+        }
+
+        out_words[word_idx] = out_word;
+    }
+
+    bitmap
+}
+
+fn build_non_null_bitmap(num_rows: usize, null_bitmap: &Bitmap) -> Bitmap {
+    let mut bitmap = Bitmap::new(num_rows);
+    let out_words = bitmap.words_mut();
+    let null_words = null_bitmap.words();
+    let word_count = out_words.len();
+    let last_bits = num_rows % 64;
+    let last_mask = if last_bits == 0 {
+        u64::MAX
+    } else {
+        (1u64 << last_bits) - 1
+    };
+
+    for word_idx in 0..word_count {
+        let null_word = *null_words.get(word_idx).unwrap_or(&0);
+        let mut out_word = !null_word;
+        if word_idx + 1 == word_count {
+            out_word &= last_mask;
+        }
+        out_words[word_idx] = out_word;
+    }
+
+    bitmap
+}
+
+fn build_indexed_word_bitmap<F>(
+    num_rows: usize,
+    null_bitmap: &Bitmap,
+    mut predicate: F,
+) -> Bitmap
+where
+    F: FnMut(usize) -> bool,
+{
+    let mut bitmap = Bitmap::new(num_rows);
+    let out_words = bitmap.words_mut();
+    let null_words = null_bitmap.words();
+    let word_count = out_words.len();
+
+    for word_idx in 0..word_count {
+        let base = word_idx * 64;
+        let remaining = num_rows.saturating_sub(base);
+        let count = remaining.min(64);
+        let null_word = *null_words.get(word_idx).unwrap_or(&0);
+        let mut out_word = 0u64;
+
+        for bit in 0..count {
+            let idx = base + bit;
+            let cond = predicate(idx) as u64;
+            let valid = 1u64 ^ ((null_word >> bit) & 1);
+            out_word |= (cond & valid) << bit;
+        }
+
+        out_words[word_idx] = out_word;
+    }
+
+    bitmap
+}
+
 fn evaluate_in_list(
     expr: &PhysicalExpr,
     list: &[PhysicalExpr],
@@ -846,15 +802,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
                     set.insert(i);
                 }
             }
-            for (idx, &value) in values.iter().enumerate() {
-                if page.null_bitmap.is_set(idx) {
-                    continue;
-                }
-                let matches = set.contains(&value);
-                if (matches && !negated) || (!matches && negated) {
-                    bitmap.set(idx);
-                }
-            }
+            bitmap = build_word_bitmap(values, &page.null_bitmap, num_rows, |value| {
+                let matches = set.contains(value);
+                matches != negated
+            });
         }
         ColumnData::Float64(values) => {
             let mut set = HashSet::new();
@@ -865,15 +816,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
                     set.insert(f.to_bits());
                 }
             }
-            for (idx, &value) in values.iter().enumerate() {
-                if page.null_bitmap.is_set(idx) {
-                    continue;
-                }
+            bitmap = build_word_bitmap(values, &page.null_bitmap, num_rows, |value| {
                 let matches = set.contains(&value.to_bits());
-                if (matches && !negated) || (!matches && negated) {
-                    bitmap.set(idx);
-                }
-            }
+                matches != negated
+            });
         }
         ColumnData::Boolean(values) => {
             let mut set = HashSet::new();
@@ -884,15 +830,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
                     set.insert(*b);
                 }
             }
-            for (idx, &value) in values.iter().enumerate() {
-                if page.null_bitmap.is_set(idx) {
-                    continue;
-                }
-                let matches = set.contains(&value);
-                if (matches && !negated) || (!matches && negated) {
-                    bitmap.set(idx);
-                }
-            }
+            bitmap = build_word_bitmap(values, &page.null_bitmap, num_rows, |value| {
+                let matches = set.contains(value);
+                matches != negated
+            });
         }
         ColumnData::Timestamp(values) => {
             let mut set = HashSet::new();
@@ -903,15 +844,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
                     set.insert(*ts);
                 }
             }
-            for (idx, &value) in values.iter().enumerate() {
-                if page.null_bitmap.is_set(idx) {
-                    continue;
-                }
-                let matches = set.contains(&value);
-                if (matches && !negated) || (!matches && negated) {
-                    bitmap.set(idx);
-                }
-            }
+            bitmap = build_word_bitmap(values, &page.null_bitmap, num_rows, |value| {
+                let matches = set.contains(value);
+                matches != negated
+            });
         }
         ColumnData::Text(col) => {
             // Build HashSet of literal values as bytes for fast comparison
@@ -923,16 +859,11 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
                     set.insert(text.into_bytes());
                 }
             }
-            for idx in 0..col.len() {
-                if page.null_bitmap.is_set(idx) {
-                    continue;
-                }
+            bitmap = build_indexed_word_bitmap(num_rows, &page.null_bitmap, |idx| {
                 let row_bytes = col.get_bytes(idx);
                 let matches = set.contains(row_bytes);
-                if (matches && !negated) || (!matches && negated) {
-                    bitmap.set(idx);
-                }
-            }
+                matches != negated
+            });
         }
         ColumnData::Dictionary(dict) => {
             // Dictionary optimization: check dictionary values once, then scan keys
@@ -951,16 +882,10 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
                     matching_keys.insert(key as u16);
                 }
             }
-            for idx in 0..dict.len() {
-                if page.null_bitmap.is_set(idx) {
-                    continue;
-                }
-                let key = dict.keys[idx];
-                let matches = matching_keys.contains(&key);
-                if (matches && !negated) || (!matches && negated) {
-                    bitmap.set(idx);
-                }
-            }
+            bitmap = build_word_bitmap(&dict.keys, &page.null_bitmap, num_rows, |key| {
+                let matches = matching_keys.contains(key);
+                matches != negated
+            });
         }
     }
 
