@@ -517,6 +517,7 @@ fn job_single_step() {
         column: "col1".to_string(),
         column_ordinal: 0,
         filters: vec![],
+        prune_predicates: Vec::new(),
         is_root: true,
         table: "test".to_string(),
         page_handler,

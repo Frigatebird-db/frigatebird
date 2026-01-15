@@ -69,6 +69,8 @@ pub(crate) fn execute_projection_pipeline(
 ) -> Result<SelectResult, SqlExecutionError> {
     let offset = parse_offset(offset_expr.clone())?;
     let limit = parse_limit(limit_expr.clone())?;
+    let mut effective_offset = offset;
+    let mut effective_limit = limit;
 
     let mut effective_row_ids = row_ids;
     if effective_row_ids.is_none()
@@ -87,6 +89,10 @@ pub(crate) fn execute_projection_pipeline(
             offset,
             limit,
         );
+        if effective_row_ids.is_some() {
+            effective_offset = 0;
+            effective_limit = limit;
+        }
     }
 
     let stream = build_scan_stream(
@@ -165,7 +171,7 @@ pub(crate) fn execute_projection_pipeline(
     let sort_limit = if distinct_flag {
         None
     } else {
-        limit.map(|limit| limit.saturating_add(offset))
+        effective_limit.map(|limit| limit.saturating_add(effective_offset))
     };
 
     if !order_clauses.is_empty()
@@ -196,7 +202,7 @@ pub(crate) fn execute_projection_pipeline(
     if distinct_flag {
         let mut distinct = DistinctOperator::new(projection_plan.items.len());
         let deduped = distinct.execute_batches(projected)?;
-        let mut limiter = LimitOperator::new(offset, limit);
+        let mut limiter = LimitOperator::new(effective_offset, effective_limit);
         let limited_batches = limiter.execute_batches(deduped)?;
         return Ok(SelectResult {
             columns: result_columns,
@@ -204,7 +210,7 @@ pub(crate) fn execute_projection_pipeline(
         });
     }
 
-    let mut limiter = LimitOperator::new(offset, limit);
+    let mut limiter = LimitOperator::new(effective_offset, effective_limit);
     let limited_batches = limiter.execute_batches(projected)?;
     Ok(SelectResult {
         columns: result_columns,

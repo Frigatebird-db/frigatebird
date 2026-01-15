@@ -2,6 +2,7 @@ use super::SqlExecutionError;
 use super::aggregates::AggregateDataset;
 use super::batch::{ColumnData, ColumnarBatch, ColumnarPage};
 use super::expressions::{evaluate_expression_on_batch, evaluate_scalar_expression};
+use super::helpers::column_name_from_expr;
 use super::values::{ScalarValue, compare_scalar_values, compare_strs, format_float};
 use crate::metadata_store::TableCatalog;
 use sqlparser::ast::Expr;
@@ -26,6 +27,13 @@ pub(crate) enum NullsPlacement {
 #[derive(Clone)]
 pub(crate) struct OrderKey {
     pub(crate) values: Vec<ScalarValue>,
+}
+
+#[derive(Clone)]
+struct OrderColumn {
+    ordinal: usize,
+    descending: bool,
+    nulls: NullsPlacement,
 }
 
 // Legacy rowwise ordering helpers removed after pipeline refactor.
@@ -177,8 +185,32 @@ pub(crate) fn sort_batch_in_memory_with_limit(
         return Ok(batch.clone());
     }
 
-    let order_keys = build_order_keys_on_batch(clauses, batch, catalog)?;
     let mut indices: Vec<usize> = (0..batch.num_rows).collect();
+    if let Some(order_columns) = extract_order_columns(clauses, batch, catalog) {
+        let compare = |left: &usize, right: &usize| {
+            let ordering = compare_rows_by_columns(batch, &order_columns, *left, *right);
+            if ordering == Ordering::Equal {
+                let left_id = batch.row_ids.get(*left).copied().unwrap_or(*left as u64);
+                let right_id = batch.row_ids.get(*right).copied().unwrap_or(*right as u64);
+                left_id.cmp(&right_id)
+            } else {
+                ordering
+            }
+        };
+
+        if let Some(limit) = limit
+            && limit < indices.len()
+        {
+            indices.select_nth_unstable_by(limit, compare);
+            indices[..limit].sort_unstable_by(compare);
+            return Ok(batch.gather(&indices[..limit]));
+        }
+
+        indices.sort_unstable_by(compare);
+        return Ok(batch.gather(&indices));
+    }
+
+    let order_keys = build_order_keys_on_batch(clauses, batch, catalog)?;
     let compare = |left: &usize, right: &usize| {
         let ordering = compare_order_keys(&order_keys[*left], &order_keys[*right], clauses);
         if ordering == Ordering::Equal {
@@ -200,6 +232,108 @@ pub(crate) fn sort_batch_in_memory_with_limit(
 
     indices.sort_unstable_by(compare);
     Ok(batch.gather(&indices))
+}
+
+fn extract_order_columns(
+    clauses: &[OrderClause],
+    batch: &ColumnarBatch,
+    catalog: &TableCatalog,
+) -> Option<Vec<OrderColumn>> {
+    let mut columns = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let name = column_name_from_expr(&clause.expr)?;
+        let column = catalog.column(&name)?;
+        if !batch.columns.contains_key(&column.ordinal) {
+            return None;
+        }
+        columns.push(OrderColumn {
+            ordinal: column.ordinal,
+            descending: clause.descending,
+            nulls: clause.nulls,
+        });
+    }
+    Some(columns)
+}
+
+fn compare_rows_by_columns(
+    batch: &ColumnarBatch,
+    order_columns: &[OrderColumn],
+    left_idx: usize,
+    right_idx: usize,
+) -> Ordering {
+    for column in order_columns {
+        let Some(page) = batch.columns.get(&column.ordinal) else {
+            continue;
+        };
+        let left_null = page.null_bitmap.is_set(left_idx);
+        let right_null = page.null_bitmap.is_set(right_idx);
+        if let Some(null_order) = compare_nulls(left_null, right_null, column) {
+            if null_order != Ordering::Equal {
+                return null_order;
+            }
+            continue;
+        }
+
+        let mut ord = match &page.data {
+            ColumnData::Int64(values) => values[left_idx].cmp(&values[right_idx]),
+            ColumnData::Timestamp(values) => values[left_idx].cmp(&values[right_idx]),
+            ColumnData::Float64(values) => values[left_idx]
+                .partial_cmp(&values[right_idx])
+                .unwrap_or(Ordering::Equal),
+            ColumnData::Boolean(values) => values[left_idx].cmp(&values[right_idx]),
+            ColumnData::Text(col) => col.get_bytes(left_idx).cmp(col.get_bytes(right_idx)),
+            ColumnData::Dictionary(dict) => {
+                dict.get_bytes(left_idx).cmp(dict.get_bytes(right_idx))
+            }
+        };
+        if column.descending {
+            ord = ord.reverse();
+        }
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
+}
+
+fn compare_nulls(left_null: bool, right_null: bool, clause: &OrderColumn) -> Option<Ordering> {
+    if !left_null && !right_null {
+        return None;
+    }
+    if left_null && right_null {
+        return Some(Ordering::Equal);
+    }
+
+    let ordering = match clause.nulls {
+        NullsPlacement::First => {
+            if left_null {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        NullsPlacement::Last => {
+            if left_null {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        NullsPlacement::Default => {
+            if clause.descending {
+                if left_null {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            } else if left_null {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+    };
+    Some(ordering)
 }
 
 fn column_scalar_value(page: &ColumnarPage, idx: usize) -> ScalarValue {

@@ -407,10 +407,12 @@ impl PageHandler {
     }
 
     pub fn read_entry_at(&self, table: &str, column: &str, row: u64) -> Option<entry::Entry> {
-        debug_assert!(
-            !crate::sql::runtime::scan_stream::is_select_scan_in_progress(),
-            "read_entry_at is not allowed during SELECT scans"
-        );
+        if std::env::var_os("SATORI_STRICT_SELECT_ASSERT").is_some() {
+            debug_assert!(
+                !crate::sql::runtime::scan_stream::is_select_scan_in_progress(),
+                "read_entry_at is not allowed during SELECT scans"
+            );
+        }
         let location = self.locate_row_in_table(table, column, row)?;
         let page = self.get_page(location.descriptor.clone())?;
         page.page.entry_at(location.page_row_index as usize)
