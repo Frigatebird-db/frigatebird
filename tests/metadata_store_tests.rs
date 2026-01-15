@@ -469,6 +469,7 @@ fn meta_journal_replay_handles_replacements_and_stats() {
         max_value: Some("z".into()),
         null_count: 0,
         kind: ColumnStatsKind::Text,
+        prefixes: None,
     });
 
     let first = MetaRecord::PublishPages {
@@ -722,6 +723,7 @@ fn meta_journal_randomized_sequences_survive_replay() {
                 max_value: Some(format!("max_{step}")),
                 null_count: (next_rand(&mut seed) % 3),
                 kind: ColumnStatsKind::Text,
+                prefixes: None,
             })
         } else {
             None
