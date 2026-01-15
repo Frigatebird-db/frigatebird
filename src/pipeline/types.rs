@@ -1,4 +1,6 @@
-use crate::metadata_store::{ColumnStats, ColumnStatsKind, PageDescriptor, ROWS_PER_PAGE_GROUP};
+use crate::metadata_store::{
+    ColumnStats, ColumnStatsKind, PageDescriptor, PREFIX_INDEX_LEN, ROWS_PER_PAGE_GROUP,
+};
 use crate::page_handler::PageHandler;
 use crate::sql::models::FilterExpr;
 use crate::sql::runtime::batch::{Bitmap, ColumnarBatch, ColumnarPage};
@@ -336,6 +338,21 @@ fn predicate_prunes(
             }
             if !matches!(stats.kind, ColumnStatsKind::Text) {
                 return false;
+            }
+            if let Some(prefixes) = stats.prefixes.as_ref()
+                && let Some(prefix) = predicate.prefix.as_ref()
+            {
+                let len = prefix.len();
+                let any_match = prefixes.iter().any(|candidate| {
+                    if len >= PREFIX_INDEX_LEN {
+                        candidate == prefix
+                    } else {
+                        candidate.starts_with(prefix)
+                    }
+                });
+                if !any_match {
+                    return true;
+                }
             }
             let Some(prefix) = predicate.prefix.as_ref() else {
                 return false;

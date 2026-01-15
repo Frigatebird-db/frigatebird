@@ -116,7 +116,11 @@ pub struct ColumnStats {
     pub max_value: Option<String>,
     pub null_count: u64,
     pub kind: ColumnStatsKind,
+    pub prefixes: Option<Vec<Vec<u8>>>,
 }
+
+pub const PREFIX_INDEX_LEN: usize = 8;
+pub const PREFIX_INDEX_LIMIT: usize = 256;
 
 /// Catalog entry describing a table schema.
 #[derive(Clone, Debug)]

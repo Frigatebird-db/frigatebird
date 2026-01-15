@@ -2,12 +2,12 @@ use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{
     CatalogError, ColumnCatalog, ColumnDefinition, ColumnStats, ColumnStatsKind, MetaJournal,
-    MetaJournalEntry, MetaRecord, PageDescriptor, PageDirectory, PendingPage, ROWS_PER_PAGE_GROUP,
-    TableDefinition,
+    MetaJournalEntry, MetaRecord, PageDescriptor, PageDirectory, PendingPage, PREFIX_INDEX_LEN,
+    PREFIX_INDEX_LIMIT, ROWS_PER_PAGE_GROUP, TableDefinition,
 };
 use crate::page::Page;
 use crate::page_handler::{PageHandler, page_io::PageIO};
-use crate::sql::runtime::batch::{ColumnData, ColumnarPage};
+use crate::sql::runtime::batch::{Bitmap, BytesColumn, ColumnData, ColumnarPage, DictionaryColumn};
 use crate::sql::types::DataType;
 use crate::wal::Walrus;
 use crate::writer::GLOBAL_WRITER_SHARD_COUNT;
@@ -920,6 +920,7 @@ fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
         max_value: None,
         null_count,
         kind: ColumnStatsKind::Text,
+        prefixes: None,
     };
 
     match &page.data {
@@ -977,6 +978,7 @@ fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
             }
             stats.min_value = min_val;
             stats.max_value = max_val;
+            stats.prefixes = build_prefixes_from_text(col, &page.null_bitmap);
         }
         ColumnData::Boolean(values) => {
             // ...
@@ -1041,6 +1043,7 @@ fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
             }
             stats.min_value = min_val;
             stats.max_value = max_val;
+            stats.prefixes = build_prefixes_from_dict(dict);
         }
     }
 
@@ -1049,6 +1052,49 @@ fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
     }
 
     Some(stats)
+}
+
+fn build_prefixes_from_text(col: &BytesColumn, null_bitmap: &Bitmap) -> Option<Vec<Vec<u8>>> {
+    let mut prefixes = Vec::new();
+    for idx in 0..col.len() {
+        if null_bitmap.is_set(idx) {
+            continue;
+        }
+        let bytes = col.get_bytes(idx);
+        let len = bytes.len().min(PREFIX_INDEX_LEN);
+        let prefix = bytes[..len].to_vec();
+        if !prefixes.iter().any(|existing| existing == &prefix) {
+            prefixes.push(prefix);
+            if prefixes.len() > PREFIX_INDEX_LIMIT {
+                return None;
+            }
+        }
+    }
+    if prefixes.is_empty() {
+        None
+    } else {
+        Some(prefixes)
+    }
+}
+
+fn build_prefixes_from_dict(dict: &DictionaryColumn) -> Option<Vec<Vec<u8>>> {
+    let mut prefixes = Vec::new();
+    for idx in 0..dict.values.len() {
+        let bytes = dict.values.get_bytes(idx);
+        let len = bytes.len().min(PREFIX_INDEX_LEN);
+        let prefix = bytes[..len].to_vec();
+        if !prefixes.iter().any(|existing| existing == &prefix) {
+            prefixes.push(prefix);
+            if prefixes.len() > PREFIX_INDEX_LIMIT {
+                return None;
+            }
+        }
+    }
+    if prefixes.is_empty() {
+        None
+    } else {
+        Some(prefixes)
+    }
 }
 
 #[cfg(test)]

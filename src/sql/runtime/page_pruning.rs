@@ -311,6 +311,7 @@ mod tests {
             max_value: Some("10".into()),
             null_count: 0,
             kind: ColumnStatsKind::Int64,
+            prefixes: None,
         };
         let descriptor = descriptor_with_stats(stats, 10);
         let mut descriptor_map: HashMap<usize, Vec<PageDescriptor>> = HashMap::new();
@@ -338,6 +339,7 @@ mod tests {
             max_value: Some("50".into()),
             null_count: 0,
             kind: ColumnStatsKind::Int64,
+            prefixes: None,
         };
         let descriptor = descriptor_with_stats(stats, 10);
         let mut descriptor_map: HashMap<usize, Vec<PageDescriptor>> = HashMap::new();
@@ -365,6 +367,7 @@ mod tests {
             max_value: Some("2".into()),
             null_count: 0,
             kind: ColumnStatsKind::Int64,
+            prefixes: None,
         };
         let descriptor = descriptor_with_stats(stats, 8);
         let mut descriptor_map: HashMap<usize, Vec<PageDescriptor>> = HashMap::new();
@@ -392,6 +395,7 @@ mod tests {
             max_value: None,
             null_count: 4,
             kind: ColumnStatsKind::Text,
+            prefixes: None,
         };
         let descriptor = descriptor_with_stats(stats, 4);
         let mut descriptor_map: HashMap<usize, Vec<PageDescriptor>> = HashMap::new();
