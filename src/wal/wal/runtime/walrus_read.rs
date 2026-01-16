@@ -94,7 +94,7 @@ impl Walrus {
             }
         }
 
-        // If we have a persisted tail and some sealed blocks were recovered, fold into the last block
+        // Fold persisted tail into recovered sealed blocks.
         if let Some((tail_block_id, tail_off)) = persisted_tail {
             if !info.chain.is_empty() {
                 if let Some((idx, block)) = info

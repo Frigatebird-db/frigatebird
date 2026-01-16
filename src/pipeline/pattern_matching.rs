@@ -60,16 +60,12 @@ pub fn regex_match(value: &str, pattern: &str) -> bool {
     let clean_pattern = pattern.trim_start_matches('^').trim_end_matches('$');
 
     if starts_with_anchor && ends_with_anchor {
-        // Exact match needed
         value == clean_pattern
     } else if starts_with_anchor {
-        // Must start with pattern
         value.starts_with(clean_pattern)
     } else if ends_with_anchor {
-        // Must end with pattern
         value.ends_with(clean_pattern)
     } else {
-        // Pattern can appear anywhere
         value.contains(clean_pattern)
     }
 }

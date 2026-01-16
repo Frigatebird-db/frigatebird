@@ -22,10 +22,7 @@ impl PipelineExecutor {
             pool.execute(move || run_worker(rx));
         }
 
-        PipelineExecutor {
-            job_tx,
-            pool,
-        }
+        PipelineExecutor { job_tx, pool }
     }
 
     /// Submit a job to be processed by the executor.

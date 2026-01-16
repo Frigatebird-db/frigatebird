@@ -1,16 +1,16 @@
 use super::SqlExecutionError;
 use super::batch::ColumnarBatch;
+use crate::executor::PipelineExecutor;
 use crate::metadata_store::ColumnCatalog;
 use crate::page_handler::PageHandler;
-use crate::executor::PipelineExecutor;
 use crate::pipeline::{Job, PagePruneOp, PagePrunePredicate, PipelineBatch, PipelineStep};
 use crate::sql::FilterExpr;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::runtime::physical_evaluator::reverse_operator;
 use crossbeam::channel::Receiver;
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub trait BatchStream {
     fn next_batch(&mut self) -> Result<Option<ColumnarBatch>, SqlExecutionError>;
@@ -49,8 +49,6 @@ static SELECT_SCAN_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub fn is_select_scan_in_progress() -> bool {
     SELECT_SCAN_ACTIVE.load(Ordering::Relaxed)
 }
-
-// Legacy row-id stream removed after pipeline row-id scans.
 
 pub struct PipelineBatchStream {
     job: Option<Job>,
@@ -160,10 +158,8 @@ impl<'a> PipelineScanBuilder<'a> {
             let (current_producer, next_receiver) =
                 crossbeam::channel::unbounded::<PipelineBatch>();
             let mut prune_predicates = Vec::new();
-            if is_root {
-                if let Some(expr) = self.selection_expr {
-                    collect_prunable_predicates(expr, ordinal, &mut prune_predicates);
-                }
+            if is_root && let Some(expr) = self.selection_expr {
+                collect_prunable_predicates(expr, ordinal, &mut prune_predicates);
             }
             steps.push(PipelineStep::new(
                 self.table.to_string(),
@@ -215,8 +211,6 @@ impl<'a> PipelineScanBuilder<'a> {
     }
 }
 
-// Legacy gather_column_for_rows helper removed after pipeline row-id scans.
-
 fn collect_prunable_predicates(
     expr: &PhysicalExpr,
     root_ordinal: usize,
@@ -234,9 +228,7 @@ fn collect_prunable_predicates(
             | sqlparser::ast::BinaryOperator::GtEq
             | sqlparser::ast::BinaryOperator::Lt
             | sqlparser::ast::BinaryOperator::LtEq => {
-                if let Some(predicate) =
-                    prune_from_binary(left, op, right, root_ordinal)
-                {
+                if let Some(predicate) = prune_from_binary(left, op, right, root_ordinal) {
                     out.push(predicate);
                 }
             }

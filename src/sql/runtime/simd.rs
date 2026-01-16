@@ -234,7 +234,7 @@ pub fn compare_u16_eq(values: &[u16], target: u16, null_bitmap: &Bitmap) -> Bitm
 fn compare_chunk_u16_eq(values: &[u16], target: u16) -> u16 {
     let mut result = 0u16;
     // Unroll for 16 values
-    result |= ((values[0] == target) as u16) << 0;
+    result |= (values[0] == target) as u16;
     result |= ((values[1] == target) as u16) << 1;
     result |= ((values[2] == target) as u16) << 2;
     result |= ((values[3] == target) as u16) << 3;

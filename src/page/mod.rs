@@ -22,9 +22,6 @@ impl Page {
     }
 
     pub fn add_entry(&mut self, entry: entry::Entry) {
-        // what does it means to add an entry in a page
         self.entries.push(entry);
-
-        // now its done in memory, we need to do it on disk as well
     }
 }

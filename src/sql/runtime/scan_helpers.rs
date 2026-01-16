@@ -124,7 +124,7 @@ pub(crate) fn locate_rows_by_sort_tuple(
 
     let refined = result
         .into_iter()
-        .zip(keep.into_iter())
+        .zip(keep)
         .filter_map(|(row_id, keep_row)| keep_row.then_some(row_id))
         .collect();
 

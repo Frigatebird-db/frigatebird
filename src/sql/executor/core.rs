@@ -54,5 +54,3 @@ impl Drop for SqlExecutor {
         }
     }
 }
-
-// Legacy row-id refinement path removed after pipeline refactor.

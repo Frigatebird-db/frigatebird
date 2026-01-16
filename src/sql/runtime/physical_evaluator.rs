@@ -117,12 +117,7 @@ impl PhysicalEvaluator {
                 if let Some(page) = batch.columns.get(index)
                     && let ColumnData::Boolean(values) = &page.data
                 {
-                    return build_word_bitmap(
-                        values,
-                        &page.null_bitmap,
-                        batch.num_rows,
-                        |v| *v,
-                    );
+                    return build_word_bitmap(values, &page.null_bitmap, batch.num_rows, |v| *v);
                 }
                 Bitmap::new(batch.num_rows)
             }
@@ -226,9 +221,6 @@ pub(crate) fn evaluate_col_lit(
     let mut bitmap = Bitmap::new(num_rows);
 
     match (col, lit) {
-        // ---------------------------------------------------------
-        // FAST PATH: INT64 / TIMESTAMP (SIMD-optimized)
-        // ---------------------------------------------------------
         (ColumnData::Int64(vec), ScalarValue::Int64(val))
         | (ColumnData::Timestamp(vec), ScalarValue::Timestamp(val)) => {
             let target = *val;
@@ -243,9 +235,6 @@ pub(crate) fn evaluate_col_lit(
             };
         }
 
-        // ---------------------------------------------------------
-        // FAST PATH: FLOAT64
-        // ---------------------------------------------------------
         (ColumnData::Float64(vec), ScalarValue::Float64(val)) => {
             let target = *val;
             match op {
@@ -275,9 +264,6 @@ pub(crate) fn evaluate_col_lit(
             }
         }
 
-        // ---------------------------------------------------------
-        // MIXED NUMERIC PATHS
-        // ---------------------------------------------------------
         (ColumnData::Int64(vec), ScalarValue::Float64(val)) => {
             let target = *val;
             match op {
@@ -292,24 +278,20 @@ pub(crate) fn evaluate_col_lit(
                     });
                 }
                 BinaryOperator::Gt => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
-                        (*v as f64) > target
-                    });
+                    bitmap =
+                        build_word_bitmap(vec, null_bitmap, num_rows, |v| (*v as f64) > target);
                 }
                 BinaryOperator::GtEq => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
-                        (*v as f64) >= target
-                    });
+                    bitmap =
+                        build_word_bitmap(vec, null_bitmap, num_rows, |v| (*v as f64) >= target);
                 }
                 BinaryOperator::Lt => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
-                        (*v as f64) < target
-                    });
+                    bitmap =
+                        build_word_bitmap(vec, null_bitmap, num_rows, |v| (*v as f64) < target);
                 }
                 BinaryOperator::LtEq => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| {
-                        (*v as f64) <= target
-                    });
+                    bitmap =
+                        build_word_bitmap(vec, null_bitmap, num_rows, |v| (*v as f64) <= target);
                 }
                 _ => {}
             }
@@ -343,9 +325,6 @@ pub(crate) fn evaluate_col_lit(
             }
         }
 
-        // ---------------------------------------------------------
-        // FAST PATH: BOOLEAN
-        // ---------------------------------------------------------
         (ColumnData::Boolean(vec), ScalarValue::Boolean(val)) => {
             let target = *val;
             match op {
@@ -359,9 +338,6 @@ pub(crate) fn evaluate_col_lit(
             }
         }
 
-        // ---------------------------------------------------------
-        // FAST PATH: STRING with length-first optimization
-        // ---------------------------------------------------------
         (ColumnData::Text(col), ScalarValue::String(val)) => {
             let val_bytes = val.as_bytes();
             let val_len = val_bytes.len();
@@ -415,9 +391,6 @@ pub(crate) fn evaluate_col_lit(
             }
         }
 
-        // ---------------------------------------------------------
-        // FAST PATH: DICTIONARY with key-based optimization
-        // ---------------------------------------------------------
         (ColumnData::Dictionary(dict), ScalarValue::String(val)) => {
             let val_bytes = val.as_bytes();
 
@@ -426,23 +399,17 @@ pub(crate) fn evaluate_col_lit(
                     // Key optimization: look up literal in dictionary ONCE
                     // If found, compare integer keys instead of bytes
                     if let Some(target_key) = dict.find_key(val_bytes) {
-                        bitmap = build_word_bitmap(
-                            &dict.keys,
-                            null_bitmap,
-                            num_rows,
-                            |key| *key == target_key,
-                        );
+                        bitmap = build_word_bitmap(&dict.keys, null_bitmap, num_rows, |key| {
+                            *key == target_key
+                        });
                     }
                     // If value not in dictionary, no rows can match - bitmap stays empty
                 }
                 BinaryOperator::NotEq => {
                     if let Some(target_key) = dict.find_key(val_bytes) {
-                        bitmap = build_word_bitmap(
-                            &dict.keys,
-                            null_bitmap,
-                            num_rows,
-                            |key| *key != target_key,
-                        );
+                        bitmap = build_word_bitmap(&dict.keys, null_bitmap, num_rows, |key| {
+                            *key != target_key
+                        });
                     } else {
                         // Value not in dictionary - all non-null rows match
                         bitmap = build_non_null_bitmap(num_rows, null_bitmap);
@@ -570,9 +537,6 @@ pub(crate) fn evaluate_col_lit(
             }
         }
 
-        // ---------------------------------------------------------
-        // TEXT COLUMN WITH NUMERIC LITERAL (legacy path with allocation)
-        // ---------------------------------------------------------
         (ColumnData::Text(col), ScalarValue::Int64(val)) => {
             let target = *val as f64;
             for i in 0..num_rows {
@@ -686,21 +650,21 @@ where
     let null_words = null_bitmap.words();
     let word_count = out_words.len();
 
-    for word_idx in 0..word_count {
+    for (word_idx, out_word) in out_words.iter_mut().enumerate() {
         let base = word_idx * 64;
         let remaining = num_rows.saturating_sub(base);
         let count = remaining.min(64);
         let null_word = *null_words.get(word_idx).unwrap_or(&0);
-        let mut out_word = 0u64;
+        let mut word_val = 0u64;
 
         for bit in 0..count {
             let idx = base + bit;
             let cond = predicate(&values[idx]) as u64;
             let valid = 1u64 ^ ((null_word >> bit) & 1);
-            out_word |= (cond & valid) << bit;
+            word_val |= (cond & valid) << bit;
         }
 
-        out_words[word_idx] = out_word;
+        *out_word = word_val;
     }
 
     bitmap
@@ -718,23 +682,19 @@ fn build_non_null_bitmap(num_rows: usize, null_bitmap: &Bitmap) -> Bitmap {
         (1u64 << last_bits) - 1
     };
 
-    for word_idx in 0..word_count {
+    for (word_idx, out_word) in out_words.iter_mut().enumerate() {
         let null_word = *null_words.get(word_idx).unwrap_or(&0);
-        let mut out_word = !null_word;
+        let mut val = !null_word;
         if word_idx + 1 == word_count {
-            out_word &= last_mask;
+            val &= last_mask;
         }
-        out_words[word_idx] = out_word;
+        *out_word = val;
     }
 
     bitmap
 }
 
-fn build_indexed_word_bitmap<F>(
-    num_rows: usize,
-    null_bitmap: &Bitmap,
-    mut predicate: F,
-) -> Bitmap
+fn build_indexed_word_bitmap<F>(num_rows: usize, null_bitmap: &Bitmap, mut predicate: F) -> Bitmap
 where
     F: FnMut(usize) -> bool,
 {
@@ -743,21 +703,21 @@ where
     let null_words = null_bitmap.words();
     let word_count = out_words.len();
 
-    for word_idx in 0..word_count {
+    for (word_idx, out_word) in out_words.iter_mut().enumerate() {
         let base = word_idx * 64;
         let remaining = num_rows.saturating_sub(base);
         let count = remaining.min(64);
         let null_word = *null_words.get(word_idx).unwrap_or(&0);
-        let mut out_word = 0u64;
+        let mut val = 0u64;
 
         for bit in 0..count {
             let idx = base + bit;
             let cond = predicate(idx) as u64;
             let valid = 1u64 ^ ((null_word >> bit) & 1);
-            out_word |= (cond & valid) << bit;
+            val |= (cond & valid) << bit;
         }
 
-        out_words[word_idx] = out_word;
+        *out_word = val;
     }
 
     bitmap
@@ -870,8 +830,8 @@ fn evaluate_in_list_column(page: &ColumnarPage, list: &[PhysicalExpr], negated: 
             }
             // Pre-compute which dictionary keys match
             let mut matching_keys = HashSet::new();
-            for key in 0..dict.values.len() {
-                if set.contains(dict.values.get_bytes(key)) {
+            for (key, val) in dict.values.iter().enumerate() {
+                if set.contains(val) {
                     matching_keys.insert(key as u16);
                 }
             }
@@ -932,8 +892,7 @@ fn evaluate_like(
                 let mut matches_key = vec![false; dict.values.len()];
                 let mut any_match = false;
                 let mut all_match = true;
-                for idx in 0..dict.values.len() {
-                    let bytes = dict.values.get_bytes(idx);
+                for (match_flag, bytes) in matches_key.iter_mut().zip(dict.values.iter()) {
                     if exact && bytes.len() != prefix.len() {
                         all_match = false;
                         continue;
@@ -953,7 +912,7 @@ fn evaluate_like(
                     } else {
                         all_match = false;
                     }
-                    matches_key[idx] = if negated { !matches } else { matches };
+                    *match_flag = if negated { !matches } else { matches };
                 }
 
                 if !negated {

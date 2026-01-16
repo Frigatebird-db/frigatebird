@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use super::helpers::{binary_search_insert_index, find_insert_position, other_error};
 
-// TODO: we also have to update the (l,r) ranges whenever we upsert something into it
+// TODO: update (l,r) ranges on upsert
 pub fn upsert_data_into_column(
     handler: &PageHandler,
     col: &str,

@@ -36,8 +36,6 @@ struct OrderColumn {
     nulls: NullsPlacement,
 }
 
-// Legacy rowwise ordering helpers removed after pipeline refactor.
-
 pub(crate) fn compare_order_keys(
     left: &OrderKey,
     right: &OrderKey,
@@ -282,9 +280,7 @@ fn compare_rows_by_columns(
                 .unwrap_or(Ordering::Equal),
             ColumnData::Boolean(values) => values[left_idx].cmp(&values[right_idx]),
             ColumnData::Text(col) => col.get_bytes(left_idx).cmp(col.get_bytes(right_idx)),
-            ColumnData::Dictionary(dict) => {
-                dict.get_bytes(left_idx).cmp(dict.get_bytes(right_idx))
-            }
+            ColumnData::Dictionary(dict) => dict.get_bytes(left_idx).cmp(dict.get_bytes(right_idx)),
         };
         if column.descending {
             ord = ord.reverse();
@@ -435,7 +431,9 @@ impl MergeOperator {
 
         let mut emitted = 0;
         let remaining = self.limit.map(|limit| limit - self.produced);
-        let batch_target = remaining.unwrap_or(self.batch_capacity).min(self.batch_capacity);
+        let batch_target = remaining
+            .unwrap_or(self.batch_capacity)
+            .min(self.batch_capacity);
         let mut chunks: Vec<RowChunk> = Vec::new();
 
         while emitted < batch_target {

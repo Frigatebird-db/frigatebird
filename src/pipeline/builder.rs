@@ -13,10 +13,8 @@ pub fn build_pipeline(plan: &QueryPlan, page_handler: Arc<PageHandler>) -> Vec<J
 
     for table in &plan.tables {
         if let Some(filter) = &table.filters {
-            // Extract all leaf filters from the filter tree
             let leaf_filters = extract_leaf_filters(filter);
 
-            // Group filters by the column they operate on
             let grouped = group_filters_by_column(leaf_filters);
             let catalog = page_handler
                 .table_catalog(&table.table_name)

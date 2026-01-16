@@ -1,4 +1,5 @@
 use crate::metadata_store::{ColumnCatalog, TableCatalog};
+use crate::page_handler::PageHandler;
 use crate::pipeline::filtering::apply_qualify_filter;
 use crate::pipeline::operators::AggregateOperator;
 use crate::pipeline::operators::{
@@ -19,8 +20,8 @@ use crate::sql::planner::ExpressionPlanner;
 use crate::sql::runtime::aggregates::{plan_aggregate_projection, select_item_contains_aggregate};
 use crate::sql::runtime::aggregation_exec::finalize_aggregation_rows;
 use crate::sql::runtime::batch::ColumnarBatch;
-use crate::sql::runtime::executor_utils::rows_to_batch;
 use crate::sql::runtime::executor_utils::merge_batches;
+use crate::sql::runtime::executor_utils::rows_to_batch;
 use crate::sql::runtime::grouping_helpers::validate_group_by;
 use crate::sql::runtime::helpers::{
     collect_expr_column_ordinals, column_name_from_expr, object_name_to_string, parse_limit,
@@ -42,7 +43,6 @@ use crate::sql::runtime::{
     SqlExecutionError,
 };
 use crate::sql::types::DataType;
-use crate::page_handler::PageHandler;
 use sqlparser::ast::{
     Expr, GroupByExpr, Offset, OrderByExpr, Query, Select, SelectItem, SetExpr, TableFactor, Value,
 };
@@ -82,7 +82,12 @@ pub(crate) fn execute_projection_pipeline(
         && !distinct_flag
         && limit.is_some()
         && (order_clauses.is_empty()
-            || can_skip_sort(executor.page_handler().as_ref(), table, order_clauses, catalog))
+            || can_skip_sort(
+                executor.page_handler().as_ref(),
+                table,
+                order_clauses,
+                catalog,
+            ))
     {
         effective_row_ids = build_row_id_slice(
             executor.page_handler().as_ref(),
@@ -177,7 +182,12 @@ pub(crate) fn execute_projection_pipeline(
     };
 
     if !order_clauses.is_empty()
-        && !can_skip_sort(executor.page_handler().as_ref(), table, order_clauses, catalog)
+        && !can_skip_sort(
+            executor.page_handler().as_ref(),
+            table,
+            order_clauses,
+            catalog,
+        )
     {
         let mut sorter = SortOperator::new(order_clauses, catalog, sort_limit);
         processed_batches = sorter.execute_batches(processed_batches)?;
@@ -357,7 +367,12 @@ pub(crate) fn execute_window_pipeline(
     };
 
     if !final_order_clauses.is_empty()
-        && !can_skip_sort(executor.page_handler().as_ref(), table, &final_order_clauses, catalog)
+        && !can_skip_sort(
+            executor.page_handler().as_ref(),
+            table,
+            &final_order_clauses,
+            catalog,
+        )
     {
         let mut sorter = SortOperator::new(&final_order_clauses, catalog, sort_limit);
         let sorted_batches = sorter.execute_batches(vec![processed_batch])?;
@@ -613,11 +628,10 @@ pub(crate) fn execute_select_plan(
         && qualify.is_none()
         && order_clauses.is_empty()
         && !distinct_flag
-        && aggregate_plan_opt
-            .as_ref()
-            .is_some_and(is_count_star_plan)
+        && aggregate_plan_opt.as_ref().is_some_and(is_count_star_plan)
     {
-        let count = estimate_table_row_count(executor.page_handler().as_ref(), &table_name, &columns)?;
+        let count =
+            estimate_table_row_count(executor.page_handler().as_ref(), &table_name, &columns)?;
         let offset = parse_offset(offset_expr.clone())?;
         let limit = parse_limit(limit_expr.clone())?;
         let rows = if offset > 0 || limit == Some(0) {
@@ -626,7 +640,11 @@ pub(crate) fn execute_select_plan(
             vec![vec![Some(count.to_string())]]
         };
         let batch = rows_to_batch(rows);
-        let batches = if batch.num_rows == 0 { Vec::new() } else { vec![batch] };
+        let batches = if batch.num_rows == 0 {
+            Vec::new()
+        } else {
+            vec![batch]
+        };
         return Ok(SelectResult {
             columns: result_columns,
             batches,
@@ -938,11 +956,11 @@ fn can_skip_sort(
         let pages = page_handler.list_pages_in_table(table, &sort_column.name);
         if pages.is_empty()
             || pages.iter().any(|page| {
-                page.stats
+                !page
+                    .stats
                     .as_ref()
                     .map(|stats| stats.null_count == 0)
                     .unwrap_or(false)
-                    == false
             })
         {
             return false;
@@ -959,9 +977,7 @@ fn build_row_id_slice(
     offset: usize,
     limit: Option<usize>,
 ) -> Option<Vec<u64>> {
-    let Some(limit) = limit else {
-        return None;
-    };
+    let limit = limit?;
     if columns.is_empty() {
         return None;
     }
@@ -1010,11 +1026,13 @@ fn is_count_star_plan(plan: &AggregateProjectionPlan) -> bool {
     if function.args.is_empty() {
         return true;
     }
-    function.args.iter().all(|arg| matches!(
-        arg,
-        sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Wildcard)
-            | sqlparser::ast::FunctionArg::Unnamed(
-                sqlparser::ast::FunctionArgExpr::QualifiedWildcard(_)
-            )
-    ))
+    function.args.iter().all(|arg| {
+        matches!(
+            arg,
+            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Wildcard)
+                | sqlparser::ast::FunctionArg::Unnamed(
+                    sqlparser::ast::FunctionArgExpr::QualifiedWildcard(_)
+                )
+        )
+    })
 }

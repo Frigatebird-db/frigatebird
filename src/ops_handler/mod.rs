@@ -1,4 +1,4 @@
-// these are our external API contracts; callers supply table + column identifiers.
+// API contracts; callers supply table + column identifiers.
 
 mod create;
 mod delete;

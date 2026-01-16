@@ -2,8 +2,8 @@ use crate::cache::page_cache::PageCacheEntryUncompressed;
 use crate::entry::Entry;
 use crate::metadata_store::{
     CatalogError, ColumnCatalog, ColumnDefinition, ColumnStats, ColumnStatsKind, MetaJournal,
-    MetaJournalEntry, MetaRecord, PageDescriptor, PageDirectory, PendingPage, PREFIX_INDEX_LEN,
-    PREFIX_INDEX_LIMIT, ROWS_PER_PAGE_GROUP, TableDefinition,
+    MetaJournalEntry, MetaRecord, PREFIX_INDEX_LEN, PREFIX_INDEX_LIMIT, PageDescriptor,
+    PageDirectory, PendingPage, ROWS_PER_PAGE_GROUP, TableDefinition,
 };
 use crate::page::Page;
 use crate::page_handler::{PageHandler, page_io::PageIO};
@@ -982,13 +982,6 @@ fn derive_column_stats_from_page(page: &ColumnarPage) -> Option<ColumnStats> {
         }
         ColumnData::Boolean(values) => {
             // ...
-            stats.kind = ColumnStatsKind::Int64; // Use Int64 for bool (0/1) or Text?
-            // Existing stats kinds: Int64, Float64, Text.
-            // Map Boolean to Text ("true"/"false") or Int64 (0/1)?
-            // Phase 1 defined `ColumnStatsKind` enum in `metadata_store/mod.rs`.
-            // It has `Int64`, `Float64`, `Text`.
-            // I should use `Text` for Boolean for now or add `Boolean`.
-            // Let's use `Text` "true"/"false".
             stats.kind = ColumnStatsKind::Text;
             let mut min_val: Option<bool> = None;
             let mut max_val: Option<bool> = None;

@@ -1,9 +1,7 @@
 use super::SqlExecutionError;
 use crate::metadata_store::TableCatalog;
 use crate::sql::runtime::batch::ColumnarBatch;
-use crate::sql::runtime::ordering::{
-    MergeOperator, OrderClause, sort_batch_in_memory_with_limit,
-};
+use crate::sql::runtime::ordering::{MergeOperator, OrderClause, sort_batch_in_memory_with_limit};
 use crate::sql::runtime::spill::SpillManager;
 
 const SORT_OUTPUT_BATCH_SIZE: usize = 1_024;

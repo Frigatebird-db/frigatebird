@@ -10,8 +10,7 @@ pub(super) struct ColReaderInfo {
     pub(super) cur_block_idx: usize,
     pub(super) cur_block_offset: u64,
     pub(super) reads_since_persist: u32,
-    // In-memory progress for tail (active writer block). This allows AtLeastOnce
-    // to advance between reads within a single process without persisting every time.
+    // In-memory tail progress (avoids persistence per read in AtLeastOnce).
     pub(super) tail_block_id: u64,
     pub(super) tail_offset: u64,
     // Ensure we only hydrate from persisted index once per process per column

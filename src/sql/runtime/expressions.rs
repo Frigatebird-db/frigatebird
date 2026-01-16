@@ -726,12 +726,8 @@ pub(crate) fn evaluate_expression_on_batch(
                 BinaryOperator::Xor => {
                     vectorized_boolean_binary_op(&left_page, &right_page, |a, b| a ^ b)
                 }
-                BinaryOperator::Eq => {
-                    vectorized_equality_op(&left_page, &right_page, true)
-                }
-                BinaryOperator::NotEq => {
-                    vectorized_equality_op(&left_page, &right_page, false)
-                }
+                BinaryOperator::Eq => vectorized_equality_op(&left_page, &right_page, true),
+                BinaryOperator::NotEq => vectorized_equality_op(&left_page, &right_page, false),
                 BinaryOperator::Gt => {
                     vectorized_ordering_comparison_op(&left_page, &right_page, |ord| {
                         ord == Ordering::Greater
@@ -1277,12 +1273,12 @@ where
             (ColumnData::Float64(l), ColumnData::Float64(r)) => {
                 l[idx].partial_cmp(&r[idx]).unwrap_or(Ordering::Equal)
             }
-            (ColumnData::Int64(l), ColumnData::Float64(r)) => {
-                (l[idx] as f64).partial_cmp(&r[idx]).unwrap_or(Ordering::Equal)
-            }
-            (ColumnData::Float64(l), ColumnData::Int64(r)) => {
-                l[idx].partial_cmp(&(r[idx] as f64)).unwrap_or(Ordering::Equal)
-            }
+            (ColumnData::Int64(l), ColumnData::Float64(r)) => (l[idx] as f64)
+                .partial_cmp(&r[idx])
+                .unwrap_or(Ordering::Equal),
+            (ColumnData::Float64(l), ColumnData::Int64(r)) => l[idx]
+                .partial_cmp(&(r[idx] as f64))
+                .unwrap_or(Ordering::Equal),
             (ColumnData::Boolean(l), ColumnData::Boolean(r)) => l[idx].cmp(&r[idx]),
             (ColumnData::Text(l), ColumnData::Text(r)) => l.get_bytes(idx).cmp(r.get_bytes(idx)),
             (ColumnData::Dictionary(l), ColumnData::Dictionary(r)) => {
@@ -1297,7 +1293,7 @@ where
             _ => {
                 return Err(SqlExecutionError::Unsupported(
                     "vectorized ordering requires comparable operand types".into(),
-                ))
+                ));
             }
         };
 
@@ -1352,7 +1348,7 @@ fn vectorized_equality_op(
             _ => {
                 return Err(SqlExecutionError::Unsupported(
                     "vectorized equality requires comparable operand types".into(),
-                ))
+                ));
             }
         };
         values.push(if is_eq { matches } else { !matches });

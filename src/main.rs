@@ -16,10 +16,10 @@ use crate::writer::{
 };
 mod cache;
 mod entry;
+mod executor;
 mod helpers;
 mod metadata_store;
 mod ops_handler;
-mod executor;
 mod page;
 mod page_handler;
 mod pipeline;
@@ -105,10 +105,4 @@ fn main() {
         Arc::clone(&metadata_client),
         Arc::clone(&writer_wal),
     );
-
-    // cleanup
-    drop(uncompressed_page_cache);
-    drop(compressed_page_cache);
-    drop(page_io);
-    drop(compressor);
 }

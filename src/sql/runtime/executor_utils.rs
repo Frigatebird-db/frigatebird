@@ -78,10 +78,14 @@ pub(crate) fn deduplicate_batches(
         return batches;
     }
 
-    if column_count == 1 {
-        if let Some(batch) = dedup_single_column(&batches) {
-            return if batch.num_rows == 0 { Vec::new() } else { vec![batch] };
-        }
+    if column_count == 1
+        && let Some(batch) = dedup_single_column(&batches)
+    {
+        return if batch.num_rows == 0 {
+            Vec::new()
+        } else {
+            vec![batch]
+        };
     }
 
     let mut seen: HashSet<DistinctKey> = HashSet::new();

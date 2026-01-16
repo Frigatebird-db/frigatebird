@@ -57,8 +57,4 @@ pub fn range_scan_table_column_entry(
     out
 }
 
-fn range_scan_columns_entries() {
-    // honestly, the columns are pretty decoupled already
-
-    // I doubt there is any shared contention or coordination thingy here, its just doing a bunch of independent stuff fast
-}
+fn range_scan_columns_entries() {}

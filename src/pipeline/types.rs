@@ -1,5 +1,5 @@
 use crate::metadata_store::{
-    ColumnStats, ColumnStatsKind, PageDescriptor, PREFIX_INDEX_LEN, ROWS_PER_PAGE_GROUP,
+    ColumnStats, ColumnStatsKind, PREFIX_INDEX_LEN, PageDescriptor, ROWS_PER_PAGE_GROUP,
 };
 use crate::page_handler::PageHandler;
 use crate::sql::models::FilterExpr;
@@ -156,9 +156,7 @@ impl PipelineStep {
         } else {
             descriptors
                 .into_iter()
-                .filter(|descriptor| {
-                    !should_prune_descriptor(descriptor, &self.prune_predicates)
-                })
+                .filter(|descriptor| !should_prune_descriptor(descriptor, &self.prune_predicates))
                 .collect()
         };
         let page_ids: Vec<String> = descriptors.iter().map(|d| d.id.clone()).collect();
@@ -272,10 +270,7 @@ impl PipelineStep {
     }
 }
 
-fn should_prune_descriptor(
-    descriptor: &PageDescriptor,
-    predicates: &[PagePrunePredicate],
-) -> bool {
+fn should_prune_descriptor(descriptor: &PageDescriptor, predicates: &[PagePrunePredicate]) -> bool {
     let Some(stats) = &descriptor.stats else {
         return false;
     };
@@ -287,11 +282,7 @@ fn should_prune_descriptor(
     false
 }
 
-fn predicate_prunes(
-    stats: &ColumnStats,
-    entry_count: u64,
-    predicate: &PagePrunePredicate,
-) -> bool {
+fn predicate_prunes(stats: &ColumnStats, entry_count: u64, predicate: &PagePrunePredicate) -> bool {
     match predicate.op {
         PagePruneOp::IsNull => {
             if stats.null_count == 0 {
@@ -382,31 +373,21 @@ fn scalar_to_text(value: &ScalarValue) -> Option<&str> {
     }
 }
 
-fn range_prunes_numeric(
-    min: Option<f64>,
-    max: Option<f64>,
-    value: f64,
-    op: &PagePruneOp,
-) -> bool {
+fn range_prunes_numeric(min: Option<f64>, max: Option<f64>, value: f64, op: &PagePruneOp) -> bool {
     match op {
         PagePruneOp::Eq => match (min, max) {
             (Some(min_val), Some(max_val)) => value < min_val || value > max_val,
             _ => false,
         },
-        PagePruneOp::Gt => max.map_or(false, |max_val| max_val <= value),
-        PagePruneOp::GtEq => max.map_or(false, |max_val| max_val < value),
-        PagePruneOp::Lt => min.map_or(false, |min_val| min_val >= value),
-        PagePruneOp::LtEq => min.map_or(false, |min_val| min_val > value),
+        PagePruneOp::Gt => max.is_some_and(|max_val| max_val <= value),
+        PagePruneOp::GtEq => max.is_some_and(|max_val| max_val < value),
+        PagePruneOp::Lt => min.is_some_and(|min_val| min_val >= value),
+        PagePruneOp::LtEq => min.is_some_and(|min_val| min_val > value),
         _ => false,
     }
 }
 
-fn range_prunes_text(
-    min: Option<&str>,
-    max: Option<&str>,
-    value: &str,
-    op: &PagePruneOp,
-) -> bool {
+fn range_prunes_text(min: Option<&str>, max: Option<&str>, value: &str, op: &PagePruneOp) -> bool {
     let cmp_min = min.map(|min_val| value.as_bytes().cmp(min_val.as_bytes()));
     let cmp_max = max.map(|max_val| value.as_bytes().cmp(max_val.as_bytes()));
     match op {
@@ -416,10 +397,10 @@ fn range_prunes_text(
             }
             _ => false,
         },
-        PagePruneOp::Gt => cmp_max.map_or(false, |cmp| cmp != std::cmp::Ordering::Less),
-        PagePruneOp::GtEq => cmp_max.map_or(false, |cmp| cmp == std::cmp::Ordering::Greater),
-        PagePruneOp::Lt => cmp_min.map_or(false, |cmp| cmp != std::cmp::Ordering::Greater),
-        PagePruneOp::LtEq => cmp_min.map_or(false, |cmp| cmp == std::cmp::Ordering::Less),
+        PagePruneOp::Gt => cmp_max.is_some_and(|cmp| cmp != std::cmp::Ordering::Less),
+        PagePruneOp::GtEq => cmp_max == Some(std::cmp::Ordering::Greater),
+        PagePruneOp::Lt => cmp_min.is_some_and(|cmp| cmp != std::cmp::Ordering::Greater),
+        PagePruneOp::LtEq => cmp_min == Some(std::cmp::Ordering::Less),
         _ => false,
     }
 }

@@ -218,9 +218,7 @@ impl PageIO {
         let mut buffer = AlignedBuffer::new(total_size);
         let slice = buffer.as_slice_mut();
 
-        // Write metadata
         slice[..meta_bytes.len()].copy_from_slice(&meta_bytes);
-        // Write data
         slice[PREFIX_META_SIZE..PREFIX_META_SIZE + data.len()].copy_from_slice(&data);
 
         // Write the aligned buffer
@@ -387,6 +385,7 @@ fn open_direct_writer(path: &str) -> io::Result<File> {
     OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .custom_flags(libc::O_DIRECT)
         .open(path)
 }
@@ -401,6 +400,7 @@ fn open_direct_writer(path: &str) -> io::Result<File> {
     std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
 }
 

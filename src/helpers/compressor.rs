@@ -4,9 +4,6 @@ use bincode;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use std::sync::Arc;
 
-/*
-a dumb helper, nothing else
-*/
 pub struct Compressor {}
 
 impl Default for Compressor {

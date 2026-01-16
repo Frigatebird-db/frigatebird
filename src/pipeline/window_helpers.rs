@@ -1274,10 +1274,6 @@ fn sorted_positions_for_plan(
 
     let keys = build_order_keys_on_batch(clauses, batch, catalog)?;
 
-    // DuckDB evaluates window functions in declaration order, and uses the
-    // ORDER BY from earlier windows as the tie-breaker for later windows.
-    // Since queries typically have ROW_NUMBER() ORDER BY created_at first,
-    // we use timestamp (created_at) as the tie-breaker to match this behavior.
     let sort_key_cols = catalog.sort_key();
     let timestamp_values: Option<Vec<i64>> = sort_key_cols.iter().find_map(|col| {
         batch.columns.get(&col.ordinal).and_then(|page| {
@@ -1292,7 +1288,6 @@ fn sorted_positions_for_plan(
     positions.sort_by(|left, right| {
         let ordering = compare_order_keys(&keys[*left], &keys[*right], clauses);
         if ordering == Ordering::Equal {
-            // Use timestamp as tie-breaker to match DuckDB's evaluation order
             if let Some(ref ts_values) = timestamp_values
                 && let (Some(&left_ts), Some(&right_ts)) =
                     (ts_values.get(*left), ts_values.get(*right))

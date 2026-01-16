@@ -6,24 +6,6 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// user space page cache
-
-// a dequeue of Pages(which are nothing but a set of entries)
-// fixed sized because of limits
-// we should be able to access a page from its ID or something
-
-/*
-
-wait a second, do we need to flush a page to disk that we know is an old version ??
-
-set with (used_id,id)
----
-
-store[id] -> PageCacheEntry
-Set((used_time,id),()...)
-
-create when adding, remove when removing
-*/
 // Keep enough pages resident while the persistence pipeline is still evolving.
 const LRU_SIZE: usize = 1024;
 
@@ -73,19 +55,11 @@ pub struct PageCacheEntryCompressed {
 }
 
 impl Drop for PageCacheEntryUncompressed {
-    fn drop(&mut self) {
-        // okay, so we need to compress it and insert into Compressed page cache ?
-
-        // how ? ownership and stuff ?
-
-        // how to get Compressed page cache context over here ??
-    }
+    fn drop(&mut self) {}
 }
 
 impl Drop for PageCacheEntryCompressed {
-    fn drop(&mut self) {
-        // when this goes out of scope, we just flush it to disk with direct IO
-    }
+    fn drop(&mut self) {}
 }
 
 pub struct PageCache<T> {

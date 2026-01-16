@@ -198,35 +198,6 @@ fn plan_select(select: &Select, directory: &PageDirectory) -> PlannerResult<Quer
         let physical = expr_planner.plan_expression(selection)?;
         table_access.add_filter(filter_expr_from_physical(physical));
     }
-    // TODO: Having and Qualify also need physical planning, but for now we only did Where.
-    // However, they operate on Aggregates/Windows, which are not simple columns.
-    // The current ExpressionPlanner handles simple columns.
-    // If Having/Qualify uses aggregate results, they are "columns" in the output of aggregation?
-    // For now, let's skip physical planning for Having/Qualify or assume they are not supported in this phase fully
-    // or we need to extend ExpressionPlanner.
-    // But wait, the existing code called `attach_filter` for them. `attach_filter` created `FilterExpr::Leaf(Expr)`.
-    // Now `FilterExpr::Leaf` takes `PhysicalExpr`.
-    // So we MUST plan them physically or we can't construct `FilterExpr`.
-    // If we plan them physically, `ExpressionPlanner` expects columns to exist in the table catalog.
-    // But Having clauses reference Aggregate results (aliases).
-    // The current `ExpressionPlanner` looks up in `TableCatalog`.
-    // So it will fail for aliased aggregates.
-    // This implies Phase 3 is breaking Having/Qualify temporarily until we have a schema for the intermediate plan.
-    // That is acceptable for this migration step. We focus on WHERE clauses (selection).
-
-    // I will comment out Having/Qualify physical planning for now to avoid runtime errors during planning if columns are missing.
-    // Or I can try to plan them and if it fails, return error.
-
-    /*
-    if let Some(having) = &select.having {
-        let physical = expr_planner.plan_expression(having)?;
-        table_access.add_filter(FilterExpr::leaf(physical));
-    }
-    if let Some(qualify) = &select.qualify {
-        let physical = expr_planner.plan_expression(qualify)?;
-        table_access.add_filter(FilterExpr::leaf(physical));
-    }
-    */
 
     Ok(QueryPlan::new(vec![table_access]))
 }
@@ -893,8 +864,8 @@ impl<'a> ExpressionPlanner<'a> {
         op: BinaryOperator,
         right: PhysicalExpr,
     ) -> Result<PhysicalExpr, PlannerError> {
-        let left_type = self.get_type(&left);
-        let right_type = self.get_type(&right);
+        let left_type = Self::get_type(&left);
+        let right_type = Self::get_type(&right);
 
         if left_type == right_type {
             return Ok(PhysicalExpr::BinaryOp {
@@ -1034,8 +1005,8 @@ impl<'a> ExpressionPlanner<'a> {
     ) -> Result<PhysicalExpr, PlannerError> {
         let left = self.plan_expression(expr)?;
         let right = self.plan_expression(pattern)?;
-        let left_type = self.get_type(&left);
-        let right_type = self.get_type(&right);
+        let left_type = Self::get_type(&left);
+        let right_type = Self::get_type(&right);
         if left_type != DataType::String || right_type != DataType::String {
             return Err(PlannerError::Unsupported(
                 "LIKE requires string operands".into(),
@@ -1057,8 +1028,8 @@ impl<'a> ExpressionPlanner<'a> {
     ) -> Result<PhysicalExpr, PlannerError> {
         let left = self.plan_expression(expr)?;
         let right = self.plan_expression(pattern)?;
-        let left_type = self.get_type(&left);
-        let right_type = self.get_type(&right);
+        let left_type = Self::get_type(&left);
+        let right_type = Self::get_type(&right);
         if left_type != DataType::String || right_type != DataType::String {
             return Err(PlannerError::Unsupported(
                 "RLIKE requires string operands".into(),
@@ -1078,7 +1049,7 @@ impl<'a> ExpressionPlanner<'a> {
         negated: bool,
     ) -> Result<PhysicalExpr, PlannerError> {
         let left = self.plan_expression(expr)?;
-        let target_type = self.get_type(&left);
+        let target_type = Self::get_type(&left);
         let mut items = Vec::with_capacity(list.len());
         for item in list {
             let planned = self.plan_expression(item)?;
@@ -1159,7 +1130,7 @@ impl<'a> ExpressionPlanner<'a> {
         }
     }
 
-    fn get_type(&self, expr: &PhysicalExpr) -> DataType {
+    fn get_type(expr: &PhysicalExpr) -> DataType {
         match expr {
             PhysicalExpr::Column { data_type, .. } => *data_type,
             PhysicalExpr::Literal(val) => val.get_datatype(),
@@ -1173,9 +1144,9 @@ impl<'a> ExpressionPlanner<'a> {
                 | BinaryOperator::GtEq
                 | BinaryOperator::Lt
                 | BinaryOperator::LtEq => DataType::Boolean,
-                _ => self.get_type(left),
+                _ => Self::get_type(left),
             },
-            PhysicalExpr::UnaryOp { expr, .. } => self.get_type(expr),
+            PhysicalExpr::UnaryOp { expr, .. } => Self::get_type(expr),
             PhysicalExpr::Like { .. } => DataType::Boolean,
             PhysicalExpr::RLike { .. } => DataType::Boolean,
             PhysicalExpr::InList { .. } => DataType::Boolean,

@@ -156,10 +156,10 @@ pub(super) fn start_background_workers(fsync_schedule: FsyncSchedule) -> Arc<mps
             #[cfg(not(target_os = "linux"))]
             {
                 for path in unique.iter() {
-                    if let Some(storage) = pool.get_mut(path) {
-                        if let Err(e) = storage.flush() {
-                            debug_print!("[flush] flush error for {}: {}", path, e);
-                        }
+                    if let Some(storage) = pool.get_mut(path)
+                        && let Err(e) = storage.flush()
+                    {
+                        debug_print!("[flush] flush error for {}: {}", path, e);
                     }
                 }
             }
