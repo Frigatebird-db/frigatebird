@@ -20,6 +20,7 @@ pub mod scalar_functions;
 pub mod scan_helpers;
 pub mod scan_stream;
 pub mod select_helpers;
+pub mod simd;
 pub mod sort_exec;
 pub mod spill;
 pub mod values;

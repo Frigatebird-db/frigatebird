@@ -604,6 +604,38 @@ impl DictionaryColumn {
         }
         result
     }
+
+    /// Builds a HashMap for O(1) key lookup. Call once, reuse for multiple lookups.
+    #[inline]
+    pub fn build_key_lookup(&self) -> HashMap<Vec<u8>, u16> {
+        let mut map = HashMap::with_capacity(self.values.len());
+        for i in 0..self.values.len() {
+            map.insert(self.values.get_bytes(i).to_vec(), i as u16);
+        }
+        map
+    }
+
+    /// Pre-parses all dictionary values as f64. Returns None for unparseable values.
+    /// Call once per column, then use for fast numeric comparisons.
+    #[inline]
+    pub fn build_numeric_cache(&self) -> Vec<Option<f64>> {
+        (0..self.values.len())
+            .map(|i| {
+                let bytes = self.values.get_bytes(i);
+                // SAFETY: dictionary values are valid UTF-8
+                let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+                s.parse::<f64>().ok()
+            })
+            .collect()
+    }
+
+    /// Returns the numeric value for row `idx` using a pre-built cache.
+    /// Much faster than get_string().parse() for repeated access.
+    #[inline]
+    pub fn get_cached_numeric(&self, idx: usize, cache: &[Option<f64>]) -> Option<f64> {
+        let key = self.keys[idx] as usize;
+        cache.get(key).copied().flatten()
+    }
 }
 
 impl Default for DictionaryColumn {

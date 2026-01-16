@@ -122,8 +122,9 @@ fn dedup_single_column(batches: &[ColumnarBatch]) -> Option<ColumnarBatch> {
                         continue;
                     }
                     let bytes = dict.values.get_bytes(key as usize);
-                    let owned = bytes.to_vec();
-                    if seen.insert(owned.clone()) {
+                    if !seen.contains(bytes) {
+                        let owned = bytes.to_vec();
+                        seen.insert(owned.clone());
                         ordered.push(Some(owned));
                     }
                 }
@@ -137,8 +138,10 @@ fn dedup_single_column(batches: &[ColumnarBatch]) -> Option<ColumnarBatch> {
                         }
                         continue;
                     }
-                    let owned = col.get_bytes(idx).to_vec();
-                    if seen.insert(owned.clone()) {
+                    let bytes = col.get_bytes(idx);
+                    if !seen.contains(bytes) {
+                        let owned = bytes.to_vec();
+                        seen.insert(owned.clone());
                         ordered.push(Some(owned));
                     }
                 }

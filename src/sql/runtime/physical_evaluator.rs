@@ -1,5 +1,10 @@
 use super::batch::{Bitmap, ColumnData, ColumnarBatch, ColumnarPage};
 use super::helpers::{like_match, regex_match};
+use super::simd::{
+    compare_dict_numeric, compare_f64_eq, compare_f64_ge, compare_f64_gt, compare_f64_le,
+    compare_f64_lt, compare_f64_ne, compare_i64_eq, compare_i64_ge, compare_i64_gt, compare_i64_le,
+    compare_i64_lt, compare_i64_ne, compare_u16_eq,
+};
 use super::values::ScalarValue;
 use crate::sql::physical_plan::PhysicalExpr;
 use crate::sql::types::DataType;
@@ -222,32 +227,20 @@ pub(crate) fn evaluate_col_lit(
 
     match (col, lit) {
         // ---------------------------------------------------------
-        // FAST PATH: INT64 / TIMESTAMP
+        // FAST PATH: INT64 / TIMESTAMP (SIMD-optimized)
         // ---------------------------------------------------------
         (ColumnData::Int64(vec), ScalarValue::Int64(val))
         | (ColumnData::Timestamp(vec), ScalarValue::Timestamp(val)) => {
             let target = *val;
-            match op {
-                BinaryOperator::Eq => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v == target);
-                }
-                BinaryOperator::NotEq => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v != target);
-                }
-                BinaryOperator::Gt => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v > target);
-                }
-                BinaryOperator::GtEq => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v >= target);
-                }
-                BinaryOperator::Lt => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v < target);
-                }
-                BinaryOperator::LtEq => {
-                    bitmap = build_word_bitmap(vec, null_bitmap, num_rows, |v| *v <= target);
-                }
-                _ => {}
-            }
+            bitmap = match op {
+                BinaryOperator::Eq => compare_i64_eq(vec, target, null_bitmap),
+                BinaryOperator::NotEq => compare_i64_ne(vec, target, null_bitmap),
+                BinaryOperator::Gt => compare_i64_gt(vec, target, null_bitmap),
+                BinaryOperator::GtEq => compare_i64_ge(vec, target, null_bitmap),
+                BinaryOperator::Lt => compare_i64_lt(vec, target, null_bitmap),
+                BinaryOperator::LtEq => compare_i64_le(vec, target, null_bitmap),
+                _ => bitmap,
+            };
         }
 
         // ---------------------------------------------------------
