@@ -229,7 +229,9 @@ fn main() {
         (config.total_rows * config.row_size_bytes) as f64 / (1024.0 * 1024.0 * 1024.0);
 
     println!("╔══════════════════════════════════════════════════════════════════════════════╗");
-    println!("║                    FRIGATEBIRD HIGH-VOLUME BENCHMARK                              ║");
+    println!(
+        "║                    FRIGATEBIRD HIGH-VOLUME BENCHMARK                              ║"
+    );
     println!(
         "║                    {} Rows × {}KB = ~{:.1}GB Dataset                           ║",
         format_number(config.total_rows),

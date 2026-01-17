@@ -46,7 +46,8 @@ fn cli_create_table_and_insert() {
         .execute("CREATE TABLE products (id TEXT, name TEXT, price FLOAT) ORDER BY id")
         .expect("CREATE TABLE failed");
 
-    let result = executor.execute("INSERT INTO products (id, name, price) VALUES ('1', 'Widget', '9.99')");
+    let result =
+        executor.execute("INSERT INTO products (id, name, price) VALUES ('1', 'Widget', '9.99')");
     assert!(result.is_ok(), "INSERT failed: {:?}", result.err());
 }
 
@@ -83,7 +84,10 @@ fn cli_select_with_aggregation() {
 
     for i in 1..=5 {
         executor
-            .execute(&format!("INSERT INTO numbers (id, n) VALUES ('1', '{}')", i * 10))
+            .execute(&format!(
+                "INSERT INTO numbers (id, n) VALUES ('1', '{}')",
+                i * 10
+            ))
             .expect("INSERT failed");
     }
 
@@ -95,8 +99,8 @@ fn cli_select_with_aggregation() {
 
     let row: Vec<_> = result.row_iter().next().unwrap().to_vec();
     assert_eq!(row[0], Some("150".to_string())); // SUM: 10+20+30+40+50
-    assert_eq!(row[1], Some("30".to_string()));  // AVG: 150/5
-    assert_eq!(row[2], Some("5".to_string()));   // COUNT
+    assert_eq!(row[1], Some("30".to_string())); // AVG: 150/5
+    assert_eq!(row[2], Some("5".to_string())); // COUNT
 }
 
 #[test]
@@ -107,9 +111,15 @@ fn cli_select_with_order_by() {
         .execute("CREATE TABLE scores (id TEXT, player TEXT, score INT) ORDER BY id")
         .expect("CREATE TABLE failed");
 
-    executor.execute("INSERT INTO scores (id, player, score) VALUES ('1', 'Alice', '100')").unwrap();
-    executor.execute("INSERT INTO scores (id, player, score) VALUES ('1', 'Bob', '250')").unwrap();
-    executor.execute("INSERT INTO scores (id, player, score) VALUES ('1', 'Charlie', '175')").unwrap();
+    executor
+        .execute("INSERT INTO scores (id, player, score) VALUES ('1', 'Alice', '100')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO scores (id, player, score) VALUES ('1', 'Bob', '250')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO scores (id, player, score) VALUES ('1', 'Charlie', '175')")
+        .unwrap();
 
     let result = executor
         .query("SELECT player, score FROM scores WHERE id = '1' ORDER BY score DESC")
@@ -132,7 +142,10 @@ fn cli_select_with_limit() {
 
     for i in 1..=10 {
         executor
-            .execute(&format!("INSERT INTO logs (id, msg) VALUES ('1', 'message {}')", i))
+            .execute(&format!(
+                "INSERT INTO logs (id, msg) VALUES ('1', 'message {}')",
+                i
+            ))
             .unwrap();
     }
 
@@ -195,8 +208,12 @@ fn cli_multiple_tables() {
         .execute("CREATE TABLE table_b (id TEXT, val INT) ORDER BY id")
         .expect("CREATE TABLE failed");
 
-    executor.execute("INSERT INTO table_a (id, val) VALUES ('1', '10')").unwrap();
-    executor.execute("INSERT INTO table_b (id, val) VALUES ('1', '20')").unwrap();
+    executor
+        .execute("INSERT INTO table_a (id, val) VALUES ('1', '10')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO table_b (id, val) VALUES ('1', '20')")
+        .unwrap();
 
     let result_a = executor
         .query("SELECT val FROM table_a WHERE id = '1'")
@@ -247,8 +264,12 @@ fn cli_float_operations() {
         .execute("CREATE TABLE floats (id TEXT, val FLOAT) ORDER BY id")
         .expect("CREATE TABLE failed");
 
-    executor.execute("INSERT INTO floats (id, val) VALUES ('1', '3.14159')").unwrap();
-    executor.execute("INSERT INTO floats (id, val) VALUES ('1', '2.71828')").unwrap();
+    executor
+        .execute("INSERT INTO floats (id, val) VALUES ('1', '3.14159')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO floats (id, val) VALUES ('1', '2.71828')")
+        .unwrap();
 
     let result = executor
         .query("SELECT val FROM floats WHERE id = '1' ORDER BY val")
@@ -270,8 +291,12 @@ fn cli_boolean_values() {
         .execute("CREATE TABLE flags (id TEXT, active BOOL) ORDER BY id")
         .expect("CREATE TABLE failed");
 
-    executor.execute("INSERT INTO flags (id, active) VALUES ('1', 'true')").unwrap();
-    executor.execute("INSERT INTO flags (id, active) VALUES ('1', 'false')").unwrap();
+    executor
+        .execute("INSERT INTO flags (id, active) VALUES ('1', 'true')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO flags (id, active) VALUES ('1', 'false')")
+        .unwrap();
 
     let result = executor
         .query("SELECT active FROM flags WHERE id = '1'")
@@ -288,10 +313,18 @@ fn cli_where_clause_filtering() {
         .execute("CREATE TABLE filtered (id TEXT, category TEXT, amount INT) ORDER BY id")
         .expect("CREATE TABLE failed");
 
-    executor.execute("INSERT INTO filtered (id, category, amount) VALUES ('1', 'A', '10')").unwrap();
-    executor.execute("INSERT INTO filtered (id, category, amount) VALUES ('1', 'B', '20')").unwrap();
-    executor.execute("INSERT INTO filtered (id, category, amount) VALUES ('1', 'A', '30')").unwrap();
-    executor.execute("INSERT INTO filtered (id, category, amount) VALUES ('1', 'B', '40')").unwrap();
+    executor
+        .execute("INSERT INTO filtered (id, category, amount) VALUES ('1', 'A', '10')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO filtered (id, category, amount) VALUES ('1', 'B', '20')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO filtered (id, category, amount) VALUES ('1', 'A', '30')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO filtered (id, category, amount) VALUES ('1', 'B', '40')")
+        .unwrap();
 
     let result = executor
         .query("SELECT amount FROM filtered WHERE id = '1' AND category = 'A'")
@@ -316,13 +349,23 @@ fn cli_group_by() {
         .execute("CREATE TABLE sales (id TEXT, region TEXT, amount INT) ORDER BY id")
         .expect("CREATE TABLE failed");
 
-    executor.execute("INSERT INTO sales (id, region, amount) VALUES ('1', 'North', '100')").unwrap();
-    executor.execute("INSERT INTO sales (id, region, amount) VALUES ('1', 'North', '150')").unwrap();
-    executor.execute("INSERT INTO sales (id, region, amount) VALUES ('1', 'South', '200')").unwrap();
-    executor.execute("INSERT INTO sales (id, region, amount) VALUES ('1', 'South', '250')").unwrap();
+    executor
+        .execute("INSERT INTO sales (id, region, amount) VALUES ('1', 'North', '100')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO sales (id, region, amount) VALUES ('1', 'North', '150')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO sales (id, region, amount) VALUES ('1', 'South', '200')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO sales (id, region, amount) VALUES ('1', 'South', '250')")
+        .unwrap();
 
     let result = executor
-        .query("SELECT region, SUM(amount) FROM sales WHERE id = '1' GROUP BY region ORDER BY region")
+        .query(
+            "SELECT region, SUM(amount) FROM sales WHERE id = '1' GROUP BY region ORDER BY region",
+        )
         .expect("SELECT failed");
 
     let rows: Vec<_> = result.row_iter().map(|r| r.to_vec()).collect();
@@ -362,19 +405,22 @@ fn cli_update_rows() {
         .execute("CREATE TABLE updatable (id TEXT, status TEXT) ORDER BY id")
         .expect("CREATE TABLE failed");
 
-    executor.execute("INSERT INTO updatable (id, status) VALUES ('1', 'pending')").unwrap();
-    executor.execute("INSERT INTO updatable (id, status) VALUES ('1', 'pending')").unwrap();
+    executor
+        .execute("INSERT INTO updatable (id, status) VALUES ('1', 'pending')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO updatable (id, status) VALUES ('1', 'pending')")
+        .unwrap();
 
-    executor.execute("UPDATE updatable SET status = 'done' WHERE id = '1'").unwrap();
+    executor
+        .execute("UPDATE updatable SET status = 'done' WHERE id = '1'")
+        .unwrap();
 
     let result = executor
         .query("SELECT status FROM updatable WHERE id = '1'")
         .expect("SELECT failed");
 
-    let statuses: Vec<_> = result
-        .row_iter()
-        .map(|r| r.to_vec()[0].clone())
-        .collect();
+    let statuses: Vec<_> = result.row_iter().map(|r| r.to_vec()[0].clone()).collect();
 
     assert!(statuses.iter().all(|s| s == &Some("done".to_string())));
 }
@@ -387,11 +433,19 @@ fn cli_delete_rows() {
         .execute("CREATE TABLE deletable (id TEXT, val INT) ORDER BY id")
         .expect("CREATE TABLE failed");
 
-    executor.execute("INSERT INTO deletable (id, val) VALUES ('1', '10')").unwrap();
-    executor.execute("INSERT INTO deletable (id, val) VALUES ('1', '20')").unwrap();
-    executor.execute("INSERT INTO deletable (id, val) VALUES ('2', '30')").unwrap();
+    executor
+        .execute("INSERT INTO deletable (id, val) VALUES ('1', '10')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO deletable (id, val) VALUES ('1', '20')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO deletable (id, val) VALUES ('2', '30')")
+        .unwrap();
 
-    executor.execute("DELETE FROM deletable WHERE id = '1'").unwrap();
+    executor
+        .execute("DELETE FROM deletable WHERE id = '1'")
+        .unwrap();
 
     let result = executor
         .query("SELECT val FROM deletable WHERE id = '1'")
@@ -462,9 +516,15 @@ fn cli_shorthand_dt_lists_tables() {
     let executor = setup_executor();
     assert!(executor.table_names().is_empty());
 
-    executor.execute("CREATE TABLE orders (id TEXT, total INT) ORDER BY id").unwrap();
-    executor.execute("CREATE TABLE customers (id TEXT, name TEXT) ORDER BY id").unwrap();
-    executor.execute("CREATE TABLE products (id TEXT, price INT) ORDER BY id").unwrap();
+    executor
+        .execute("CREATE TABLE orders (id TEXT, total INT) ORDER BY id")
+        .unwrap();
+    executor
+        .execute("CREATE TABLE customers (id TEXT, name TEXT) ORDER BY id")
+        .unwrap();
+    executor
+        .execute("CREATE TABLE products (id TEXT, price INT) ORDER BY id")
+        .unwrap();
 
     let tables = executor.table_names();
     assert_eq!(tables.len(), 3);
@@ -480,7 +540,9 @@ fn cli_shorthand_d_describes_table() {
         .execute("CREATE TABLE employees (id TEXT, name TEXT, salary INT, active BOOL) ORDER BY id")
         .unwrap();
 
-    let catalog = executor.get_table_catalog("employees").expect("table should exist");
+    let catalog = executor
+        .get_table_catalog("employees")
+        .expect("table should exist");
     let columns = catalog.columns();
     assert_eq!(columns.len(), 4);
     assert_eq!(columns[0].name, "id");
@@ -511,25 +573,35 @@ fn cli_execute_create_table() {
 #[test]
 fn cli_execute_insert() {
     let executor = setup_executor();
-    executor.execute("CREATE TABLE insert_test (id TEXT, val INT) ORDER BY id").unwrap();
+    executor
+        .execute("CREATE TABLE insert_test (id TEXT, val INT) ORDER BY id")
+        .unwrap();
 
     let result = executor.execute("INSERT INTO insert_test (id, val) VALUES ('1', '42')");
     assert!(result.is_ok());
 
-    let rows = executor.query("SELECT val FROM insert_test WHERE id = '1'").unwrap();
+    let rows = executor
+        .query("SELECT val FROM insert_test WHERE id = '1'")
+        .unwrap();
     assert_eq!(rows.row_count(), 1);
 }
 
 #[test]
 fn cli_execute_update() {
     let executor = setup_executor();
-    executor.execute("CREATE TABLE update_test (id TEXT, status TEXT) ORDER BY id").unwrap();
-    executor.execute("INSERT INTO update_test (id, status) VALUES ('1', 'old')").unwrap();
+    executor
+        .execute("CREATE TABLE update_test (id TEXT, status TEXT) ORDER BY id")
+        .unwrap();
+    executor
+        .execute("INSERT INTO update_test (id, status) VALUES ('1', 'old')")
+        .unwrap();
 
     let result = executor.execute("UPDATE update_test SET status = 'new' WHERE id = '1'");
     assert!(result.is_ok());
 
-    let rows = executor.query("SELECT status FROM update_test WHERE id = '1'").unwrap();
+    let rows = executor
+        .query("SELECT status FROM update_test WHERE id = '1'")
+        .unwrap();
     let status = rows.row_iter().next().unwrap().value_as_string(0);
     assert_eq!(status, Some("new".to_string()));
 }
@@ -537,14 +609,22 @@ fn cli_execute_update() {
 #[test]
 fn cli_execute_delete() {
     let executor = setup_executor();
-    executor.execute("CREATE TABLE delete_test (id TEXT, val INT) ORDER BY id").unwrap();
-    executor.execute("INSERT INTO delete_test (id, val) VALUES ('1', '100')").unwrap();
-    executor.execute("INSERT INTO delete_test (id, val) VALUES ('1', '200')").unwrap();
+    executor
+        .execute("CREATE TABLE delete_test (id TEXT, val INT) ORDER BY id")
+        .unwrap();
+    executor
+        .execute("INSERT INTO delete_test (id, val) VALUES ('1', '100')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO delete_test (id, val) VALUES ('1', '200')")
+        .unwrap();
 
     let result = executor.execute("DELETE FROM delete_test WHERE id = '1'");
     assert!(result.is_ok());
 
-    let rows = executor.query("SELECT val FROM delete_test WHERE id = '1'").unwrap();
+    let rows = executor
+        .query("SELECT val FROM delete_test WHERE id = '1'")
+        .unwrap();
     assert_eq!(rows.row_count(), 0);
 }
 
@@ -558,8 +638,12 @@ fn cli_query_rejects_non_select() {
 #[test]
 fn cli_execute_vs_query() {
     let executor = setup_executor();
-    executor.execute("CREATE TABLE exec_query (id TEXT, val INT) ORDER BY id").unwrap();
-    executor.execute("INSERT INTO exec_query (id, val) VALUES ('1', '42')").unwrap();
+    executor
+        .execute("CREATE TABLE exec_query (id TEXT, val INT) ORDER BY id")
+        .unwrap();
+    executor
+        .execute("INSERT INTO exec_query (id, val) VALUES ('1', '42')")
+        .unwrap();
 
     let result = executor.query("SELECT val FROM exec_query WHERE id = '1'");
     assert!(result.is_ok());
@@ -573,14 +657,20 @@ fn cli_execute_vs_query() {
 fn cli_schema_persistence() {
     let executor = setup_executor();
 
-    executor.execute("CREATE TABLE persist_test (id TEXT, a INT, b TEXT, c BOOL) ORDER BY id").unwrap();
+    executor
+        .execute("CREATE TABLE persist_test (id TEXT, a INT, b TEXT, c BOOL) ORDER BY id")
+        .unwrap();
 
-    executor.execute("INSERT INTO persist_test (id, a, b, c) VALUES ('1', '10', 'hello', 'true')").unwrap();
+    executor
+        .execute("INSERT INTO persist_test (id, a, b, c) VALUES ('1', '10', 'hello', 'true')")
+        .unwrap();
 
     let catalog = executor.get_table_catalog("persist_test").unwrap();
     assert_eq!(catalog.columns().len(), 4);
 
-    let rows = executor.query("SELECT a, b, c FROM persist_test WHERE id = '1'").unwrap();
+    let rows = executor
+        .query("SELECT a, b, c FROM persist_test WHERE id = '1'")
+        .unwrap();
     assert_eq!(rows.row_count(), 1);
 }
 
@@ -588,13 +678,25 @@ fn cli_schema_persistence() {
 fn cli_multiple_independent_tables() {
     let executor = setup_executor();
 
-    executor.execute("CREATE TABLE t1 (id TEXT, x INT) ORDER BY id").unwrap();
-    executor.execute("CREATE TABLE t2 (id TEXT, y TEXT) ORDER BY id").unwrap();
-    executor.execute("CREATE TABLE t3 (id TEXT, z BOOL) ORDER BY id").unwrap();
+    executor
+        .execute("CREATE TABLE t1 (id TEXT, x INT) ORDER BY id")
+        .unwrap();
+    executor
+        .execute("CREATE TABLE t2 (id TEXT, y TEXT) ORDER BY id")
+        .unwrap();
+    executor
+        .execute("CREATE TABLE t3 (id TEXT, z BOOL) ORDER BY id")
+        .unwrap();
 
-    executor.execute("INSERT INTO t1 (id, x) VALUES ('1', '100')").unwrap();
-    executor.execute("INSERT INTO t2 (id, y) VALUES ('1', 'hello')").unwrap();
-    executor.execute("INSERT INTO t3 (id, z) VALUES ('1', 'true')").unwrap();
+    executor
+        .execute("INSERT INTO t1 (id, x) VALUES ('1', '100')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO t2 (id, y) VALUES ('1', 'hello')")
+        .unwrap();
+    executor
+        .execute("INSERT INTO t3 (id, z) VALUES ('1', 'true')")
+        .unwrap();
 
     assert_eq!(executor.get_table_catalog("t1").unwrap().columns().len(), 2);
     assert_eq!(executor.get_table_catalog("t2").unwrap().columns().len(), 2);
@@ -604,9 +706,18 @@ fn cli_multiple_independent_tables() {
     let r2 = executor.query("SELECT y FROM t2 WHERE id = '1'").unwrap();
     let r3 = executor.query("SELECT z FROM t3 WHERE id = '1'").unwrap();
 
-    assert_eq!(r1.row_iter().next().unwrap().value_as_string(0), Some("100".to_string()));
-    assert_eq!(r2.row_iter().next().unwrap().value_as_string(0), Some("hello".to_string()));
-    assert_eq!(r3.row_iter().next().unwrap().value_as_string(0), Some("true".to_string()));
+    assert_eq!(
+        r1.row_iter().next().unwrap().value_as_string(0),
+        Some("100".to_string())
+    );
+    assert_eq!(
+        r2.row_iter().next().unwrap().value_as_string(0),
+        Some("hello".to_string())
+    );
+    assert_eq!(
+        r3.row_iter().next().unwrap().value_as_string(0),
+        Some("true".to_string())
+    );
 }
 
 #[test]
@@ -618,7 +729,9 @@ fn cli_all_data_types() {
         .unwrap();
 
     executor
-        .execute("INSERT INTO all_types (id, t, i, f, b) VALUES ('1', 'text', '42', '3.14', 'true')")
+        .execute(
+            "INSERT INTO all_types (id, t, i, f, b) VALUES ('1', 'text', '42', '3.14', 'true')",
+        )
         .unwrap();
 
     let result = executor

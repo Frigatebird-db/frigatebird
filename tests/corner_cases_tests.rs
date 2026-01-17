@@ -386,7 +386,10 @@ fn page_handler_write_back_then_read() {
 
     handler.write_back_uncompressed(
         &desc.id,
-        PageCacheEntryUncompressed::from_disk_page(page.clone(), frigatebird::sql::DataType::String),
+        PageCacheEntryUncompressed::from_disk_page(
+            page.clone(),
+            frigatebird::sql::DataType::String,
+        ),
     );
 
     let results = handler.get_page(desc);

@@ -1,9 +1,9 @@
 use std::sync::{Arc, RwLock};
 
 use clap::Parser;
+use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
-use rustyline::Editor;
 
 use frigatebird::cache::page_cache::PageCache;
 use frigatebird::helpers::compressor::Compressor;
@@ -13,7 +13,11 @@ use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMater
 use frigatebird::sql::executor::SqlExecutor;
 
 #[derive(Parser, Debug)]
-#[command(name = "frigatebird", version, about = "Columnar SQL database with push-based Volcano execution")]
+#[command(
+    name = "frigatebird",
+    version,
+    about = "Columnar SQL database with push-based Volcano execution"
+)]
 struct Args {
     /// Execute a single SQL statement and exit
     #[arg(short = 'c', long)]

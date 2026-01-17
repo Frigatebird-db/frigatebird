@@ -417,7 +417,9 @@ fn debug_random_case_104() {
     println!("duck beta q_rn rows: {:?}", duck_rows);
 
     let tie_sql = "SELECT id, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY quantity) AS q_rn FROM massive_correctness WHERE id <= 293 AND tenant = 'beta' AND quantity = 330 ORDER BY q_rn";
-    let ours = executor.query(tie_sql).expect("frigatebird tie query failed");
+    let ours = executor
+        .query(tie_sql)
+        .expect("frigatebird tie query failed");
     println!("ours beta tie rows:\n{}", ours);
 
     let conn = fixture.duckdb();

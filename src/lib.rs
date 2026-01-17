@@ -21,4 +21,3 @@ pub mod sql;
 #[path = "wal/lib.rs"]
 pub mod wal;
 pub mod writer;
-

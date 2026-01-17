@@ -54,7 +54,6 @@ pub struct PageCacheEntryCompressed {
     pub page: Vec<u8>,
 }
 
-
 pub struct PageCache<T> {
     pub store: HashMap<String, PageCacheEntry<T>>,
     pub lru_queue: BTreeSet<(u64, String)>,
