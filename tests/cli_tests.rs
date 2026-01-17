@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
+use once_cell::sync::Lazy;
 
 use frigatebird::cache::page_cache::PageCache;
 use frigatebird::helpers::compressor::Compressor;
@@ -7,6 +8,7 @@ use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
 use frigatebird::page_handler::page_io::PageIO;
 use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use frigatebird::sql::executor::{SqlExecutor, SqlExecutorWalOptions};
+use rand::Rng;
 
 fn setup_executor() -> SqlExecutor {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
@@ -747,6 +749,7 @@ fn cli_all_data_types() {
 }
 
 static PERSIST_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static SERIAL_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn setup_persistent_executor(namespace: &str) -> SqlExecutor {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
@@ -775,7 +778,9 @@ fn setup_persistent_executor(namespace: &str) -> SqlExecutor {
 
 fn unique_namespace(prefix: &str) -> String {
     let id = PERSIST_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{id}")
+    let mut rng = rand::thread_rng();
+    let suffix: u32 = rng.r#gen();
+    format!("{prefix}-{id}-{suffix}")
 }
 
 fn cleanup_namespace(namespace: &str) {
@@ -805,6 +810,7 @@ fn cleanup_namespace(namespace: &str) {
 
 #[test]
 fn persist_table_schema_survives_restart() {
+    let _guard = SERIAL_TEST_LOCK.lock().unwrap();
     let ns = unique_namespace("persist-schema");
 
     {
@@ -839,6 +845,7 @@ fn persist_table_schema_survives_restart() {
 
 #[test]
 fn persist_data_survives_restart() {
+    let _guard = SERIAL_TEST_LOCK.lock().unwrap();
     let ns = unique_namespace("persist-data");
 
     {
@@ -889,6 +896,7 @@ fn persist_data_survives_restart() {
 
 #[test]
 fn persist_multiple_tables_survive_restart() {
+    let _guard = SERIAL_TEST_LOCK.lock().unwrap();
     let ns = unique_namespace("persist-multi");
 
     {
@@ -940,6 +948,7 @@ fn persist_multiple_tables_survive_restart() {
 
 #[test]
 fn persist_updates_survive_restart() {
+    let _guard = SERIAL_TEST_LOCK.lock().unwrap();
     let ns = unique_namespace("persist-update");
 
     {
@@ -983,6 +992,7 @@ fn persist_updates_survive_restart() {
 
 #[test]
 fn persist_deletes_survive_restart() {
+    let _guard = SERIAL_TEST_LOCK.lock().unwrap();
     let ns = unique_namespace("persist-delete");
 
     {
@@ -1026,6 +1036,7 @@ fn persist_deletes_survive_restart() {
 
 #[test]
 fn persist_large_dataset_survives_restart() {
+    let _guard = SERIAL_TEST_LOCK.lock().unwrap();
     let ns = unique_namespace("persist-large");
 
     {
