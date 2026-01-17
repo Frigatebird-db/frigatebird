@@ -6,6 +6,8 @@
 
 </div>
 
+![Demo](./assets/demo.gif)
+
 ## Overview
 
 Frigatebird is an embedded columnar database that implements a **push-based Volcano execution model** with **morsel-driven parallelism**. Queries compile into pipelines where operators push batches downstream through channels, enabling parallel execution across multiple workers.
@@ -26,9 +28,6 @@ Frigatebird is an embedded columnar database that implements a **push-based Volc
 ```bash
 # Start the interactive CLI
 make frigatebird
-
-# Or with cargo directly
-cargo run --bin frigatebird
 ```
 
 ```sql
@@ -43,21 +42,14 @@ id       | ts                  | data
 sensor-1 | 2024-01-15 10:30:00 | temperature=23.5
 (1 rows)
 
-sql> \dt
-  events
-
-sql> \d events
-Table: events
-----------------------------------------
-  id                   String
-  ts                   Timestamp
-  data                 String
 ```
 
 Single command mode:
 ```bash
 cargo run --bin frigatebird -- -c "SELECT COUNT(*) FROM events WHERE id = 'sensor-1'"
 ```
+
+note: `ORDER BY` is mandatory while creating a table
 
 ## How It Works
 
