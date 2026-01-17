@@ -1,6 +1,6 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock, Mutex};
 use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use frigatebird::cache::page_cache::PageCache;
 use frigatebird::helpers::compressor::Compressor;
@@ -805,7 +805,9 @@ fn cleanup_namespace(namespace: &str) {
     ));
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
 
-    drop(SqlExecutor::with_wal_options(handler, directory, true, options));
+    drop(SqlExecutor::with_wal_options(
+        handler, directory, true, options,
+    ));
 }
 
 #[test]
@@ -1010,10 +1012,14 @@ fn persist_deletes_survive_restart() {
 
         executor.execute("DELETE FROM logs WHERE id = '2'").unwrap();
 
-        let result = executor.query("SELECT msg FROM logs WHERE id = '1'").unwrap();
+        let result = executor
+            .query("SELECT msg FROM logs WHERE id = '1'")
+            .unwrap();
         assert_eq!(result.row_count(), 1);
 
-        let result = executor.query("SELECT msg FROM logs WHERE id = '2'").unwrap();
+        let result = executor
+            .query("SELECT msg FROM logs WHERE id = '2'")
+            .unwrap();
         assert_eq!(result.row_count(), 0);
     }
 
