@@ -1,4 +1,14 @@
-# Frigatebird
+<div align="center">
+  <img src="./assets/frigatebird.svg"
+       alt="octopii"
+       width="25%">
+  <div>Frigatebird: Embedded columnar analytical database</div>
+  <br>
+
+[![CI](https://github.com/octopii-rs/octopii/actions/workflows/ci.yml/badge.svg)](https://github.com/octopii-rs/octopii/actions)
+[![License: Apache-2.0](https://img.shields.io/badge/License-mit%20-blue.svg)](LICENSE)
+
+</div>
 
 Columnar SQL database with push-based Volcano execution and morsel-driven parallelism.
 
