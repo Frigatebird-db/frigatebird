@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use frigatebird::cache::page_cache::PageCache;
@@ -5,7 +6,7 @@ use frigatebird::helpers::compressor::Compressor;
 use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
 use frigatebird::page_handler::page_io::PageIO;
 use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use frigatebird::sql::executor::SqlExecutor;
+use frigatebird::sql::executor::{SqlExecutor, SqlExecutorWalOptions};
 
 fn setup_executor() -> SqlExecutor {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
@@ -743,4 +744,334 @@ fn cli_all_data_types() {
     assert_eq!(row.value_as_string(1), Some("42".to_string()));
     assert!(row.value_as_string(2).unwrap().starts_with("3.14"));
     assert_eq!(row.value_as_string(3), Some("true".to_string()));
+}
+
+static PERSIST_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn setup_persistent_executor(namespace: &str) -> SqlExecutor {
+    let store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = Arc::new(PageDirectory::new(Arc::clone(&store)));
+    let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
+    let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
+    let page_io = Arc::new(PageIO {});
+    let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::new(Compressor::new()),
+    ));
+    let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
+
+    let options = SqlExecutorWalOptions::new(namespace)
+        .storage_dir("./test_storage")
+        .cleanup_on_drop(false)
+        .reset_namespace(false);
+
+    SqlExecutor::with_wal_options(handler, directory, true, options)
+}
+
+fn unique_namespace(prefix: &str) -> String {
+    let id = PERSIST_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{id}")
+}
+
+fn cleanup_namespace(namespace: &str) {
+    let options = SqlExecutorWalOptions::new(namespace)
+        .storage_dir("./test_storage")
+        .cleanup_on_drop(true)
+        .reset_namespace(true);
+
+    let store = Arc::new(RwLock::new(TableMetaStore::new()));
+    let directory = Arc::new(PageDirectory::new(Arc::clone(&store)));
+    let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
+    let uncompressed_cache = Arc::new(RwLock::new(PageCache::new()));
+    let page_io = Arc::new(PageIO {});
+    let locator = Arc::new(PageLocator::new(Arc::clone(&directory)));
+    let fetcher = Arc::new(PageFetcher::new(
+        Arc::clone(&compressed_cache),
+        Arc::clone(&page_io),
+    ));
+    let materializer = Arc::new(PageMaterializer::new(
+        Arc::clone(&uncompressed_cache),
+        Arc::new(Compressor::new()),
+    ));
+    let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
+
+    drop(SqlExecutor::with_wal_options(handler, directory, true, options));
+}
+
+#[test]
+fn persist_table_schema_survives_restart() {
+    let ns = unique_namespace("persist-schema");
+
+    {
+        let executor = setup_persistent_executor(&ns);
+        executor
+            .execute("CREATE TABLE users (id TEXT, name TEXT, age INT) ORDER BY id")
+            .expect("CREATE TABLE failed");
+
+        let tables = executor.table_names();
+        assert!(tables.contains(&"users".to_string()));
+    }
+
+    {
+        let executor = setup_persistent_executor(&ns);
+        let tables = executor.table_names();
+        assert!(
+            tables.contains(&"users".to_string()),
+            "table 'users' should persist after restart"
+        );
+
+        let catalog = executor
+            .get_table_catalog("users")
+            .expect("catalog should exist");
+        assert_eq!(catalog.columns().len(), 3);
+        assert_eq!(catalog.columns()[0].name, "id");
+        assert_eq!(catalog.columns()[1].name, "name");
+        assert_eq!(catalog.columns()[2].name, "age");
+    }
+
+    cleanup_namespace(&ns);
+}
+
+#[test]
+fn persist_data_survives_restart() {
+    let ns = unique_namespace("persist-data");
+
+    {
+        let executor = setup_persistent_executor(&ns);
+        executor
+            .execute("CREATE TABLE items (id TEXT, value INT) ORDER BY id")
+            .expect("CREATE TABLE failed");
+
+        executor
+            .execute("INSERT INTO items (id, value) VALUES ('1', '100')")
+            .expect("INSERT failed");
+        executor
+            .execute("INSERT INTO items (id, value) VALUES ('1', '200')")
+            .expect("INSERT failed");
+        executor
+            .execute("INSERT INTO items (id, value) VALUES ('1', '300')")
+            .expect("INSERT failed");
+
+        let result = executor
+            .query("SELECT value FROM items WHERE id = '1'")
+            .expect("SELECT failed");
+        assert_eq!(result.row_count(), 3);
+    }
+
+    {
+        let executor = setup_persistent_executor(&ns);
+        let result = executor
+            .query("SELECT value FROM items WHERE id = '1'")
+            .expect("SELECT failed after restart");
+
+        assert_eq!(
+            result.row_count(),
+            3,
+            "all 3 rows should persist after restart"
+        );
+
+        let values: Vec<i64> = result
+            .row_iter()
+            .map(|r| r.value_as_string(0).unwrap().parse().unwrap())
+            .collect();
+        assert!(values.contains(&100));
+        assert!(values.contains(&200));
+        assert!(values.contains(&300));
+    }
+
+    cleanup_namespace(&ns);
+}
+
+#[test]
+fn persist_multiple_tables_survive_restart() {
+    let ns = unique_namespace("persist-multi");
+
+    {
+        let executor = setup_persistent_executor(&ns);
+
+        executor
+            .execute("CREATE TABLE orders (id TEXT, total INT) ORDER BY id")
+            .unwrap();
+        executor
+            .execute("CREATE TABLE customers (id TEXT, name TEXT) ORDER BY id")
+            .unwrap();
+
+        executor
+            .execute("INSERT INTO orders (id, total) VALUES ('1', '500')")
+            .unwrap();
+        executor
+            .execute("INSERT INTO customers (id, name) VALUES ('1', 'Alice')")
+            .unwrap();
+    }
+
+    {
+        let executor = setup_persistent_executor(&ns);
+
+        let tables = executor.table_names();
+        assert!(tables.contains(&"orders".to_string()));
+        assert!(tables.contains(&"customers".to_string()));
+
+        let orders = executor
+            .query("SELECT total FROM orders WHERE id = '1'")
+            .unwrap();
+        assert_eq!(orders.row_count(), 1);
+        assert_eq!(
+            orders.row_iter().next().unwrap().value_as_string(0),
+            Some("500".to_string())
+        );
+
+        let customers = executor
+            .query("SELECT name FROM customers WHERE id = '1'")
+            .unwrap();
+        assert_eq!(customers.row_count(), 1);
+        assert_eq!(
+            customers.row_iter().next().unwrap().value_as_string(0),
+            Some("Alice".to_string())
+        );
+    }
+
+    cleanup_namespace(&ns);
+}
+
+#[test]
+fn persist_updates_survive_restart() {
+    let ns = unique_namespace("persist-update");
+
+    {
+        let executor = setup_persistent_executor(&ns);
+        executor
+            .execute("CREATE TABLE status (id TEXT, state TEXT) ORDER BY id")
+            .unwrap();
+
+        executor
+            .execute("INSERT INTO status (id, state) VALUES ('1', 'pending')")
+            .unwrap();
+
+        executor
+            .execute("UPDATE status SET state = 'completed' WHERE id = '1'")
+            .unwrap();
+
+        let result = executor
+            .query("SELECT state FROM status WHERE id = '1'")
+            .unwrap();
+        assert_eq!(
+            result.row_iter().next().unwrap().value_as_string(0),
+            Some("completed".to_string())
+        );
+    }
+
+    {
+        let executor = setup_persistent_executor(&ns);
+        let result = executor
+            .query("SELECT state FROM status WHERE id = '1'")
+            .expect("SELECT failed after restart");
+
+        assert_eq!(
+            result.row_iter().next().unwrap().value_as_string(0),
+            Some("completed".to_string()),
+            "updated value should persist after restart"
+        );
+    }
+
+    cleanup_namespace(&ns);
+}
+
+#[test]
+fn persist_deletes_survive_restart() {
+    let ns = unique_namespace("persist-delete");
+
+    {
+        let executor = setup_persistent_executor(&ns);
+        executor
+            .execute("CREATE TABLE logs (id TEXT, msg TEXT) ORDER BY id")
+            .unwrap();
+
+        executor
+            .execute("INSERT INTO logs (id, msg) VALUES ('1', 'keep')")
+            .unwrap();
+        executor
+            .execute("INSERT INTO logs (id, msg) VALUES ('2', 'delete')")
+            .unwrap();
+
+        executor.execute("DELETE FROM logs WHERE id = '2'").unwrap();
+
+        let result = executor.query("SELECT msg FROM logs WHERE id = '1'").unwrap();
+        assert_eq!(result.row_count(), 1);
+
+        let result = executor.query("SELECT msg FROM logs WHERE id = '2'").unwrap();
+        assert_eq!(result.row_count(), 0);
+    }
+
+    {
+        let executor = setup_persistent_executor(&ns);
+
+        let result = executor
+            .query("SELECT msg FROM logs WHERE id = '1'")
+            .expect("SELECT failed");
+        assert_eq!(result.row_count(), 1, "kept row should persist");
+
+        let result = executor
+            .query("SELECT msg FROM logs WHERE id = '2'")
+            .expect("SELECT failed");
+        assert_eq!(result.row_count(), 0, "deleted row should stay deleted");
+    }
+
+    cleanup_namespace(&ns);
+}
+
+#[test]
+fn persist_large_dataset_survives_restart() {
+    let ns = unique_namespace("persist-large");
+
+    {
+        let executor = setup_persistent_executor(&ns);
+        executor
+            .execute("CREATE TABLE numbers (id TEXT, n INT) ORDER BY id")
+            .unwrap();
+
+        for i in 0..100 {
+            executor
+                .execute(&format!(
+                    "INSERT INTO numbers (id, n) VALUES ('1', '{}')",
+                    i
+                ))
+                .unwrap();
+        }
+
+        let result = executor
+            .query("SELECT COUNT(*) FROM numbers WHERE id = '1'")
+            .unwrap();
+        assert_eq!(
+            result.row_iter().next().unwrap().value_as_string(0),
+            Some("100".to_string())
+        );
+    }
+
+    {
+        let executor = setup_persistent_executor(&ns);
+        let result = executor
+            .query("SELECT COUNT(*) FROM numbers WHERE id = '1'")
+            .expect("SELECT failed");
+
+        assert_eq!(
+            result.row_iter().next().unwrap().value_as_string(0),
+            Some("100".to_string()),
+            "all 100 rows should persist"
+        );
+
+        let sum_result = executor
+            .query("SELECT SUM(n) FROM numbers WHERE id = '1'")
+            .unwrap();
+        assert_eq!(
+            sum_result.row_iter().next().unwrap().value_as_string(0),
+            Some("4950".to_string()) // 0+1+2+...+99
+        );
+    }
+
+    cleanup_namespace(&ns);
 }

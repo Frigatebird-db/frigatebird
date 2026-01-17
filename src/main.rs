@@ -10,7 +10,7 @@ use frigatebird::helpers::compressor::Compressor;
 use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
 use frigatebird::page_handler::page_io::PageIO;
 use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use frigatebird::sql::executor::SqlExecutor;
+use frigatebird::sql::executor::{SqlExecutor, SqlExecutorWalOptions};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -55,7 +55,13 @@ fn setup_executor() -> SqlExecutor {
         Arc::new(Compressor::new()),
     ));
     let handler = Arc::new(PageHandler::new(locator, fetcher, materializer));
-    SqlExecutor::new(handler, directory)
+
+    let options = SqlExecutorWalOptions::new("frigatebird")
+        .storage_dir("./storage")
+        .cleanup_on_drop(false)
+        .reset_namespace(false);
+
+    SqlExecutor::with_wal_options(handler, directory, true, options)
 }
 
 fn run_single(executor: &SqlExecutor, sql: &str) {
@@ -244,9 +250,23 @@ fn print_banner() {
 }
 
 const FRIGATEBIRD_ASCII: &str = r#"
- _____ ____  ___ ____    _  _____ _____ ____ ___ ____  ____
-|  ___|  _ \|_ _/ ___|  / \|_   _| ____| __ )_ _|  _ \|  _ \
-| |_  | |_) || | |  _  / _ \ | | |  _| |  _ \| || |_) | | | |
-|  _| |  _ < | | |_| |/ ___ \| | | |___| |_) | ||  _ <| |_| |
-|_|   |_| \_\___\____/_/   \_\_| |_____|____/___|_| \_\____/
+                    /|_
+                  /   |_
+                 /     /
+                /      >
+               (      >
+              /      /
+             /     Frigatebird
+            /      /
+         __/      \_____
+        /'             |
+         /     /-\     /
+         /      /  \--/
+        /     /
+       /      /
+      (      >
+     /      >
+    /     _|
+   /  __/
+  /_/
 "#;
