@@ -1,6 +1,7 @@
 <div align="center">
   <img src="./assets/frigatebird.svg" alt="Frigatebird" width="25%">
   <p>Frigatebird: A columnar SQL database with push-based query execution</p>
+  <sub>Named after the <a href="https://en.wikipedia.org/wiki/Frigatebird">frigatebird</a>, one of the fastest birds that can stay aloft for weeks with minimal effort</sub>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -11,6 +12,10 @@
 ## Overview
 
 Frigatebird is an embedded columnar database that implements a **push-based Volcano execution model** with **morsel-driven parallelism**. Queries compile into pipelines where operators push batches downstream through channels, enabling parallel execution across multiple workers.
+
+## Architecture
+
+![architecture](./assets/architecture.png)
 
 ### Key Features
 
@@ -41,12 +46,6 @@ sql> SELECT * FROM events WHERE id = 'sensor-1'
 id       | ts                  | data
 sensor-1 | 2024-01-15 10:30:00 | temperature=23.5
 (1 rows)
-
-```
-
-Single command mode:
-```bash
-cargo run --bin frigatebird -- -c "SELECT COUNT(*) FROM events WHERE id = 'sensor-1'"
 ```
 
 note: `ORDER BY` is mandatory while creating a table
@@ -134,46 +133,6 @@ Multiple morsels execute concurrently. Channels buffer batches between steps.
 - `TIMESTAMP` / `DATETIME`
 - `UUID`
 - `INET` / `IP`
-
-## Architecture
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                              FRIGATEBIRD                                │
-├────────────────────────────────────────────────────────────────────────┤
-│                                                                        │
-│  SQL Query ──▶ Parser ──▶ Planner ──▶ Pipeline Builder                 │
-│                                              │                         │
-│                                              ▼                         │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                      PIPELINE EXECUTOR                            │  │
-│  │                                                                   │  │
-│  │   ┌─────────┐    ┌─────────┐    ┌─────────┐                      │  │
-│  │   │ Step 0  │───▶│ Step 1  │───▶│ Step N  │───▶ Output           │  │
-│  │   │ (root)  │    │         │    │         │                      │  │
-│  │   └─────────┘    └─────────┘    └─────────┘                      │  │
-│  │        │              │              │                            │  │
-│  │        └──────────────┴──────────────┘                            │  │
-│  │            Workers execute steps in parallel                      │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                                │                                       │
-│                                ▼                                       │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                        PAGE HANDLER                               │  │
-│  │                                                                   │  │
-│  │   ┌───────────────┐   ┌───────────────┐   ┌──────────────────┐   │  │
-│  │   │  Uncompressed │   │  Compressed   │   │      Disk        │   │  │
-│  │   │  Cache (Hot)  │◀─▶│  Cache (Warm) │◀─▶│     (Cold)       │   │  │
-│  │   └───────────────┘   └───────────────┘   └──────────────────┘   │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                                                                        │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                       METADATA STORE                              │  │
-│  │           Tables • Column Chains • Page Descriptors               │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
-```
 
 ## Storage
 
