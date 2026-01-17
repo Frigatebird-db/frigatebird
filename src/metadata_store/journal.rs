@@ -95,17 +95,6 @@ impl MetaJournal {
     fn apply_record(&self, directory: &Arc<PageDirectory>, record: MetaRecord) {
         match record {
             MetaRecord::PublishPages { table, entries } => {
-                for entry in &entries {
-                    eprintln!(
-                        "[journal_replay] PublishPages: table={}, column={}, path={}, offset={}, entry_count={}, replace_last={}",
-                        table,
-                        entry.column,
-                        entry.disk_path,
-                        entry.offset,
-                        entry.entry_count,
-                        entry.replace_last
-                    );
-                }
                 let pending: Vec<PendingPage> = entries
                     .into_iter()
                     .map(|entry| PendingPage {
@@ -129,10 +118,6 @@ impl MetaJournal {
                 sort_key,
                 rows_per_page_group,
             } => {
-                eprintln!(
-                    "[journal_replay] CreateTable: name={}, sort_key={:?}",
-                    name, sort_key
-                );
                 let column_defs: Vec<ColumnDefinition> = columns
                     .into_iter()
                     .map(|col| ColumnDefinition::from_type(col.name, col.data_type))

@@ -1,15 +1,15 @@
 use crossbeam::channel;
-use idk_uwu_ig::cache::page_cache::{
+use frigatebird::cache::page_cache::{
     CacheLifecycle, PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
 };
-use idk_uwu_ig::entry::Entry;
-use idk_uwu_ig::executor::PipelineExecutor;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
-use idk_uwu_ig::page::Page;
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::pipeline::{Job, PipelineBatch, PipelineStep};
+use frigatebird::entry::Entry;
+use frigatebird::executor::PipelineExecutor;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
+use frigatebird::page::Page;
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::pipeline::{Job, PipelineBatch, PipelineStep};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -180,7 +180,7 @@ fn metadata_stress_mvcc_version_churn() {
     let mut timestamps = vec![];
     for i in 0..100 {
         directory.register_page("time_col", format!("t{}.db", i), 0);
-        timestamps.push(idk_uwu_ig::entry::current_epoch_millis());
+        timestamps.push(frigatebird::entry::current_epoch_millis());
         thread::sleep(Duration::from_millis(2));
     }
 
@@ -397,7 +397,7 @@ fn compressor_stress_concurrent_operations() {
                 let page = create_page(i % 20 + 1);
                 let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
                     page,
-                    idk_uwu_ig::sql::DataType::String,
+                    frigatebird::sql::DataType::String,
                 ));
                 let compressed = comp.compress(Arc::clone(&uncompressed));
                 let decompressed = comp.decompress(Arc::new(compressed));
@@ -421,7 +421,7 @@ fn compressor_stress_large_pages() {
         let page = create_page(size);
         let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
             page,
-            idk_uwu_ig::sql::DataType::String,
+            frigatebird::sql::DataType::String,
         ));
         let compressed = compressor.compress(Arc::clone(&uncompressed));
         let decompressed = compressor.decompress(Arc::new(compressed));
@@ -440,7 +440,7 @@ fn compressor_stress_pathological_data() {
     }
     let u1 = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page1,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let c1 = compressor.compress(Arc::clone(&u1));
     let d1 = compressor.decompress(Arc::new(c1));
@@ -453,7 +453,7 @@ fn compressor_stress_pathological_data() {
     }
     let u2 = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page2,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let c2 = compressor.compress(Arc::clone(&u2));
     let d2 = compressor.decompress(Arc::new(c2));
@@ -470,7 +470,7 @@ fn compressor_stress_pathological_data() {
     }
     let u3 = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page3,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let c3 = compressor.compress(Arc::clone(&u3));
     let d3 = compressor.decompress(Arc::new(c3));
@@ -483,11 +483,11 @@ fn compressor_stress_random_size_pages() {
 
     for _ in 0..100 {
         // Random size between 1 and 1000
-        let size = (idk_uwu_ig::entry::current_epoch_millis() % 1000 + 1) as usize;
+        let size = (frigatebird::entry::current_epoch_millis() % 1000 + 1) as usize;
         let page = create_page(size);
         let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
             page,
-            idk_uwu_ig::sql::DataType::String,
+            frigatebird::sql::DataType::String,
         ));
         let compressed = compressor.compress(Arc::clone(&uncompressed));
         let decompressed = compressor.decompress(Arc::new(compressed));
@@ -799,7 +799,7 @@ fn chaos_test_everything_concurrent() {
                 let page = create_page(i + 1);
                 let u = Arc::new(PageCacheEntryUncompressed::from_disk_page(
                     page,
-                    idk_uwu_ig::sql::DataType::String,
+                    frigatebird::sql::DataType::String,
                 ));
                 let c = comp.compress(Arc::clone(&u));
                 let _ = comp.decompress(Arc::new(c));

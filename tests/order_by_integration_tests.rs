@@ -1,16 +1,16 @@
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
-use idk_uwu_ig::entry::Entry;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
-use idk_uwu_ig::ops_handler::{
+use frigatebird::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
+use frigatebird::entry::Entry;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
+use frigatebird::ops_handler::{
     create_table_from_plan, insert_sorted_row, upsert_data_into_table_column,
 };
-use idk_uwu_ig::page::Page;
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutionError, SqlExecutor};
-use idk_uwu_ig::sql::types::DataType;
-use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
+use frigatebird::page::Page;
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::sql::executor::{SelectResult, SqlExecutionError, SqlExecutor};
+use frigatebird::sql::types::DataType;
+use frigatebird::sql::{ColumnSpec, CreateTablePlan};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

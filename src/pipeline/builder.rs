@@ -56,7 +56,6 @@ pub fn build_pipeline(plan: &QueryPlan, page_handler: Arc<PageHandler>) -> Vec<J
     jobs
 }
 
-/// Extracts all leaf filter expressions from the filter tree.
 fn extract_leaf_filters(filter: &FilterExpr) -> Vec<FilterExpr> {
     let mut leaves = Vec::new();
     collect_leaves(filter, &mut leaves);
@@ -76,7 +75,6 @@ fn collect_leaves(filter: &FilterExpr, leaves: &mut Vec<FilterExpr>) {
 
 use crate::sql::physical_plan::PhysicalExpr;
 
-/// Groups filters by the primary column they operate on.
 fn group_filters_by_column(filters: Vec<FilterExpr>) -> HashMap<String, Vec<FilterExpr>> {
     let mut groups: HashMap<String, Vec<FilterExpr>> = HashMap::new();
 

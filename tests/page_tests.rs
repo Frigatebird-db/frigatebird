@@ -1,5 +1,5 @@
-use idk_uwu_ig::entry::Entry;
-use idk_uwu_ig::page::Page;
+use frigatebird::entry::Entry;
+use frigatebird::page::Page;
 
 #[test]
 fn page_new_creates_empty() {

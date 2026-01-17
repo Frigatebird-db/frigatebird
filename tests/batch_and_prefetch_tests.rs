@@ -1,12 +1,12 @@
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
-use idk_uwu_ig::entry::Entry;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{
+use frigatebird::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
+use frigatebird::entry::Entry;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{
     PageDescriptor, PageDirectory, ROWS_PER_PAGE_GROUP, TableMetaStore,
 };
-use idk_uwu_ig::page::Page;
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::page::Page;
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
@@ -113,7 +113,7 @@ fn ensure_pages_cached_already_cached() {
     let page = create_test_page(5);
     handler.write_back_uncompressed(
         &desc.id,
-        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String),
+        PageCacheEntryUncompressed::from_disk_page(page, frigatebird::sql::DataType::String),
     );
 
     // Call again - should be no-op
@@ -155,7 +155,7 @@ fn compress_alternating_pattern() {
 
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
@@ -176,7 +176,7 @@ fn compress_random_binary_data() {
 
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
@@ -197,7 +197,7 @@ fn compress_degenerate_case_all_same_char() {
     let original_size = bincode::serialize(&page).unwrap().len();
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
 

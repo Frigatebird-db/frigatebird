@@ -1,11 +1,11 @@
-use idk_uwu_ig::cache::page_cache::PageCache;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{
+use frigatebird::cache::page_cache::PageCache;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{
     ColumnDefinition, PageDirectory, TableDefinition, TableMetaStore,
 };
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutor, SqlExecutorWalOptions};
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::sql::executor::{SelectResult, SqlExecutor, SqlExecutorWalOptions};
 use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};

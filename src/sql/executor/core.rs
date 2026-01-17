@@ -17,6 +17,14 @@ pub struct SqlExecutor {
 }
 
 impl SqlExecutor {
+    pub fn table_names(&self) -> Vec<String> {
+        self.page_directory.table_names()
+    }
+
+    pub fn get_table_catalog(&self, table: &str) -> Option<TableCatalog> {
+        self.page_directory.table_catalog(table)
+    }
+
     pub(crate) fn table_catalog(&self, table: &str) -> Option<TableCatalog> {
         self.page_directory.table_catalog(table)
     }

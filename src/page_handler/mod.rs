@@ -407,7 +407,7 @@ impl PageHandler {
     }
 
     pub fn read_entry_at(&self, table: &str, column: &str, row: u64) -> Option<entry::Entry> {
-        if std::env::var_os("SATORI_STRICT_SELECT_ASSERT").is_some() {
+        if std::env::var_os("FRIGATEBIRD_STRICT_SELECT_ASSERT").is_some() {
             debug_assert!(
                 !crate::sql::runtime::scan_stream::is_select_scan_in_progress(),
                 "read_entry_at is not allowed during SELECT scans"

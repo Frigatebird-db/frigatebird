@@ -1,10 +1,10 @@
-# Satori Benchmarks
+# Frigatebird Benchmarks
 
-High-volume performance benchmarks for the Satori HTAP database.
+High-volume performance benchmarks for the Frigatebird HTAP database.
 
 ## High Volume Benchmark
 
-The `high_volume.rs` benchmark tests Satori's performance with large datasets.
+The `high_volume.rs` benchmark tests Frigatebird's performance with large datasets.
 
 ### What it does
 

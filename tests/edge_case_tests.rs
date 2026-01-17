@@ -1,8 +1,8 @@
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
-use idk_uwu_ig::entry::Entry;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
-use idk_uwu_ig::page::Page;
+use frigatebird::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
+use frigatebird::entry::Entry;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
+use frigatebird::page::Page;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -94,7 +94,7 @@ fn mvcc_timestamp_boundary_exact_match() {
     directory.register_page("col1", "test.db".to_string(), 0);
 
     thread::sleep(Duration::from_millis(5));
-    let timestamp = idk_uwu_ig::entry::current_epoch_millis();
+    let timestamp = frigatebird::entry::current_epoch_millis();
 
     thread::sleep(Duration::from_millis(5));
     directory.register_page("col1", "test.db".to_string(), 1024);
@@ -109,7 +109,7 @@ fn mvcc_timestamp_before_all_versions() {
     let store = Arc::new(RwLock::new(TableMetaStore::new()));
     let directory = Arc::new(PageDirectory::new(store));
 
-    let old_timestamp = idk_uwu_ig::entry::current_epoch_millis();
+    let old_timestamp = frigatebird::entry::current_epoch_millis();
 
     thread::sleep(Duration::from_millis(10));
     directory.register_page("col1", "test.db".to_string(), 0);
@@ -203,7 +203,7 @@ fn compressor_zero_byte_page() {
 
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
@@ -223,7 +223,7 @@ fn compressor_single_byte_entries() {
 
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page.clone(),
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
@@ -371,7 +371,7 @@ fn compressor_highly_repetitive_data() {
     let original_size = bincode::serialize(&page).unwrap().len();
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
 

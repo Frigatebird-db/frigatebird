@@ -51,16 +51,9 @@ impl PageCacheEntryUncompressed {
 
 #[derive(Clone)]
 pub struct PageCacheEntryCompressed {
-    pub page: Vec<u8>, // a bunch of raw bytes that we read from the disk
+    pub page: Vec<u8>,
 }
 
-impl Drop for PageCacheEntryUncompressed {
-    fn drop(&mut self) {}
-}
-
-impl Drop for PageCacheEntryCompressed {
-    fn drop(&mut self) {}
-}
 
 pub struct PageCache<T> {
     pub store: HashMap<String, PageCacheEntry<T>>,

@@ -1,9 +1,9 @@
-use idk_uwu_ig::metadata_store::{
+use frigatebird::metadata_store::{
     ColumnDefinition, PageDirectory, TableDefinition, TableMetaStore,
 };
-use idk_uwu_ig::sql::physical_plan::PhysicalExpr;
-use idk_uwu_ig::sql::types::DataType;
-use idk_uwu_ig::sql::{FilterExpr, QueryPlan, TableAccess, plan_create_table_sql, plan_sql};
+use frigatebird::sql::physical_plan::PhysicalExpr;
+use frigatebird::sql::types::DataType;
+use frigatebird::sql::{FilterExpr, QueryPlan, TableAccess, plan_create_table_sql, plan_sql};
 use sqlparser::ast::BinaryOperator;
 use std::sync::{Arc, RwLock};
 

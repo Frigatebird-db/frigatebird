@@ -1,12 +1,12 @@
-use idk_uwu_ig::cache::page_cache::{
+use frigatebird::cache::page_cache::{
     PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
 };
-use idk_uwu_ig::entry::Entry;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::PageDirectory;
-use idk_uwu_ig::page::Page;
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::entry::Entry;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::PageDirectory;
+use frigatebird::page::Page;
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -23,7 +23,7 @@ fn create_test_page(n: usize) -> Page {
 #[test]
 fn page_locator_lookup_works() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
 
@@ -42,7 +42,7 @@ fn page_locator_lookup_works() {
 #[test]
 fn page_locator_latest_for_column() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
 
@@ -63,7 +63,7 @@ fn page_locator_latest_for_column() {
 #[test]
 fn page_locator_range_for_column() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
 
@@ -164,7 +164,7 @@ fn page_materializer_get_cached_hit() {
             "page1",
             PageCacheEntryUncompressed::from_disk_page(
                 create_test_page(5),
-                idk_uwu_ig::sql::DataType::String,
+                frigatebird::sql::DataType::String,
             ),
         );
     }
@@ -186,7 +186,7 @@ fn page_materializer_write_back() {
     let page = create_test_page(3);
     materializer.write_back(
         "page1",
-        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String),
+        PageCacheEntryUncompressed::from_disk_page(page, frigatebird::sql::DataType::String),
     );
 
     let cache = uncompressed_cache.read().unwrap();
@@ -204,12 +204,12 @@ fn page_materializer_materialize_one() {
     let page = create_test_page(5);
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = Arc::new(compressor.compress(uncompressed));
 
     let result =
-        materializer.materialize_one("page1", compressed, idk_uwu_ig::sql::DataType::String);
+        materializer.materialize_one("page1", compressed, frigatebird::sql::DataType::String);
 
     assert!(result.is_some());
 
@@ -230,7 +230,7 @@ fn page_materializer_materialize_many() {
         let page = create_test_page(i + 1);
         let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
             page,
-            idk_uwu_ig::sql::DataType::String,
+            frigatebird::sql::DataType::String,
         ));
         let compressed = Arc::new(compressor.compress(uncompressed));
         items.push((format!("page{}", i), compressed));
@@ -238,7 +238,7 @@ fn page_materializer_materialize_many() {
 
     let mut dtypes = HashMap::new();
     for i in 0..5 {
-        dtypes.insert(format!("page{}", i), idk_uwu_ig::sql::DataType::String);
+        dtypes.insert(format!("page{}", i), frigatebird::sql::DataType::String);
     }
     let results = materializer.materialize_many(items, &dtypes);
     assert_eq!(results.len(), 5);
@@ -260,7 +260,7 @@ fn page_materializer_collect_cached() {
                 &format!("page{}", i),
                 PageCacheEntryUncompressed::from_disk_page(
                     create_test_page(i + 1),
-                    idk_uwu_ig::sql::DataType::String,
+                    frigatebird::sql::DataType::String,
                 ),
             );
         }
@@ -278,7 +278,7 @@ fn page_materializer_collect_cached() {
 #[test]
 fn page_handler_new_creates_components() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -304,7 +304,7 @@ fn page_handler_new_creates_components() {
 #[test]
 fn page_handler_locate_latest() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
     directory.register_page("col1", "test.db".to_string(), 0);
@@ -333,7 +333,7 @@ fn page_handler_locate_latest() {
 #[test]
 fn page_handler_ensure_pages_cached_empty() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -359,7 +359,7 @@ fn page_handler_ensure_pages_cached_empty() {
 #[test]
 fn page_handler_ensure_pages_cached_already_in_cache() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -376,7 +376,7 @@ fn page_handler_ensure_pages_cached_already_in_cache() {
             &id,
             PageCacheEntryUncompressed::from_disk_page(
                 create_test_page(5),
-                idk_uwu_ig::sql::DataType::String,
+                frigatebird::sql::DataType::String,
             ),
         );
     }
@@ -405,7 +405,7 @@ fn page_handler_ensure_pages_cached_already_in_cache() {
 #[test]
 fn page_handler_get_pages_with_prefetch_zero_k() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -434,7 +434,7 @@ fn page_handler_get_pages_with_prefetch_zero_k() {
 #[test]
 fn page_handler_get_pages_with_prefetch_empty() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -461,7 +461,7 @@ fn page_handler_get_pages_with_prefetch_empty() {
 #[test]
 fn page_handler_write_back_uncompressed() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));
@@ -484,7 +484,7 @@ fn page_handler_write_back_uncompressed() {
     let page = create_test_page(10);
     handler.write_back_uncompressed(
         "page1",
-        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String),
+        PageCacheEntryUncompressed::from_disk_page(page, frigatebird::sql::DataType::String),
     );
 
     let cache = uncompressed_cache.read().unwrap();
@@ -494,7 +494,7 @@ fn page_handler_write_back_uncompressed() {
 #[test]
 fn page_handler_concurrent_access() {
     let store = Arc::new(RwLock::new(
-        idk_uwu_ig::metadata_store::TableMetaStore::new(),
+        frigatebird::metadata_store::TableMetaStore::new(),
     ));
     let directory = Arc::new(PageDirectory::new(store));
     let compressed_cache = Arc::new(RwLock::new(PageCache::new()));

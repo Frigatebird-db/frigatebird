@@ -3,12 +3,12 @@ use chrono::NaiveDateTime;
 use duckdb::Connection;
 use duckdb::types::ValueRef;
 use float_cmp::{ApproxEq, F64Margin};
-use idk_uwu_ig::cache::page_cache::PageCache;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutionError, SqlExecutor};
+use frigatebird::cache::page_cache::PageCache;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::sql::executor::{SelectResult, SqlExecutionError, SqlExecutor};
 use once_cell::sync::{Lazy, OnceCell};
 use rand::distributions::{Alphanumeric, DistString};
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 pub use result_rows_ext::SelectResultRowsExt;
 
 mod result_rows_ext {
-    use idk_uwu_ig::sql::executor::SelectResult;
+    use frigatebird::sql::executor::SelectResult;
 
     pub trait SelectResultRowsExt {
         fn rows(&self) -> Vec<Vec<Option<String>>>;
@@ -77,11 +77,11 @@ pub fn setup_executor() -> ExecutorHarness {
 
 fn should_use_writer_inserts() -> bool {
     const DEFAULT_TEST_ROWS: usize = 1000;
-    let rows = env::var("SATORI_MASSIVE_FIXTURE_ROWS")
+    let rows = env::var("FRIGATEBIRD_MASSIVE_FIXTURE_ROWS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_TEST_ROWS);
-    rows > idk_uwu_ig::metadata_store::ROWS_PER_PAGE_GROUP as usize
+    rows > frigatebird::metadata_store::ROWS_PER_PAGE_GROUP as usize
 }
 
 #[derive(Clone, Copy)]
@@ -144,18 +144,18 @@ impl MassiveFixtureConfig {
         // Default to a reasonable test size to prevent hangs
         let default_test_rows = 1000;
 
-        let row_count = if let Ok(value) = env::var("SATORI_MASSIVE_FIXTURE_ROWS") {
+        let row_count = if let Ok(value) = env::var("FRIGATEBIRD_MASSIVE_FIXTURE_ROWS") {
             match value.parse::<usize>() {
                 Ok(rows) if rows > 0 => rows,
                 Ok(_) => {
                     eprintln!(
-                        "SATORI_MASSIVE_FIXTURE_ROWS must be greater than zero, using default"
+                        "FRIGATEBIRD_MASSIVE_FIXTURE_ROWS must be greater than zero, using default"
                     );
                     default_test_rows
                 }
                 Err(err) => {
                     eprintln!(
-                        "failed to parse SATORI_MASSIVE_FIXTURE_ROWS ('{value}'): {err}, using default"
+                        "failed to parse FRIGATEBIRD_MASSIVE_FIXTURE_ROWS ('{value}'): {err}, using default"
                     );
                     default_test_rows
                 }
@@ -696,7 +696,7 @@ pub fn assert_query_matches(
                 println!("skipping unsupported query `{sql}`: {err}");
                 return;
             }
-            panic!("satori query failed: {err:?}");
+            panic!("frigatebird query failed: {err:?}");
         }
     };
     let duck_sql = options.duckdb_sql.unwrap_or(sql);

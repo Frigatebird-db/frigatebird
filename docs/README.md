@@ -1,10 +1,10 @@
-# Satori Architecture Documentation
+# Frigatebird Architecture Documentation
 
-Satori is a **columnar SQL database** implementing a **push-based Volcano execution model** with **morsel-driven parallelism**.
+Frigatebird is a **columnar SQL database** implementing a **push-based Volcano execution model** with **morsel-driven parallelism**.
 
 ---
 
-## How SQL Executes in Satori
+## How SQL Executes in Frigatebird
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -69,9 +69,9 @@ Satori is a **columnar SQL database** implementing a **push-based Volcano execut
 └────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### SQL Concepts → Satori Implementation
+### SQL Concepts → Frigatebird Implementation
 
-| SQL Concept | Satori Implementation | Notes |
+| SQL Concept | Frigatebird Implementation | Notes |
 |-------------|----------------------|-------|
 | `FROM table` | Root step scans column pages | Columnar: reads one column at a time |
 | `WHERE col = X` | Pipeline step with bitmap filter | Each filter column = one step |
@@ -79,12 +79,12 @@ Satori is a **columnar SQL database** implementing a **push-based Volcano execut
 | `SELECT cols` | Final steps materialize columns | Late materialization: only for surviving rows |
 | Row groups | Morsels (~50k rows) | Unit of parallelism |
 
-### What Makes Satori Different
+### What Makes Frigatebird Different
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                            │
-│   TRADITIONAL ROW STORE                      SATORI (COLUMNAR)                             │
+│   TRADITIONAL ROW STORE                      FRIGATEBIRD (COLUMNAR)                             │
 │   ─────────────────────                      ─────────────────                             │
 │                                                                                            │
 │   Read all columns for each row              Read only needed columns                      │
@@ -115,7 +115,7 @@ Satori is a **columnar SQL database** implementing a **push-based Volcano execut
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                      SATORI                                              │
+│                                      FRIGATEBIRD                                              │
 │                                                                                          │
 │     SQL Query ──▶ Parser ──▶ Planner ──▶ Pipeline Builder ──▶ Pipeline Executor         │
 │                                                                      │                   │
@@ -166,7 +166,7 @@ Start with **[Architecture](architecture.md)** for the big picture, then **[Data
 ## Key Concepts
 
 ### Push-Based Volcano
-Unlike traditional pull-based Volcano where consumers request data, Satori uses **push-based** execution:
+Unlike traditional pull-based Volcano where consumers request data, Frigatebird uses **push-based** execution:
 - Producers push batches downstream via channels
 - Steps execute in parallel on worker threads
 - Natural pipelining of multiple morsels

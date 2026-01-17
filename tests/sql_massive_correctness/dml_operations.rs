@@ -1,5 +1,5 @@
 use super::*;
-use idk_uwu_ig::sql::executor::SqlExecutionError;
+use frigatebird::sql::executor::SqlExecutionError;
 
 fn install_fixture() -> (ExecutorHarness, MassiveFixture) {
     let harness = setup_executor();

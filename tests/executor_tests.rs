@@ -1,13 +1,13 @@
 use crossbeam::channel;
-use idk_uwu_ig::cache::page_cache::{
+use frigatebird::cache::page_cache::{
     PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
 };
-use idk_uwu_ig::executor::PipelineExecutor;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::pipeline::{Job, PipelineBatch, PipelineStep};
+use frigatebird::executor::PipelineExecutor;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::pipeline::{Job, PipelineBatch, PipelineStep};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};

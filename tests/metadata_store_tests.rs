@@ -1,9 +1,9 @@
-use idk_uwu_ig::metadata_store::{
+use frigatebird::metadata_store::{
     ColumnDefinition, ColumnStats, ColumnStatsKind, DEFAULT_TABLE, MetaJournal, MetaJournalEntry,
     MetaRecord, PageDirectory, PendingPage, ROWS_PER_PAGE_GROUP, TableDefinition, TableMetaStore,
 };
-use idk_uwu_ig::wal::{FsyncSchedule, ReadConsistency, Walrus};
-use idk_uwu_ig::writer::executor::{DirectoryMetadataClient, MetadataClient, MetadataUpdate};
+use frigatebird::wal::{FsyncSchedule, ReadConsistency, Walrus};
+use frigatebird::writer::executor::{DirectoryMetadataClient, MetadataClient, MetadataUpdate};
 use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -154,7 +154,7 @@ fn page_directory_range_with_timestamp_bound() {
     directory.register_page("col1", "test.db".to_string(), 0);
 
     std::thread::sleep(std::time::Duration::from_millis(10));
-    let timestamp_bound = idk_uwu_ig::entry::current_epoch_millis();
+    let timestamp_bound = frigatebird::entry::current_epoch_millis();
     std::thread::sleep(std::time::Duration::from_millis(10));
 
     directory.register_page("col1", "test.db".to_string(), 1024);

@@ -1,10 +1,10 @@
-use idk_uwu_ig::cache::page_cache::PageCache;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::executor::{SelectResult, SqlExecutor, SqlExecutorWalOptions};
-use idk_uwu_ig::wal::FsyncSchedule;
+use frigatebird::cache::page_cache::PageCache;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::sql::executor::{SelectResult, SqlExecutor, SqlExecutorWalOptions};
+use frigatebird::wal::FsyncSchedule;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -229,7 +229,7 @@ fn main() {
         (config.total_rows * config.row_size_bytes) as f64 / (1024.0 * 1024.0 * 1024.0);
 
     println!("╔══════════════════════════════════════════════════════════════════════════════╗");
-    println!("║                    SATORI HIGH-VOLUME BENCHMARK                              ║");
+    println!("║                    FRIGATEBIRD HIGH-VOLUME BENCHMARK                              ║");
     println!(
         "║                    {} Rows × {}KB = ~{:.1}GB Dataset                           ║",
         format_number(config.total_rows),

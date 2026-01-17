@@ -1,16 +1,16 @@
 // Integration tests for pipeline filtering functionality
-use idk_uwu_ig::cache::page_cache::{
+use frigatebird::cache::page_cache::{
     PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
 };
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{
     ColumnDefinition, PageDirectory, TableDefinition, TableMetaStore,
 };
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::pipeline::{PipelineBatch, build_pipeline};
-use idk_uwu_ig::sql::plan_sql;
-use idk_uwu_ig::sql::types::DataType;
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::pipeline::{PipelineBatch, build_pipeline};
+use frigatebird::sql::plan_sql;
+use frigatebird::sql::types::DataType;
 use std::sync::{Arc, RwLock};
 
 fn dummy_batch(row_ids: &[u64]) -> PipelineBatch {

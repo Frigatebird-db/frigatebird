@@ -1,7 +1,6 @@
 use crossbeam::channel;
 use std::thread;
 
-// Minimal thread pool
 pub struct ThreadPool {
     workers: Vec<Worker>,
     sender: Option<channel::Sender<Job>>,

@@ -1,14 +1,14 @@
 use crossbeam::channel as crossbeam_channel;
-use idk_uwu_ig::cache::page_cache::{
+use frigatebird::cache::page_cache::{
     PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
 };
-use idk_uwu_ig::entry::Entry;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDescriptor, PageDirectory, TableMetaStore};
-use idk_uwu_ig::page::Page;
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::pipeline::{Job, PipelineStep};
+use frigatebird::entry::Entry;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{PageDescriptor, PageDirectory, TableMetaStore};
+use frigatebird::page::Page;
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::pipeline::{Job, PipelineStep};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -107,7 +107,7 @@ fn compress_empty_page() {
     let page = Page::new();
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
@@ -121,7 +121,7 @@ fn compress_single_entry_page() {
     page.add_entry(Entry::new("test"));
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page,
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
@@ -141,7 +141,7 @@ fn compress_already_compressed_data() {
 
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page.clone(),
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
@@ -159,7 +159,7 @@ fn compress_decompress_preserves_order() {
 
     let uncompressed = Arc::new(PageCacheEntryUncompressed::from_disk_page(
         page.clone(),
-        idk_uwu_ig::sql::DataType::String,
+        frigatebird::sql::DataType::String,
     ));
     let compressed = compressor.compress(Arc::clone(&uncompressed));
     let decompressed = compressor.decompress(Arc::new(compressed));
@@ -363,7 +363,7 @@ fn page_handler_get_pages_duplicate_descriptors() {
         &desc.id,
         PageCacheEntryUncompressed::from_disk_page(
             create_test_page(5),
-            idk_uwu_ig::sql::DataType::String,
+            frigatebird::sql::DataType::String,
         ),
     );
 
@@ -386,7 +386,7 @@ fn page_handler_write_back_then_read() {
 
     handler.write_back_uncompressed(
         &desc.id,
-        PageCacheEntryUncompressed::from_disk_page(page.clone(), idk_uwu_ig::sql::DataType::String),
+        PageCacheEntryUncompressed::from_disk_page(page.clone(), frigatebird::sql::DataType::String),
     );
 
     let results = handler.get_page(desc);
@@ -411,7 +411,7 @@ fn page_handler_concurrent_write_back_same_id() {
                 &id,
                 PageCacheEntryUncompressed::from_disk_page(
                     create_test_page(i),
-                    idk_uwu_ig::sql::DataType::String,
+                    frigatebird::sql::DataType::String,
                 ),
             );
         });
@@ -442,14 +442,14 @@ fn prefetch_all_pages_k_equals_total() {
         &desc1.id,
         PageCacheEntryUncompressed::from_disk_page(
             create_test_page(5),
-            idk_uwu_ig::sql::DataType::String,
+            frigatebird::sql::DataType::String,
         ),
     );
     handler.write_back_uncompressed(
         &desc2.id,
         PageCacheEntryUncompressed::from_disk_page(
             create_test_page(5),
-            idk_uwu_ig::sql::DataType::String,
+            frigatebird::sql::DataType::String,
         ),
     );
 
@@ -471,7 +471,7 @@ fn prefetch_k_greater_than_total() {
         &desc.id,
         PageCacheEntryUncompressed::from_disk_page(
             create_test_page(5),
-            idk_uwu_ig::sql::DataType::String,
+            frigatebird::sql::DataType::String,
         ),
     );
 

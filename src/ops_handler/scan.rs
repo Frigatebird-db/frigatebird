@@ -56,5 +56,3 @@ pub fn range_scan_table_column_entry(
 
     out
 }
-
-fn range_scan_columns_entries() {}

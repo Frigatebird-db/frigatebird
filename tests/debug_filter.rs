@@ -92,7 +92,7 @@ fn debug_predicate_matrix_order() {
         }
     }
 
-    let ours = harness.executor.query(&sql).expect("satori query");
+    let ours = harness.executor.query(&sql).expect("frigatebird query");
     let duck = query_duckdb(fixture.duckdb(), &sql).expect("duckdb query");
 
     let ours_rows = ours.into_rows();

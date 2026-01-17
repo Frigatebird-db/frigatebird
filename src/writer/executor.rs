@@ -388,10 +388,6 @@ impl WorkerContext {
             return;
         }
         let total_rows = rows.len();
-        eprintln!(
-            "[flush_page_group] table={}, initial rows={}",
-            table, total_rows
-        );
 
         let catalog = match self.page_handler.table_catalog(table) {
             Some(catalog) => catalog,
@@ -437,10 +433,6 @@ impl WorkerContext {
         rows.sort_unstable_by(|left, right| compare_rows(left, right, &sort_key_ordinals));
 
         self.extend_partial_tail(table, &columns, catalog.rows_per_page_group, &mut rows);
-        eprintln!(
-            "[flush_page_group] after extend_partial_tail, rows remaining={}",
-            rows.len()
-        );
 
         let full_group_size = catalog.rows_per_page_group as usize;
         while rows.len() >= full_group_size {
@@ -565,11 +557,6 @@ impl WorkerContext {
         }
 
         if !staged.is_empty() {
-            eprintln!(
-                "[extend_partial_tail] publishing {} staged columns, extending with {} rows",
-                staged.len(),
-                take
-            );
             self.publish_staged_columns(table, staged);
             rows.drain(0..take);
         }
@@ -665,7 +652,6 @@ impl WorkerContext {
 
         if !staged.is_empty() {
             self.publish_staged_columns(table, staged);
-            println!("writer: flushed {} rows into table {}", row_count, table);
         }
     }
 }

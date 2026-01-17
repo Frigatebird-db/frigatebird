@@ -2,11 +2,11 @@
 
 ## Overview
 
-Satori is a columnar SQL database implementing a **push-based Volcano execution model** with **morsel-driven parallelism**. Data flows through pipelines where operators push batches downstream via channels, enabling parallel execution across multiple workers.
+Frigatebird is a columnar SQL database implementing a **push-based Volcano execution model** with **morsel-driven parallelism**. Data flows through pipelines where operators push batches downstream via channels, enabling parallel execution across multiple workers.
 
 ```
                                     ┌─────────────────────────────────────┐
-                                    │           SATORI                    │
+                                    │           FRIGATEBIRD                    │
                                     │    Columnar Analytical Database     │
                                     └─────────────────────────────────────┘
 
@@ -56,7 +56,7 @@ Satori is a columnar SQL database implementing a **push-based Volcano execution 
 
 ### How SQL Maps to Pipeline Steps
 
-Satori compiles SQL queries into pipelines where **each filter column becomes a pipeline step**:
+Frigatebird compiles SQL queries into pipelines where **each filter column becomes a pipeline step**:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -229,12 +229,12 @@ Satori compiles SQL queries into pipelines where **each filter column becomes a 
 
 ## Push-Based Volcano Model
 
-Traditional Volcano uses **pull-based** iteration where the root operator pulls tuples from children. Satori inverts this with a **push-based** model:
+Traditional Volcano uses **pull-based** iteration where the root operator pulls tuples from children. Frigatebird inverts this with a **push-based** model:
 
 ```
     ┌─────────────────────────────────────────────────────────────────────────────────────┐
     │                                                                                     │
-    │   PULL-BASED (Traditional Volcano)         PUSH-BASED (Satori)                      │
+    │   PULL-BASED (Traditional Volcano)         PUSH-BASED (Frigatebird)                      │
     │                                                                                     │
     │        Output                                    Root Step                          │
     │           │                                          │                              │
@@ -267,7 +267,7 @@ Traditional Volcano uses **pull-based** iteration where the root operator pulls 
 
 ### Why Push-Based?
 
-| Aspect | Pull-Based | Push-Based (Satori) |
+| Aspect | Pull-Based | Push-Based (Frigatebird) |
 |--------|-----------|---------------------|
 | Control flow | Consumer requests data | Producer sends data |
 | Blocking | Consumer blocks waiting | Producer works continuously |
@@ -590,7 +590,7 @@ On Linux, all disk I/O bypasses the OS page cache using **O_DIRECT** and batches
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
 │                              DISK I/O STACK                                          │
 │                                                                                      │
-│   Traditional I/O                         Satori I/O (Linux)                         │
+│   Traditional I/O                         Frigatebird I/O (Linux)                         │
 │   ──────────────                          ──────────────────                         │
 │                                                                                      │
 │   Application                              Application                               │

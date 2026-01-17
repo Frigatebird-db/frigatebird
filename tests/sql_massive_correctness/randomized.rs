@@ -55,7 +55,7 @@ fn debug_distinct_nullable_text_case() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
     let sql = "SELECT DISTINCT nullable_text, segment FROM massive_correctness WHERE quantity BETWEEN 2873 AND 3411 ORDER BY quantity DESC, id ASC";
-    let ours = executor.query(sql).expect("satori query failed");
+    let ours = executor.query(sql).expect("frigatebird query failed");
     println!("ours rows:\n{}", ours);
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(sql).expect("prep duckdb");
@@ -90,7 +90,7 @@ fn debug_window_case() {
     let fixture = MassiveFixture::install_with_config(&harness.executor, config);
     let ExecutorHarness { executor, .. } = harness;
     let sql = "SELECT tenant, quantity, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY created_at) AS rn, SUM(quantity) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_qty, LAG(price, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lag_price, LEAD(net_amount, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lead_net FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL QUALIFY rn <= 8 ORDER BY tenant, rn";
-    let ours = executor.query(sql).expect("satori query failed");
+    let ours = executor.query(sql).expect("frigatebird query failed");
     println!("ours rows:\n{}", ours);
     if let Some(batch) = ours.batches.first() {
         println!("raw running_qty column:");
@@ -128,7 +128,7 @@ fn debug_window_case() {
     let order_sql = "SELECT id, quantity, price, net_amount FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL ORDER BY quantity ASC, id ASC";
     let ordered = executor
         .query(order_sql)
-        .expect("satori order query failed");
+        .expect("frigatebird order query failed");
     println!("ours order rows:\n{}", ordered);
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(order_sql).expect("duckdb prepare");
@@ -153,7 +153,7 @@ fn debug_window_case() {
     let alpha_window_sql = "SELECT id, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY quantity) AS q_rn FROM massive_correctness WHERE tenant = 'alpha' AND price >= 57.90 ORDER BY q_rn";
     let ours = executor
         .query(alpha_window_sql)
-        .expect("satori alpha window query failed");
+        .expect("frigatebird alpha window query failed");
     println!("ours alpha window rows:\n{}", ours);
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(alpha_window_sql).expect("duckdb prepare");
@@ -178,7 +178,7 @@ fn debug_window_case() {
     let alpha_tie_sql = "SELECT id, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY quantity) AS q_rn FROM massive_correctness WHERE tenant = 'alpha' AND price >= 57.90 AND quantity = 4435 ORDER BY q_rn";
     let ours = executor
         .query(alpha_tie_sql)
-        .expect("satori alpha tie query failed");
+        .expect("frigatebird alpha tie query failed");
     println!("ours alpha tie rows:\n{}", ours);
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(alpha_tie_sql).expect("duckdb prepare");
@@ -203,7 +203,7 @@ fn debug_window_case() {
     let alpha_input_sql = "SELECT id, quantity, price FROM massive_correctness WHERE tenant = 'alpha' AND price >= 57.90 AND quantity = 4435";
     let ours = executor
         .query(alpha_input_sql)
-        .expect("satori alpha input query failed");
+        .expect("frigatebird alpha input query failed");
     println!("ours alpha input rows:\n{}", ours);
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(alpha_input_sql).expect("duckdb prepare");
@@ -228,7 +228,7 @@ fn debug_window_case() {
     let beta_input_sql = "SELECT id, quantity, price FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL AND quantity = 330";
     let ours = executor
         .query(beta_input_sql)
-        .expect("satori beta input query failed");
+        .expect("frigatebird beta input query failed");
     println!("ours beta input rows:\n{}", ours);
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(beta_input_sql).expect("duckdb prepare");
@@ -253,7 +253,7 @@ fn debug_window_case() {
     let beta_tie_sql = "SELECT id, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY quantity) AS q_rn FROM massive_correctness WHERE tenant = 'beta' AND segment = 'consumer' AND nullable_number IS NOT NULL AND quantity = 330 ORDER BY q_rn";
     let ours = executor
         .query(beta_tie_sql)
-        .expect("satori beta tie query failed");
+        .expect("frigatebird beta tie query failed");
     println!("ours beta tie rows:\n{}", ours);
     let conn = fixture.duckdb();
     let mut stmt = conn.prepare(beta_tie_sql).expect("duckdb prepare");
@@ -366,7 +366,7 @@ fn debug_random_case_104() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
     let sql = "SELECT tenant, quantity, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY created_at) AS rn, SUM(quantity) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_qty, LAG(price, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lag_price, LEAD(net_amount, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lead_net, LAST_VALUE(description) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS last_desc FROM massive_correctness WHERE id <= 293 QUALIFY rn <= 5 ORDER BY tenant, rn";
-    let ours = executor.query(sql).expect("satori query failed");
+    let ours = executor.query(sql).expect("frigatebird query failed");
     println!("ours rows:\n{}", ours);
 
     let conn = fixture.duckdb();
@@ -393,7 +393,7 @@ fn debug_random_case_104() {
     let order_sql = "SELECT id, tenant, quantity, price, created_at, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY quantity) AS q_rn FROM massive_correctness WHERE id <= 293 AND tenant = 'beta' ORDER BY q_rn";
     let ours = executor
         .query(order_sql)
-        .expect("satori order query failed");
+        .expect("frigatebird order query failed");
     println!("ours beta q_rn rows:\n{}", ours);
 
     let conn = fixture.duckdb();
@@ -417,7 +417,7 @@ fn debug_random_case_104() {
     println!("duck beta q_rn rows: {:?}", duck_rows);
 
     let tie_sql = "SELECT id, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY quantity) AS q_rn FROM massive_correctness WHERE id <= 293 AND tenant = 'beta' AND quantity = 330 ORDER BY q_rn";
-    let ours = executor.query(tie_sql).expect("satori tie query failed");
+    let ours = executor.query(tie_sql).expect("frigatebird tie query failed");
     println!("ours beta tie rows:\n{}", ours);
 
     let conn = fixture.duckdb();
@@ -468,7 +468,7 @@ fn debug_qualify_semantics_case_3() {
     let (harness, fixture) = install_fixture();
     let ExecutorHarness { executor, .. } = harness;
     let sql = "SELECT tenant, quantity, quantity, price, ROW_NUMBER() OVER (PARTITION BY tenant ORDER BY created_at) AS rn, SUM(quantity) OVER (PARTITION BY tenant ORDER BY quantity ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_qty, LAG(price, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lag_price, LEAD(net_amount, 1, 0) OVER (PARTITION BY tenant ORDER BY quantity) AS lead_net FROM massive_correctness WHERE price >= 57.90 QUALIFY rn <= 5 ORDER BY tenant, rn";
-    let ours = executor.query(sql).expect("satori query failed");
+    let ours = executor.query(sql).expect("frigatebird query failed");
     println!("ours rows:\n{}", ours);
 
     let conn = fixture.duckdb();

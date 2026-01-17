@@ -1,8 +1,8 @@
-use idk_uwu_ig::cache::page_cache::{
+use frigatebird::cache::page_cache::{
     CacheLifecycle, PageCache, PageCacheEntryCompressed, PageCacheEntryUncompressed,
 };
-use idk_uwu_ig::entry::Entry;
-use idk_uwu_ig::page::Page;
+use frigatebird::entry::Entry;
+use frigatebird::page::Page;
 use std::sync::{Arc, Mutex};
 
 fn create_test_page(id: usize) -> Page {
@@ -218,7 +218,7 @@ fn page_cache_compressed_entry_creation() {
 fn page_cache_uncompressed_entry_creation() {
     let page = create_test_page(1);
     let uncompressed =
-        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String);
+        PageCacheEntryUncompressed::from_disk_page(page, frigatebird::sql::DataType::String);
     assert_eq!(uncompressed.page.len(), 1);
 }
 
@@ -263,7 +263,7 @@ fn page_cache_clone_entries() {
 
     let page = create_test_page(1);
     let uncompressed =
-        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String);
+        PageCacheEntryUncompressed::from_disk_page(page, frigatebird::sql::DataType::String);
     let cloned_unc = uncompressed.clone();
     assert_eq!(uncompressed.page.len(), cloned_unc.page.len());
 }

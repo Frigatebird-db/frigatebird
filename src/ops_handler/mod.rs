@@ -1,5 +1,3 @@
-// API contracts; callers supply table + column identifiers.
-
 mod create;
 mod delete;
 mod helpers;
@@ -8,7 +6,6 @@ mod read;
 mod scan;
 mod update;
 
-// Re-export public functions
 pub use create::create_table_from_plan;
 pub use delete::delete_row;
 pub use insert::{

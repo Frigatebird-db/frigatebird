@@ -1,15 +1,15 @@
-use idk_uwu_ig::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
-use idk_uwu_ig::entry::Entry;
-use idk_uwu_ig::helpers::compressor::Compressor;
-use idk_uwu_ig::metadata_store::{PageDirectory, TableMetaStore};
-use idk_uwu_ig::ops_handler::{
+use frigatebird::cache::page_cache::{PageCache, PageCacheEntryUncompressed};
+use frigatebird::entry::Entry;
+use frigatebird::helpers::compressor::Compressor;
+use frigatebird::metadata_store::{PageDirectory, TableMetaStore};
+use frigatebird::ops_handler::{
     create_table_from_plan, range_scan_column_entry, update_column_entry, upsert_data_into_column,
     upsert_data_into_table_column,
 };
-use idk_uwu_ig::page::Page;
-use idk_uwu_ig::page_handler::page_io::PageIO;
-use idk_uwu_ig::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
-use idk_uwu_ig::sql::{ColumnSpec, CreateTablePlan};
+use frigatebird::page::Page;
+use frigatebird::page_handler::page_io::PageIO;
+use frigatebird::page_handler::{PageFetcher, PageHandler, PageLocator, PageMaterializer};
+use frigatebird::sql::{ColumnSpec, CreateTablePlan};
 use std::sync::{Arc, RwLock};
 
 fn setup_page_handler() -> Arc<PageHandler> {
@@ -395,7 +395,7 @@ fn sorted_upsert_inserts_in_order() {
     page.add_entry(Entry::new("30"));
     page_handler.write_back_uncompressed(
         &descriptor.id,
-        PageCacheEntryUncompressed::from_disk_page(page, idk_uwu_ig::sql::DataType::String),
+        PageCacheEntryUncompressed::from_disk_page(page, frigatebird::sql::DataType::String),
     );
 
     let inserted = upsert_data_into_table_column(&page_handler, "users", "score", "20")

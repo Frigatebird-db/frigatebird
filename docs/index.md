@@ -1,4 +1,4 @@
-# Satori Documentation Index
+# Frigatebird Documentation Index
 
 ## Quick Navigation
 
@@ -13,7 +13,7 @@
 
 ## Reading Paths
 
-### "I want to understand how Satori works" (30 min)
+### "I want to understand how Frigatebird works" (30 min)
 ```
 README.md ──▶ Architecture.md (first half) ──▶ Data Flow (Pipeline at a Glance)
 ```

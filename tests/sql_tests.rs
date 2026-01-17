@@ -1,9 +1,9 @@
-use idk_uwu_ig::metadata_store::{
+use frigatebird::metadata_store::{
     ColumnDefinition, PageDirectory, TableDefinition, TableMetaStore,
 };
-use idk_uwu_ig::sql::parser::parse_sql;
-use idk_uwu_ig::sql::planner::plan_statement;
-use idk_uwu_ig::sql::types::DataType;
+use frigatebird::sql::parser::parse_sql;
+use frigatebird::sql::planner::plan_statement;
+use frigatebird::sql::types::DataType;
 use std::sync::{Arc, RwLock};
 
 fn test_directory() -> Arc<PageDirectory> {
