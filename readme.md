@@ -15,7 +15,11 @@ Frigatebird is an embedded columnar database that implements a **push-based Volc
 
 ## Architecture
 
-![architecture](./assets/architecture.png)
+<div>
+  <img src="./assets/architecture.png" alt="architecture" width="65%">
+</div>
+
+<!-- ![architecture](./assets/architecture.png) -->
 
 ### Key Features
 
